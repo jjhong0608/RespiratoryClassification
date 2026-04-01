@@ -1,0 +1,112 @@
+{
+  "run_name": "cv_5fold_lung_sound_harmonic",
+  "seed": 42,
+  "device": "mps",
+  "output_dir": "checkpoints/for_crackle/bandpass",
+  "top_k": 3,
+  "pretrained": {
+    "name_or_path": "tiny",
+    "load_encoder_only": true,
+    "strict": true,
+    "freeze_encoder": true,
+    "download_root": null
+  },
+  "folds": [
+    {
+      "name": "fold_0",
+      "train_dirs": [
+        "datasets/for_crackle/folds/fold_1",
+        "datasets/for_crackle/folds/fold_2",
+        "datasets/for_crackle/folds/fold_3",
+        "datasets/for_crackle/folds/fold_4"
+      ],
+      "val_dirs": [
+        "datasets/for_crackle/folds/fold_0"
+      ]
+    },
+    {
+      "name": "fold_1",
+      "train_dirs": [
+        "datasets/for_crackle/folds/fold_0",
+        "datasets/for_crackle/folds/fold_2",
+        "datasets/for_crackle/folds/fold_3",
+        "datasets/for_crackle/folds/fold_4"
+      ],
+      "val_dirs": [
+        "datasets/for_crackle/folds/fold_1"
+      ]
+    },
+    {
+      "name": "fold_2",
+      "train_dirs": [
+        "datasets/for_crackle/folds/fold_0",
+        "datasets/for_crackle/folds/fold_1",
+        "datasets/for_crackle/folds/fold_3",
+        "datasets/for_crackle/folds/fold_4"
+      ],
+      "val_dirs": [
+        "datasets/for_crackle/folds/fold_2"
+      ]
+    },
+    {
+      "name": "fold_3",
+      "train_dirs": [
+        "datasets/for_crackle/folds/fold_0",
+        "datasets/for_crackle/folds/fold_1",
+        "datasets/for_crackle/folds/fold_2",
+        "datasets/for_crackle/folds/fold_4"
+      ],
+      "val_dirs": [
+        "datasets/for_crackle/folds/fold_3"
+      ]
+    },
+    {
+      "name": "fold_4",
+      "train_dirs": [
+        "datasets/for_crackle/folds/fold_0",
+        "datasets/for_crackle/folds/fold_1",
+        "datasets/for_crackle/folds/fold_2",
+        "datasets/for_crackle/folds/fold_3"
+      ],
+      "val_dirs": [
+        "datasets/for_crackle/folds/fold_4"
+      ]
+    }
+  ],
+  "label_to_index": {
+    "non_crackle": 0,
+    "crackle": 1
+  },
+  "sample_rate": 16000,
+  "clip_seconds": 30.0,
+  "source_type": "harmonic",
+  "bandpass": {
+    "enabled": true,
+    "low_freq": 250.0,
+    "high_freq": 1000.0,
+    "q": 0.707
+  },
+  "batch_size": 4,
+  "num_workers": 0,
+  "model": {
+    "n_mels": 80,
+    "n_audio_ctx": 1500,
+    "n_audio_state": 384,
+    "n_audio_head": 6,
+    "n_audio_layer": 4,
+    "pooling": "mean",
+    "use_weighted_layer_sum": false,
+    "classifier_proj_size": 256
+  },
+  "training": {
+    "epochs": 100,
+    "learning_rate": 0.01,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.05,
+    "max_grad_norm": 1.0
+  },
+  "imbalance": {
+    "auto_pos_weight": true,
+    "sampler": "weighted_random"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "device": "mps",
+  "checkpoint_path": "/Users/jjhong0608/Documents/AudioData/Whisper/checkpoints/for_wheeze/remove_crackle/to_give_CNUH/cv_5fold_lung_sound_original/fold_4/best_loss_0.544140.pt",
+  "data": {
+    "eval_dirs": [
+      "datasets/for_wheeze/remove_crackle/test"
+    ],
+    "label_to_index": {
+      "non_wheeze": 0,
+      "wheeze": 1
+    },
+    "sample_rate": 16000,
+    "clip_seconds": 30.0,
+    "source_type": "original",
+    "bandpass": {
+      "enabled": false,
+      "low_freq": 500.0,
+      "high_freq": 4000.0,
+      "q": 0.707
+    },
+    "batch_size": 128,
+    "num_workers": 0
+  },
+  "threshold": {
+    "manual": 0.5
+  },
+  "unsafe_pickle_load": false
+}
