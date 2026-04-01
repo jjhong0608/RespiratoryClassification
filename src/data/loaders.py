@@ -25,7 +25,10 @@ def build_dataset(
         datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     )
     if len(cast(Sized, ds)) == 0:
-        raise ValueError(f"No .wav files found under: {list(roots)}")
+        raise ValueError(
+            f"No usable .wav files found under: {list(roots)} "
+            "(files may be missing or skipped due to unknown labels)."
+        )
     return ds
 
 
