@@ -7,18 +7,17 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch import Tensor, nn
+from torch import nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.evaluation.thresholds import (
-    ThresholdOptimizationConfig,
-    ThresholdOptimizationResult,
-    ThresholdOptimizer,
-)
-from src.training.metrics import RunningConfusionMatrix
+from src.data.loaders import BagBatch
+from src.evaluation.diagnostics import build_diagnostic_rows, write_diagnostics_jsonl
+from src.evaluation.metrics import EvalMetrics, MetricsComputer
+from src.models.model import MILModelOutput
 from src.training.scheduler import WarmupCosineScheduler
+from src.utils.config import AnalysisConfig
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
 
@@ -32,25 +31,19 @@ class TrainerConfig:
     warmup_ratio: float
     max_grad_norm: float
     top_k: int
-    num_classes: int
     run_dir: Path
     pos_weight: float | None = None
-    threshold_optimization: ThresholdOptimizationConfig = field(
-        default_factory=ThresholdOptimizationConfig
-    )
-
-
-@dataclass(frozen=True)
-class BinaryEpochOutputs:
-    targets: np.ndarray
-    positive_scores: np.ndarray
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
 
 
 @dataclass(frozen=True)
 class EpochResult:
     loss: float
-    stats: RunningConfusionMatrix
-    binary_outputs: BinaryEpochOutputs | None = None
+    metrics: EvalMetrics
+    probabilities: np.ndarray
+    predictions: np.ndarray
+    targets: np.ndarray
+    diagnostics: list[dict[str, Any]]
 
 
 class CheckpointManager(LoggingMixin):
@@ -62,24 +55,34 @@ class CheckpointManager(LoggingMixin):
     def save_last(self, state: dict[str, Any]) -> Path:
         path = self.run_dir / "last.pt"
         torch.save(state, path)
-        self.logger.info(f"Saved last checkpoint: {path}")
+        self.logger.info("Saved last checkpoint: %s", path)
         return path
 
     def maybe_save_best(self, val_loss: float, state: dict[str, Any]) -> None:
         path = self.run_dir / f"best_loss_{val_loss:.6f}.pt"
         torch.save(state, path)
         self._best.append((val_loss, path))
-        self._best.sort(key=lambda x: x[0])
-        rank = next(i for i, (loss, p) in enumerate(self._best, start=1) if p == path)
+        self._best.sort(key=lambda item: item[0])
+        rank = next(
+            index
+            for index, (_, item_path) in enumerate(self._best, start=1)
+            if item_path == path
+        )
         self.logger.info(
-            f"Saved best checkpoint (rank {rank}/{self.top_k}): {path} (val_loss={val_loss:.6f})"
+            "Saved best checkpoint (rank %d/%d): %s (val_loss=%.6f)",
+            rank,
+            self.top_k,
+            path,
+            val_loss,
         )
         while len(self._best) > self.top_k:
             _, to_remove = self._best.pop(-1)
             with suppress(FileNotFoundError):
                 to_remove.unlink()
             self.logger.info(
-                f"Removed checkpoint (exceeds top_k={self.top_k}): {to_remove}"
+                "Removed checkpoint (exceeds top_k=%d): %s",
+                self.top_k,
+                to_remove,
             )
 
 
@@ -88,39 +91,45 @@ class Trainer(LoggingMixin):
         self.cfg = cfg
         Fs.ensure_dir(cfg.run_dir)
         self.ckpt = CheckpointManager(cfg.run_dir, cfg.top_k)
+        self._criterion = nn.BCEWithLogitsLoss(
+            pos_weight=None
+            if cfg.pos_weight is None
+            else torch.tensor(cfg.pos_weight, dtype=torch.float32)
+        )
+
+    def _criterion_on(self, device: torch.device) -> nn.BCEWithLogitsLoss:
+        if self.cfg.pos_weight is None:
+            return self._criterion
+        return nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor(
+                self.cfg.pos_weight, device=device, dtype=torch.float32
+            )
+        )
 
     def _epoch(
         self,
         model: nn.Module,
-        loader: DataLoader[tuple[Tensor, Tensor]],
+        loader: DataLoader[BagBatch],
+        *,
         optimizer: torch.optim.Optimizer | None,
         scheduler: WarmupCosineScheduler | None,
         device: torch.device,
     ) -> EpochResult:
-        use_bce = self.cfg.num_classes == 2
-        ce_loss = nn.CrossEntropyLoss()
-        pos_weight = None
-        if self.cfg.pos_weight is not None:
-            pos_weight = torch.tensor(self.cfg.pos_weight, device=device)
-        bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        criterion = self._criterion_on(device)
         total_loss = 0.0
-        cm = RunningConfusionMatrix(num_classes=self.cfg.num_classes)
-        binary_targets: list[int] = []
-        binary_scores: list[float] = []
-        for x, y in tqdm(loader, leave=False):
-            x = x.to(device)
-            y = y.to(device)
-            logits = model(x)
-            if use_bce:
-                binary_logit = (logits[:, 1] - logits[:, 0]).view(-1)
-                loss = bce_loss(binary_logit, y.to(dtype=binary_logit.dtype))
-                positive_scores = torch.sigmoid(binary_logit)
-                preds = (positive_scores >= 0.5).to(torch.long)
-                binary_targets.extend(y.detach().cpu().tolist())
-                binary_scores.extend(positive_scores.detach().cpu().tolist())
-            else:
-                loss = ce_loss(logits, y)
-                preds = logits.argmax(dim=-1)
+        total_examples = 0
+        targets: list[int] = []
+        probabilities: list[float] = []
+        predictions: list[int] = []
+        diagnostics: list[dict[str, Any]] = []
+
+        for batch in tqdm(loader, leave=False):
+            batch = batch.to(device)
+            output = model(batch.segments, batch.instance_mask)
+            if not isinstance(output, MILModelOutput):
+                raise TypeError("MIL model must return MILModelOutput")
+            bag_logits = output.bag_logits
+            loss = criterion(bag_logits, batch.labels)
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -128,44 +137,45 @@ class Trainer(LoggingMixin):
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
-            total_loss += float(loss.item()) * float(y.numel())
-            cm.update(preds.detach().cpu(), y.detach().cpu())
-        avg_loss = total_loss / float(max(1, cm.total))
-        binary_outputs = None
-        if use_bce:
-            binary_outputs = BinaryEpochOutputs(
-                targets=np.asarray(binary_targets, dtype=np.int64),
-                positive_scores=np.asarray(binary_scores, dtype=np.float64),
-            )
-        return EpochResult(loss=avg_loss, stats=cm, binary_outputs=binary_outputs)
 
-    def _stats_from_binary_predictions(
-        self,
-        targets: np.ndarray,
-        positive_scores: np.ndarray,
-        threshold: float,
-    ) -> RunningConfusionMatrix:
-        preds = ThresholdOptimizer.predict(positive_scores, threshold)
-        cm = RunningConfusionMatrix(num_classes=2)
-        cm.update(torch.from_numpy(preds), torch.from_numpy(targets))
-        return cm
+            batch_probs = torch.sigmoid(bag_logits.detach())
+            batch_preds = (batch_probs >= 0.5).to(torch.long)
+            targets.extend(batch.labels.detach().cpu().to(torch.long).tolist())
+            probabilities.extend(batch_probs.cpu().tolist())
+            predictions.extend(batch_preds.cpu().tolist())
 
-    @staticmethod
-    def _optimize_threshold(
-        cfg: ThresholdOptimizationConfig,
-        outputs: BinaryEpochOutputs | None,
-    ) -> ThresholdOptimizationResult | None:
-        if not cfg.enabled or outputs is None:
-            return None
-        return ThresholdOptimizer(outputs.targets, outputs.positive_scores).optimize(
-            cfg.metric
+            total_examples += int(batch.labels.numel())
+            total_loss += float(loss.item()) * float(batch.labels.numel())
+
+            if any(asdict(self.cfg.analysis.outputs).values()):
+                diagnostics.extend(
+                    build_diagnostic_rows(
+                        batch,
+                        output,
+                        probabilities=batch_probs.cpu(),
+                        predicted_labels=batch_preds.cpu(),
+                        analysis=self.cfg.analysis.outputs,
+                    )
+                )
+
+        target_arr = np.asarray(targets, dtype=np.int64)
+        prob_arr = np.asarray(probabilities, dtype=np.float64)
+        pred_arr = np.asarray(predictions, dtype=np.int64)
+        metrics = MetricsComputer.compute(target_arr, pred_arr, prob_arr)
+        return EpochResult(
+            loss=total_loss / float(max(1, total_examples)),
+            metrics=metrics,
+            probabilities=prob_arr,
+            predictions=pred_arr,
+            targets=target_arr,
+            diagnostics=diagnostics,
         )
 
     def fit(
         self,
         model: nn.Module,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
+        train_loader: DataLoader[BagBatch],
+        val_loader: DataLoader[BagBatch],
         optimizer: torch.optim.Optimizer | None = None,
         *,
         extra_state: dict[str, Any] | None = None,
@@ -181,138 +191,88 @@ class Trainer(LoggingMixin):
         total_steps = self.cfg.epochs * max(1, len(train_loader))
         warmup_steps = int(total_steps * self.cfg.warmup_ratio)
         scheduler = WarmupCosineScheduler(optimizer, warmup_steps, total_steps)
-        if self.cfg.pos_weight is not None and self.cfg.num_classes == 2:
-            self.logger.info(f"Using BCE pos_weight={self.cfg.pos_weight:.6f}")
 
-        best_val_loss = float("inf")
         train_losses: list[float] = []
         val_losses: list[float] = []
         for epoch in range(1, self.cfg.epochs + 1):
             model.train()
             train_result = self._epoch(
-                model, train_loader, optimizer, scheduler, device
+                model,
+                train_loader,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                device=device,
             )
-            train_loss = train_result.loss
-            train_stats = train_result.stats
-            train_losses.append(train_loss)
-            lrs = [float(group["lr"]) for group in optimizer.param_groups]
-            if len(lrs) == 1:
-                lr_str = f"{lrs[0]:.8f}"
-            else:
-                lr_str = "[" + ", ".join(f"{lr:.8f}" for lr in lrs) + "]"
-
             model.eval()
             with torch.no_grad():
-                val_result = self._epoch(model, val_loader, None, None, device)
-            val_loss = val_result.loss
-            val_stats = val_result.stats
-            val_losses.append(val_loss)
+                val_result = self._epoch(
+                    model,
+                    val_loader,
+                    optimizer=None,
+                    scheduler=None,
+                    device=device,
+                )
 
-            threshold_result = self._optimize_threshold(
-                self.cfg.threshold_optimization,
-                val_result.binary_outputs,
+            train_losses.append(train_result.loss)
+            val_losses.append(val_result.loss)
+            lrs = [float(group["lr"]) for group in optimizer.param_groups]
+            lr_str = (
+                f"{lrs[0]:.8f}"
+                if len(lrs) == 1
+                else "[" + ", ".join(f"{lr:.8f}" for lr in lrs) + "]"
             )
-            val_display_stats = val_stats
-            threshold_log = ""
-            if threshold_result is not None:
-                val_binary_outputs = val_result.binary_outputs
-                if val_binary_outputs is None:
-                    raise RuntimeError(
-                        "Binary threshold optimization requires validation scores"
-                    )
-                val_display_stats = self._stats_from_binary_predictions(
-                    val_binary_outputs.targets,
-                    val_binary_outputs.positive_scores,
-                    threshold_result.selected_threshold,
-                )
-                if threshold_result.applied:
-                    threshold_log = (
-                        f" | Val Threshold[{threshold_result.selected_metric}]: "
-                        f"{threshold_result.selected_threshold:.4f} "
-                        f"(score={threshold_result.selected_score:.4f})"
-                    )
-                else:
-                    threshold_log = (
-                        f" | Val Threshold[{threshold_result.selected_metric}]: "
-                        f"{threshold_result.selected_threshold:.4f} "
-                        f"(fallback: {threshold_result.reason})"
-                    )
-
-            if self.cfg.num_classes == 2:
-                train_tp, train_fp, train_fn, _ = train_stats.binary_counts()
-                val_tp, val_fp, val_fn, _ = val_display_stats.binary_counts()
-
-                train_precision = train_stats.binary_precision()
-                train_recall = train_stats.binary_recall()
-                val_precision = val_display_stats.binary_precision()
-                val_recall = val_display_stats.binary_recall()
-
-                train_precision_str = (
-                    f"{train_precision:.4f} [{train_tp}/{train_tp + train_fp}]"
-                )
-                train_recall_str = (
-                    f"{train_recall:.4f} [{train_tp}/{train_tp + train_fn}]"
-                )
-                val_precision_str = f"{val_precision:.4f} [{val_tp}/{val_tp + val_fp}]"
-                val_recall_str = f"{val_recall:.4f} [{val_tp}/{val_tp + val_fn}]"
-            else:
-                train_precision = train_stats.macro_precision()
-                train_recall = train_stats.macro_recall()
-                val_precision = val_display_stats.macro_precision()
-                val_recall = val_display_stats.macro_recall()
-                train_precision_str = f"{train_precision:.4f}"
-                train_recall_str = f"{train_recall:.4f}"
-                val_precision_str = f"{val_precision:.4f}"
-                val_recall_str = f"{val_recall:.4f}"
-
             self.logger.info(
-                f"Epoch {epoch}/{self.cfg.epochs} | "
-                f"LR: {lr_str} | "
-                f"Train Loss: {train_loss:.4f} | "
-                f"Train Acc: {train_stats.accuracy:.4f} [{train_stats.correct}/{train_stats.total}] | "
-                f"Train Recall: {train_recall_str} | "
-                f"Train Precision: {train_precision_str} | "
-                f"Val Loss: {val_loss:.4f} | "
-                f"Val Acc: {val_display_stats.accuracy:.4f} [{val_display_stats.correct}/{val_display_stats.total}] | "
-                f"Val Recall: {val_recall_str} | "
-                f"Val Precision: {val_precision_str}"
-                f"{threshold_log}"
+                "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
+                "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
+                "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
+                "Val Precision: %.4f | Val F1: %.4f | Val Balanced Acc: %.4f",
+                epoch,
+                self.cfg.epochs,
+                lr_str,
+                train_result.loss,
+                train_result.metrics.accuracy,
+                train_result.metrics.recall,
+                train_result.metrics.precision,
+                train_result.metrics.f1_score,
+                val_result.loss,
+                val_result.metrics.accuracy,
+                val_result.metrics.recall,
+                val_result.metrics.precision,
+                val_result.metrics.f1_score,
+                val_result.metrics.balanced_accuracy,
             )
+
+            diagnostics_path = None
+            if val_result.diagnostics:
+                diagnostics_path = write_diagnostics_jsonl(
+                    val_result.diagnostics,
+                    self.cfg.run_dir / "diagnostics" / f"val_epoch_{epoch:03d}.jsonl",
+                )
+                self.logger.info("Saved validation diagnostics: %s", diagnostics_path)
+
+            model_cfg = getattr(model, "cfg", None)
+            dims = None
+            if model_cfg is not None:
+                encoder_dims = getattr(model_cfg, "encoder", None)
+                if encoder_dims is not None and is_dataclass(encoder_dims):
+                    dims = asdict(encoder_dims)
 
             state: dict[str, Any] = {
                 "epoch": epoch,
+                "dims": dims,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "num_classes": self.cfg.num_classes,
                 "train_losses": train_losses,
                 "val_losses": val_losses,
-                "threshold_optimization_cfg": asdict(self.cfg.threshold_optimization),
-                "threshold_optimization_result": (
-                    threshold_result.to_dict() if threshold_result is not None else None
-                ),
+                "train_metrics": [train_result.metrics.to_dict()],
+                "val_metrics": [result.to_dict() for result in [val_result.metrics]],
+                "diagnostics_path": str(diagnostics_path) if diagnostics_path else None,
             }
             if extra_state:
-                state.update(self._sanitize_extra_state(extra_state))
+                for key, value in extra_state.items():
+                    if is_dataclass(value) and not isinstance(value, type):
+                        state[key] = asdict(value)
+                    else:
+                        state[key] = value
             self.ckpt.save_last(state)
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-            self.ckpt.maybe_save_best(val_loss, state)
-
-    @staticmethod
-    def _sanitize_extra_state(extra_state: dict[str, Any]) -> dict[str, Any]:
-        def sanitize(value: Any) -> Any:
-            if is_dataclass(value) and not isinstance(value, type):
-                return sanitize(asdict(value))
-            if isinstance(value, Path):
-                return str(value)
-            if isinstance(value, dict):
-                return {str(k): sanitize(v) for k, v in value.items()}
-            if isinstance(value, (list, tuple)):
-                return [sanitize(v) for v in value]
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                return value
-            return str(value)
-
-        return {str(k): sanitize(v) for k, v in extra_state.items()}
+            self.ckpt.maybe_save_best(val_result.loss, state)

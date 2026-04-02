@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 from src.models.whisper_encoder import WhisperEncoderDims
-from src.utils.config import PretrainedConfig
+from src.utils.config import EncoderConfig
 from src.utils.logging import LoggingMixin
 
 _OPENAI_WHISPER_MODELS: dict[str, str] = {
@@ -83,139 +83,145 @@ class OpenAIWhisperCheckpointLoader(LoggingMixin):
     def resolve_checkpoint_path(
         self, name_or_path: str, download_root: str | None
     ) -> Path:
-        p = Path(name_or_path)
-        if p.exists():
-            return p
+        local_path = Path(name_or_path)
+        if local_path.exists():
+            return local_path
         if name_or_path in _OPENAI_WHISPER_MODELS:
             root = (
                 Path(download_root) if download_root else self._default_download_root()
             )
-            url = _OPENAI_WHISPER_MODELS[name_or_path]
-            return self._download(url, root)
+            return self._download(_OPENAI_WHISPER_MODELS[name_or_path], root)
         raise ValueError(
-            f"Unknown pretrained '{name_or_path}'. "
-            f"Use a local .pt file or one of: {self.available_models()}"
+            f"Unknown pretrained '{name_or_path}'. Use a local .pt file or one of: {self.available_models()}"
         )
 
     def load_checkpoint(self, path: Path) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"map_location": "cpu"}
-        if "weights_only" in torch.load.__code__.co_varnames:  # pragma: no cover
+        if "weights_only" in torch.load.__code__.co_varnames:
             kwargs["weights_only"] = True
-        ckpt = torch.load(path, **kwargs)
-        if not isinstance(ckpt, dict):
+        checkpoint = torch.load(path, **kwargs)
+        if not isinstance(checkpoint, dict):
             raise TypeError("Expected checkpoint dict")
-        if "dims" not in ckpt or "model_state_dict" not in ckpt:
+        if "dims" not in checkpoint or "model_state_dict" not in checkpoint:
             raise KeyError("Checkpoint must contain `dims` and `model_state_dict`")
-        return ckpt
+        return checkpoint
 
     def inspect_encoder_dims(
-        self, name_or_path: str, *, download_root: str | None = None
+        self,
+        name_or_path: str,
+        *,
+        download_root: str | None = None,
     ) -> WhisperEncoderDims:
-        ckpt_path = self.resolve_checkpoint_path(name_or_path, download_root)
-        ckpt = self.load_checkpoint(ckpt_path)
-        dims = ckpt["dims"]
-        if not isinstance(dims, dict):
+        checkpoint_path = self.resolve_checkpoint_path(name_or_path, download_root)
+        checkpoint = self.load_checkpoint(checkpoint_path)
+        raw_dims = checkpoint["dims"]
+        if not isinstance(raw_dims, dict):
             raise TypeError("checkpoint['dims'] must be a dict")
-        required = [
-            "n_mels",
-            "n_audio_ctx",
-            "n_audio_state",
-            "n_audio_head",
-            "n_audio_layer",
-        ]
-        missing = [k for k in required if k not in dims]
-        if missing:
-            raise KeyError(f"Checkpoint dims missing keys: {missing}")
         return WhisperEncoderDims(
-            n_mels=int(dims["n_mels"]),
-            n_audio_ctx=int(dims["n_audio_ctx"]),
-            n_audio_state=int(dims["n_audio_state"]),
-            n_audio_head=int(dims["n_audio_head"]),
-            n_audio_layer=int(dims["n_audio_layer"]),
+            n_mels=int(raw_dims["n_mels"]),
+            n_audio_ctx=int(raw_dims["n_audio_ctx"]),
+            n_audio_state=int(raw_dims["n_audio_state"]),
+            n_audio_head=int(raw_dims["n_audio_head"]),
+            n_audio_layer=int(raw_dims["n_audio_layer"]),
         )
 
     def _validate_encoder_dims(
-        self, dims: dict[str, Any], target: WhisperEncoderDims
+        self,
+        checkpoint_dims: dict[str, Any],
+        target_dims: WhisperEncoderDims,
     ) -> None:
-        required = [
-            "n_mels",
-            "n_audio_ctx",
-            "n_audio_state",
-            "n_audio_head",
-            "n_audio_layer",
-        ]
-        missing = [k for k in required if k not in dims]
-        if missing:
-            raise KeyError(f"Checkpoint dims missing keys: {missing}")
-
         got = WhisperEncoderDims(
-            n_mels=int(dims["n_mels"]),
-            n_audio_ctx=int(dims["n_audio_ctx"]),
-            n_audio_state=int(dims["n_audio_state"]),
-            n_audio_head=int(dims["n_audio_head"]),
-            n_audio_layer=int(dims["n_audio_layer"]),
+            n_mels=int(checkpoint_dims["n_mels"]),
+            n_audio_ctx=int(checkpoint_dims["n_audio_ctx"]),
+            n_audio_state=int(checkpoint_dims["n_audio_state"]),
+            n_audio_head=int(checkpoint_dims["n_audio_head"]),
+            n_audio_layer=int(checkpoint_dims["n_audio_layer"]),
         )
-        if got != target:
+        # MIL segments can use shorter contexts than the original 30s Whisper checkpoints.
+        if (
+            got.n_mels != target_dims.n_mels
+            or got.n_audio_state != target_dims.n_audio_state
+            or got.n_audio_head != target_dims.n_audio_head
+            or got.n_audio_layer != target_dims.n_audio_layer
+        ):
             raise ValueError(
                 "Encoder dims mismatch.\n"
                 f"- checkpoint: {got}\n"
-                f"- config:      {target}\n\n"
-                "Fix: set `model.n_mels`, `model.n_audio_state`, `model.n_audio_head`, "
-                "`model.n_audio_layer` and `model.n_audio_ctx` to match the checkpoint.\n"
-                "Tip: `n_audio_ctx` is tied to audio preprocessing; for 30s @ 16kHz with "
-                "hop_length=160 and encoder stride=2, `n_audio_ctx` should be 1500.\n"
-                "Tip: run `python -m src.cli.pretrained_info --name_or_path <model_name_or_path>` "
-                "to print the checkpoint encoder dims."
+                f"- config:      {target_dims}\n\n"
+                "For MIL segmentation, `n_audio_ctx` may differ and is derived from the segment length, "
+                "but the remaining Whisper encoder dims must match."
             )
 
     def _extract_encoder_state(self, model_state: dict[str, Any]) -> dict[str, Any]:
         out: dict[str, Any] = {}
-        for k, v in model_state.items():
-            if not isinstance(k, str):
+        for key, value in model_state.items():
+            if not isinstance(key, str):
                 continue
-            if k.startswith("encoder."):
-                out[k.removeprefix("encoder.")] = v
+            stripped: str | None = None
+            if key.startswith("encoder."):
+                stripped = key.removeprefix("encoder.")
+            elif key.startswith("segment_encoder.encoder."):
+                stripped = key.removeprefix("segment_encoder.encoder.")
+            if stripped is None or stripped == "positional_embedding":
+                continue
+            out[stripped] = value
         if not out:
-            raise KeyError("No `encoder.*` keys found in checkpoint model_state_dict")
+            raise KeyError("No encoder.* keys found in checkpoint model_state_dict")
         return out
 
     def load_encoder_into(
-        self, model: Any, cfg: PretrainedConfig
+        self,
+        model: Any,
+        cfg: EncoderConfig,
+        *,
+        target_dims: WhisperEncoderDims,
     ) -> LoadedPretrainedInfo:
-        if not cfg.load_encoder_only:
-            raise ValueError("Only load_encoder_only=true is supported in this repo")
+        if cfg.pretrained_name_or_path is None:
+            raise ValueError("model.encoder.pretrained_name_or_path must be set")
         if not hasattr(model, "encoder"):
-            raise TypeError("model must expose an `encoder` attribute")
-        if not hasattr(model, "cfg") or not hasattr(model.cfg, "encoder"):
-            raise TypeError("model must expose `cfg.encoder` for encoder dims")
-        target_dims = model.cfg.encoder
-        if not isinstance(target_dims, WhisperEncoderDims):
-            raise TypeError("model.cfg.encoder must be a WhisperEncoderDims instance")
+            raise TypeError("model must expose an encoder attribute")
 
-        ckpt_path = self.resolve_checkpoint_path(cfg.name_or_path, cfg.download_root)
-        ckpt = self.load_checkpoint(ckpt_path)
-        dims = ckpt["dims"]
+        checkpoint_path = self.resolve_checkpoint_path(
+            cfg.pretrained_name_or_path,
+            cfg.download_root,
+        )
+        checkpoint = self.load_checkpoint(checkpoint_path)
+        dims = checkpoint["dims"]
         if not isinstance(dims, dict):
             raise TypeError("checkpoint['dims'] must be a dict")
         self._validate_encoder_dims(dims, target_dims)
 
-        model_state = ckpt["model_state_dict"]
+        model_state = checkpoint["model_state_dict"]
         if not isinstance(model_state, dict):
             raise TypeError("checkpoint['model_state_dict'] must be a dict")
         encoder_state = self._extract_encoder_state(model_state)
+        incompatible = model.encoder.load_state_dict(encoder_state, strict=False)
 
-        encoder = model.encoder
-        incompatible = encoder.load_state_dict(encoder_state, strict=cfg.strict)
+        allowed_missing = {"positional_embedding"}
+        missing = [
+            item for item in incompatible.missing_keys if item not in allowed_missing
+        ]
+        unexpected = list(incompatible.unexpected_keys)
+        if cfg.strict and (missing or unexpected):
+            raise RuntimeError(
+                "Strict encoder load failed.\n"
+                f"missing={missing}\n"
+                f"unexpected={unexpected}"
+            )
 
-        if cfg.freeze_encoder:
-            for p in encoder.parameters():
-                p.requires_grad = False
+        if cfg.freeze:
+            for parameter in model.encoder.parameters():
+                parameter.requires_grad = False
 
-        source = "local_path" if Path(cfg.name_or_path).exists() else "openai_registry"
+        source = (
+            "local_path"
+            if Path(cfg.pretrained_name_or_path).exists()
+            else "openai_registry"
+        )
         return LoadedPretrainedInfo(
-            resolved_path=str(ckpt_path),
+            resolved_path=str(checkpoint_path),
             source=source,
             loaded_keys=len(encoder_state),
             missing_keys=list(incompatible.missing_keys),
-            unexpected_keys=list(incompatible.unexpected_keys),
+            unexpected_keys=unexpected,
         )

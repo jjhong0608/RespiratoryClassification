@@ -4,35 +4,24 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from torch import Tensor
-from torch.utils.data import ConcatDataset, Dataset, WeightedRandomSampler
+from torch.utils.data import WeightedRandomSampler
 
-from src.data.dataset import RespiratorySoundDataset
-from src.utils.config import ImbalanceConfig
+from src.data.dataset import RespiratoryBagDataset
 
 
 @dataclass(frozen=True)
 class ResolvedImbalance:
     pos_weight: float | None
-    sampler: str
+    weighted_random: bool
     class_counts: Mapping[int, int]
 
 
-def collect_targets(dataset: Dataset[tuple[Tensor, int]]) -> list[int]:
-    if isinstance(dataset, RespiratorySoundDataset):
-        return dataset.targets
-    if isinstance(dataset, ConcatDataset):
-        targets: list[int] = []
-        for child in dataset.datasets:
-            targets.extend(collect_targets(child))
-        return targets
-    raise TypeError(
-        f"Unsupported dataset type for target extraction: {type(dataset)!r}"
-    )
+def collect_targets(dataset: RespiratoryBagDataset) -> list[int]:
+    return dataset.targets
 
 
 def class_counts(targets: Sequence[int]) -> dict[int, int]:
-    return dict(sorted(Counter(int(t) for t in targets).items()))
+    return dict(sorted(Counter(int(target) for target in targets).items()))
 
 
 def compute_binary_pos_weight(targets: Sequence[int], positive: int = 1) -> float:
@@ -40,49 +29,29 @@ def compute_binary_pos_weight(targets: Sequence[int], positive: int = 1) -> floa
     positives = counts.get(positive, 0)
     negatives = sum(count for cls, count in counts.items() if cls != positive)
     if positives <= 0:
-        raise ValueError("Cannot compute pos_weight with zero positive samples.")
+        raise ValueError("Cannot compute pos_weight with zero positive samples")
     if negatives <= 0:
-        raise ValueError("Cannot compute pos_weight with zero negative samples.")
+        raise ValueError("Cannot compute pos_weight with zero negative samples")
     return float(negatives) / float(positives)
 
 
-def build_sample_weights(targets: Sequence[int]) -> list[float]:
-    counts = class_counts(targets)
-    if not counts:
-        raise ValueError("Cannot build sample weights from an empty target list.")
-    return [1.0 / float(counts[int(target)]) for target in targets]
-
-
 def build_weighted_sampler(targets: Sequence[int]) -> WeightedRandomSampler:
-    weights = build_sample_weights(targets)
+    counts = class_counts(targets)
+    weights = [1.0 / float(counts[int(target)]) for target in targets]
     return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
 
 def resolve_imbalance(
-    cfg: ImbalanceConfig,
-    targets: Sequence[int],
     *,
-    num_classes: int,
+    targets: Sequence[int],
+    pos_weight: float | None,
+    weighted_random: bool,
 ) -> ResolvedImbalance:
-    if cfg.auto_pos_weight and cfg.pos_weight is not None:
-        raise ValueError("Set only one of `auto_pos_weight` or `pos_weight`.")
-    if num_classes != 2 and (
-        cfg.auto_pos_weight or cfg.pos_weight is not None or cfg.sampler != "none"
-    ):
-        raise ValueError(
-            "Imbalance options are currently supported only for binary tasks."
-        )
-
-    pos_weight: float | None = None
-    if cfg.auto_pos_weight:
-        pos_weight = compute_binary_pos_weight(targets)
-    elif cfg.pos_weight is not None:
-        pos_weight = float(cfg.pos_weight)
-        if pos_weight <= 0:
-            raise ValueError("`pos_weight` must be greater than zero.")
-
+    resolved_pos_weight = None if pos_weight is None else float(pos_weight)
+    if resolved_pos_weight is not None and resolved_pos_weight <= 0:
+        raise ValueError("train.loss.pos_weight must be greater than zero")
     return ResolvedImbalance(
-        pos_weight=pos_weight,
-        sampler=cfg.sampler,
+        pos_weight=resolved_pos_weight,
+        weighted_random=weighted_random,
         class_counts=class_counts(targets),
     )

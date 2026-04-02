@@ -144,7 +144,7 @@ class ResultsPlotter(PlotlyExportMixin):
             errors: list[float] = []
             hover: list[str] = []
             for model in models:
-                agg = metric_to_model.get((model, metric), None)
+                agg = metric_to_model.get((model, metric))
                 if agg is None:
                     means.append(float("nan"))
                     errors.append(0.0)

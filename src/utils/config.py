@@ -1,511 +1,478 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from src.evaluation.thresholds import ThresholdOptimizationConfig
-
 
 @dataclass(frozen=True)
-class ModelConfig:
-    n_mels: int
-    n_audio_ctx: int
-    n_audio_state: int
-    n_audio_head: int
-    n_audio_layer: int
-    pooling: Literal["mean", "cls"] = "mean"
-    use_weighted_layer_sum: bool = False
-    classifier_proj_size: int = 256
+class ExperimentConfig:
+    name: str
+    task: str
+    mode: Literal["mil"]
+    seed: int
+    device: str
+    output_dir: str
 
 
 @dataclass(frozen=True)
 class BandPassConfig:
     enabled: bool = False
-    low_freq: float | None = None
-    high_freq: float | None = None
+    low_hz: float | None = None
+    high_hz: float | None = None
     q: float = 0.707
 
 
 @dataclass(frozen=True)
-class DataConfig:
-    label_to_index: Mapping[str, int]
+class AudioConfig:
     sample_rate: int
-    clip_seconds: float
-    batch_size: int
-    num_workers: int
-    source_type: Literal["original", "harmonic", "percussive"] = "original"
-    bandpass: BandPassConfig = field(default_factory=BandPassConfig)
-    train_dirs: Sequence[str] = ()
-    val_dirs: Sequence[str] = ()
-    eval_dirs: Sequence[str] = ()
+    clip_duration_sec: float
+
+    @property
+    def clip_samples(self) -> int:
+        return int(round(self.sample_rate * self.clip_duration_sec))
 
 
 @dataclass(frozen=True)
-class TrainingHyperparams:
-    epochs: int
-    learning_rate: float
-    weight_decay: float
-    warmup_ratio: float
-    max_grad_norm: float
+class PreprocessingConfig:
+    feature_type: Literal["log_mel"] = "log_mel"
+    source_type: Literal["original", "harmonic", "percussive"] = "original"
+    n_fft: int = 400
+    hop_length: int = 160
+    win_length: int = 400
+    n_mels: int = 80
+    bandpass: BandPassConfig = field(default_factory=BandPassConfig)
+
+
+@dataclass(frozen=True)
+class SegmentationConfig:
+    mode: Literal["full_clip", "non_overlap", "sliding_window"] = "full_clip"
+    length_sec: float | None = None
+    stride_sec: float | None = None
+    pad_last: bool = True
+    drop_last: bool = False
+
+    def effective_length_sec(self, clip_duration_sec: float) -> float:
+        if self.mode == "full_clip":
+            return clip_duration_sec
+        if self.length_sec is None:
+            raise ValueError("segment.length_sec is required for segmented MIL modes")
+        return float(self.length_sec)
+
+    def effective_stride_sec(self, clip_duration_sec: float) -> float:
+        if self.mode == "full_clip":
+            return clip_duration_sec
+        if self.mode == "non_overlap":
+            return self.effective_length_sec(clip_duration_sec)
+        if self.stride_sec is None:
+            raise ValueError("segment.stride_sec is required for sliding_window mode")
+        return float(self.stride_sec)
+
+
+@dataclass(frozen=True)
+class DataConfig:
+    train_dirs: list[str]
+    val_dirs: list[str]
+    eval_dirs: list[str]
+    label_to_index: Mapping[str, int]
+    batch_size: int
+    num_workers: int
+    audio: AudioConfig
+    preprocessing: PreprocessingConfig
+    segment: SegmentationConfig
 
 
 @dataclass(frozen=True)
 class EncoderConfig:
-    n_mels: int
-    n_audio_ctx: int
-    n_audio_state: int
-    n_audio_head: int
-    n_audio_layer: int
-
-
-@dataclass(frozen=True)
-class ContrastiveProjectionHeadConfig:
-    hidden_dim: int = 384
-    output_dim: int = 128
-
-
-@dataclass(frozen=True)
-class ContrastiveAugmentationConfig:
-    time_mask_param: int = 40
-    time_mask_count: int = 2
-    freq_mask_param: int = 8
-    freq_mask_count: int = 2
-    gaussian_noise_std: float = 0.0
-
-
-@dataclass(frozen=True)
-class SupervisedContrastiveConfig:
-    temperature: float = 0.07
-    normalize: bool = True
-    projection_head: ContrastiveProjectionHeadConfig = field(
-        default_factory=ContrastiveProjectionHeadConfig
-    )
-    augmentation: ContrastiveAugmentationConfig = field(
-        default_factory=ContrastiveAugmentationConfig
-    )
-
-
-@dataclass(frozen=True)
-class ImbalanceConfig:
-    auto_pos_weight: bool = False
-    pos_weight: float | None = None
-    sampler: Literal["none", "weighted_random"] = "none"
-
-
-@dataclass(frozen=True)
-class EvalThresholdConfig:
-    manual: float | None = None
-
-
-@dataclass(frozen=True)
-class FineTuneSettings:
-    checkpoint_path: str
-    encoder_lr: float | None = None
-    classifier_lr: float | None = None
-    unsafe_pickle_load: bool = False
-
-
-@dataclass(frozen=True)
-class PretrainedConfig:
-    name_or_path: str
-    load_encoder_only: bool = True
+    type: Literal["whisper"] = "whisper"
+    backbone: str = "custom"
+    pretrained_name_or_path: str | None = None
+    freeze: bool = False
     strict: bool = True
-    freeze_encoder: bool = False
     download_root: str | None = None
+    n_audio_state: int = 384
+    n_audio_head: int = 6
+    n_audio_layer: int = 4
+
+
+@dataclass(frozen=True)
+class InstanceHeadConfig:
+    type: Literal["linear", "mlp"] = "linear"
+    hidden_dim: int = 256
+    dropout: float = 0.0
+
+
+@dataclass(frozen=True)
+class TopKConfig:
+    k: int = 1
+
+
+@dataclass(frozen=True)
+class AttentionConfig:
+    hidden_dim: int = 128
+    dropout: float = 0.0
+    gated: bool = True
+
+
+@dataclass(frozen=True)
+class TemperatureConfig:
+    temperature: float = 1.0
+
+
+@dataclass(frozen=True)
+class NoisyOrConfig:
+    clamp_eps: float = 1e-6
+
+
+@dataclass(frozen=True)
+class MILConfig:
+    aggregator: Literal[
+        "max",
+        "mean",
+        "topk",
+        "attention",
+        "logsumexp",
+        "softmax_weighted",
+        "noisy_or",
+    ]
+    return_instance_scores: bool = True
+    topk: TopKConfig = field(default_factory=TopKConfig)
+    attention: AttentionConfig = field(default_factory=AttentionConfig)
+    logsumexp: TemperatureConfig = field(default_factory=TemperatureConfig)
+    softmax_weighted: TemperatureConfig = field(default_factory=TemperatureConfig)
+    noisy_or: NoisyOrConfig = field(default_factory=NoisyOrConfig)
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    encoder: EncoderConfig
+    instance_head: InstanceHeadConfig
+    mil: MILConfig
+
+
+@dataclass(frozen=True)
+class OptimizerConfig:
+    lr: float
+    weight_decay: float = 0.0
+
+
+@dataclass(frozen=True)
+class LossConfig:
+    type: Literal["bce"] = "bce"
+    pos_weight: float | None = None
+
+
+@dataclass(frozen=True)
+class SamplerConfig:
+    weighted_random: bool = False
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    epochs: int
+    top_k: int
+    warmup_ratio: float
+    max_grad_norm: float
+    optimizer: OptimizerConfig
+    loss: LossConfig = field(default_factory=LossConfig)
+    sampler: SamplerConfig = field(default_factory=SamplerConfig)
+
+
+@dataclass(frozen=True)
+class AnalysisOutputConfig:
+    save_segment_scores: bool = True
+    save_attention_weights: bool = True
+    save_topk_indices: bool = True
+    save_bag_metadata: bool = True
+
+
+@dataclass(frozen=True)
+class AnalysisConfig:
+    outputs: AnalysisOutputConfig = field(default_factory=AnalysisOutputConfig)
 
 
 @dataclass(frozen=True)
 class TrainingRunConfig:
-    run_name: str
-    seed: int
-    device: str
-    output_dir: str
-    top_k: int
-    pretrained: PretrainedConfig | None
+    experiment: ExperimentConfig
     data: DataConfig
     model: ModelConfig
-    training: TrainingHyperparams
-    imbalance: ImbalanceConfig = field(default_factory=ImbalanceConfig)
-    threshold_optimization: ThresholdOptimizationConfig = field(
-        default_factory=ThresholdOptimizationConfig
-    )
-
-
-@dataclass(frozen=True)
-class SupConPretrainRunConfig:
-    run_name: str
-    seed: int
-    device: str
-    output_dir: str
-    top_k: int
-    pretrained: PretrainedConfig | None
-    data: DataConfig
-    encoder: EncoderConfig
-    training: TrainingHyperparams
-    supervised_contrastive: SupervisedContrastiveConfig
+    train: TrainConfig
+    analysis: AnalysisConfig
 
 
 @dataclass(frozen=True)
 class EvalConfig:
-    device: str
+    experiment: ExperimentConfig
     checkpoint_path: str
     data: DataConfig
-    threshold: EvalThresholdConfig = field(default_factory=EvalThresholdConfig)
-    unsafe_pickle_load: bool = False
+    analysis: AnalysisConfig
 
 
 @dataclass(frozen=True)
 class CvFoldConfig:
     name: str
-    train_dirs: Sequence[str]
-    val_dirs: Sequence[str]
+    train_dirs: list[str]
+    val_dirs: list[str]
 
 
 @dataclass(frozen=True)
 class CvRunConfig:
-    run_name: str
-    seed: int
-    device: str
-    output_dir: str
-    top_k: int
-    pretrained: PretrainedConfig | None
-    folds: Sequence[CvFoldConfig]
-    label_to_index: Mapping[str, int]
-    sample_rate: int
-    clip_seconds: float
-    batch_size: int
-    num_workers: int
+    experiment: ExperimentConfig
+    data: DataConfig
     model: ModelConfig
-    training: TrainingHyperparams
-    source_type: Literal["original", "harmonic", "percussive"] = "original"
-    bandpass: BandPassConfig = field(default_factory=BandPassConfig)
-    imbalance: ImbalanceConfig = field(default_factory=ImbalanceConfig)
-    threshold_optimization: ThresholdOptimizationConfig = field(
-        default_factory=ThresholdOptimizationConfig
-    )
+    train: TrainConfig
+    analysis: AnalysisConfig
+    folds: list[CvFoldConfig]
 
 
 class JsonConfigLoader:
     @staticmethod
-    def _validate_bandpass(
-        bandpass: BandPassConfig,
-        *,
-        sample_rate: int,
-        field_name: str = "bandpass",
-    ) -> None:
-        if not bandpass.enabled:
-            return
-        if bandpass.low_freq is None or bandpass.high_freq is None:
-            raise ValueError(
-                f"{field_name} requires both `low_freq` and `high_freq` when enabled"
-            )
-        if bandpass.q <= 0:
-            raise ValueError(f"{field_name}.q must be greater than zero")
-        nyquist = float(sample_rate) / 2.0
-        if not (0.0 < bandpass.low_freq < bandpass.high_freq < nyquist):
-            raise ValueError(
-                f"{field_name} must satisfy 0 < low_freq < high_freq < Nyquist ({nyquist})"
-            )
-
-    @staticmethod
-    def _validate_label_to_index(label_to_index: Mapping[str, int]) -> None:
-        indices = sorted(int(v) for v in label_to_index.values())
-        if indices != list(range(len(indices))):
-            raise ValueError(
-                f"label_to_index must be contiguous 0..N-1; got indices={indices}"
-            )
-
-    @staticmethod
-    def _validate_threshold_optimization(
-        cfg: ThresholdOptimizationConfig,
-        *,
-        num_classes: int,
-        field_name: str = "threshold_optimization",
-    ) -> None:
-        if cfg.metric not in {"f1", "balanced_accuracy", "youden_j"}:
-            raise ValueError(
-                f"{field_name}.metric must be one of "
-                "`f1`, `balanced_accuracy`, `youden_j`"
-            )
-        if cfg.enabled and num_classes != 2:
-            raise ValueError(
-                f"{field_name} is only supported for binary classification; "
-                f"got num_classes={num_classes}"
-            )
-
-    @staticmethod
-    def _validate_encoder_config(
-        encoder: EncoderConfig,
-        *,
-        field_name: str = "encoder",
-    ) -> None:
-        if encoder.n_mels <= 0:
-            raise ValueError(f"{field_name}.n_mels must be greater than zero")
-        if encoder.n_audio_ctx <= 0:
-            raise ValueError(f"{field_name}.n_audio_ctx must be greater than zero")
-        if encoder.n_audio_state <= 0:
-            raise ValueError(f"{field_name}.n_audio_state must be greater than zero")
-        if encoder.n_audio_head <= 0:
-            raise ValueError(f"{field_name}.n_audio_head must be greater than zero")
-        if encoder.n_audio_layer <= 0:
-            raise ValueError(f"{field_name}.n_audio_layer must be greater than zero")
-
-    @staticmethod
-    def _parse_model_config(raw_model: Mapping[str, Any]) -> ModelConfig:
-        model_kwargs = dict(raw_model)
-        legacy_classifier = model_kwargs.pop("classifier", None)
-        if legacy_classifier is not None:
-            if not isinstance(legacy_classifier, Mapping):
-                raise TypeError("model.classifier must be an object")
-            raw_proj_size = model_kwargs.get(
-                "classifier_proj_size",
-                legacy_classifier.get("hidden_dim", 256),
-            )
-            if raw_proj_size is None:
-                raw_proj_size = 256
-            model_kwargs["classifier_proj_size"] = int(raw_proj_size)
-            model_kwargs["use_weighted_layer_sum"] = bool(
-                model_kwargs.get("use_weighted_layer_sum", False)
-            )
-        model = ModelConfig(**model_kwargs)
-        if model.pooling not in {"mean", "cls"}:
-            raise ValueError(f"Unsupported pooling: {model.pooling}")
-        if model.classifier_proj_size <= 0:
-            raise ValueError("model.classifier_proj_size must be greater than zero")
-        return model
-
-    @staticmethod
-    def _parse_encoder_config(raw_encoder: Mapping[str, Any]) -> EncoderConfig:
-        encoder = EncoderConfig(**dict(raw_encoder))
-        JsonConfigLoader._validate_encoder_config(encoder)
-        return encoder
-
-    @staticmethod
-    def _validate_eval_threshold(
-        cfg: EvalThresholdConfig,
-        *,
-        field_name: str = "threshold",
-    ) -> None:
-        if cfg.manual is None:
-            return
-        if not (0.0 <= cfg.manual <= 1.0):
-            raise ValueError(f"{field_name}.manual must be within [0.0, 1.0]")
-
-    @staticmethod
-    def _validate_supervised_contrastive(
-        cfg: SupervisedContrastiveConfig,
-        *,
-        field_name: str = "supervised_contrastive",
-    ) -> None:
-        if cfg.temperature <= 0:
-            raise ValueError(f"{field_name}.temperature must be greater than zero")
-        if cfg.projection_head.hidden_dim <= 0:
-            raise ValueError(
-                f"{field_name}.projection_head.hidden_dim must be greater than zero"
-            )
-        if cfg.projection_head.output_dim <= 0:
-            raise ValueError(
-                f"{field_name}.projection_head.output_dim must be greater than zero"
-            )
-        aug = cfg.augmentation
-        if aug.time_mask_param < 0 or aug.time_mask_count < 0:
-            raise ValueError(
-                f"{field_name}.augmentation time masking values must be non-negative"
-            )
-        if aug.freq_mask_param < 0 or aug.freq_mask_count < 0:
-            raise ValueError(
-                f"{field_name}.augmentation frequency masking values must be non-negative"
-            )
-        if aug.gaussian_noise_std < 0:
-            raise ValueError(
-                f"{field_name}.augmentation.gaussian_noise_std must be non-negative"
-            )
-
-    @staticmethod
     def load_json(path: str | Path) -> dict[str, Any]:
-        p = Path(path)
-        with p.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        config_path = Path(path)
+        with config_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise TypeError("Config root must be a JSON object")
+        return payload
 
     @staticmethod
-    def load_supcon_pretrain(path: str | Path) -> SupConPretrainRunConfig:
-        raw = JsonConfigLoader.load_json(path)
-        raw_data = dict(raw["data"])
-        raw_data["bandpass"] = BandPassConfig(**raw_data.get("bandpass", {}))
-        data = DataConfig(**raw_data)
-        JsonConfigLoader._validate_label_to_index(data.label_to_index)
-        JsonConfigLoader._validate_bandpass(data.bandpass, sample_rate=data.sample_rate)
-        encoder = JsonConfigLoader._parse_encoder_config(raw["encoder"])
-        training = TrainingHyperparams(**raw["training"])
-        raw_supcon = dict(raw["supervised_contrastive"])
-        raw_supcon["projection_head"] = ContrastiveProjectionHeadConfig(
-            **raw_supcon.get("projection_head", {})
-        )
-        raw_supcon["augmentation"] = ContrastiveAugmentationConfig(
-            **raw_supcon.get("augmentation", {})
-        )
-        supervised_contrastive = SupervisedContrastiveConfig(**raw_supcon)
-        JsonConfigLoader._validate_supervised_contrastive(supervised_contrastive)
-        pretrained = (
-            PretrainedConfig(**raw["pretrained"]) if "pretrained" in raw else None
-        )
-        if pretrained is not None and pretrained.freeze_encoder:
+    def _validate_contiguous_labels(label_to_index: Mapping[str, int]) -> None:
+        indices = sorted(int(value) for value in label_to_index.values())
+        expected = list(range(len(indices)))
+        if indices != expected:
+            raise ValueError(f"label_to_index must be contiguous 0..N-1; got {indices}")
+
+    @staticmethod
+    def _validate_binary_labels(label_to_index: Mapping[str, int]) -> None:
+        JsonConfigLoader._validate_contiguous_labels(label_to_index)
+        if len(label_to_index) != 2:
             raise ValueError(
-                "pretrained.freeze_encoder must be false for supervised contrastive pretraining"
+                "The MIL branch currently supports bag-level binary tasks only"
             )
-        return SupConPretrainRunConfig(
-            run_name=raw["run_name"],
-            seed=raw["seed"],
-            device=raw["device"],
-            output_dir=raw["output_dir"],
-            top_k=raw["top_k"],
-            pretrained=pretrained,
-            data=data,
-            encoder=encoder,
-            training=training,
-            supervised_contrastive=supervised_contrastive,
+
+    @staticmethod
+    def _validate_experiment(cfg: ExperimentConfig) -> None:
+        if cfg.mode != "mil":
+            raise ValueError("experiment.mode must be 'mil' for this branch")
+        if not cfg.name:
+            raise ValueError("experiment.name must not be empty")
+        if not cfg.task:
+            raise ValueError("experiment.task must not be empty")
+
+    @staticmethod
+    def _validate_bandpass(cfg: BandPassConfig, sample_rate: int) -> None:
+        if not cfg.enabled:
+            return
+        if cfg.low_hz is None or cfg.high_hz is None:
+            raise ValueError(
+                "data.preprocessing.bandpass requires low_hz and high_hz when enabled"
+            )
+        if cfg.q <= 0:
+            raise ValueError("data.preprocessing.bandpass.q must be greater than zero")
+        nyquist = float(sample_rate) / 2.0
+        if not (0.0 < cfg.low_hz < cfg.high_hz < nyquist):
+            raise ValueError(
+                "data.preprocessing.bandpass must satisfy "
+                "0 < low_hz < high_hz < sample_rate / 2"
+            )
+
+    @staticmethod
+    def _validate_audio(cfg: AudioConfig) -> None:
+        if cfg.sample_rate <= 0:
+            raise ValueError("data.audio.sample_rate must be greater than zero")
+        if cfg.clip_duration_sec <= 0:
+            raise ValueError("data.audio.clip_duration_sec must be greater than zero")
+
+    @staticmethod
+    def _validate_preprocessing(cfg: PreprocessingConfig, sample_rate: int) -> None:
+        if cfg.feature_type != "log_mel":
+            raise ValueError(
+                "Only data.preprocessing.feature_type='log_mel' is supported"
+            )
+        if cfg.n_fft <= 0 or cfg.hop_length <= 0 or cfg.win_length <= 0:
+            raise ValueError("STFT parameters must be greater than zero")
+        if cfg.n_mels <= 0:
+            raise ValueError("data.preprocessing.n_mels must be greater than zero")
+        JsonConfigLoader._validate_bandpass(cfg.bandpass, sample_rate)
+
+    @staticmethod
+    def _validate_segment(cfg: SegmentationConfig) -> None:
+        if cfg.pad_last and cfg.drop_last:
+            raise ValueError("pad_last and drop_last cannot both be true")
+        if cfg.mode == "full_clip":
+            return
+        if cfg.length_sec is None or cfg.length_sec <= 0:
+            raise ValueError("data.segment.length_sec must be greater than zero")
+        if cfg.mode == "sliding_window" and (
+            cfg.stride_sec is None or cfg.stride_sec <= 0
+        ):
+            raise ValueError(
+                "data.segment.stride_sec must be greater than zero for sliding_window"
+            )
+
+    @staticmethod
+    def _validate_data(cfg: DataConfig) -> None:
+        JsonConfigLoader._validate_binary_labels(cfg.label_to_index)
+        JsonConfigLoader._validate_audio(cfg.audio)
+        JsonConfigLoader._validate_preprocessing(
+            cfg.preprocessing, cfg.audio.sample_rate
         )
+        JsonConfigLoader._validate_segment(cfg.segment)
+        if cfg.batch_size <= 0:
+            raise ValueError("data.batch_size must be greater than zero")
+        if cfg.num_workers < 0:
+            raise ValueError("data.num_workers must be non-negative")
+
+    @staticmethod
+    def _validate_encoder(cfg: EncoderConfig) -> None:
+        if cfg.type != "whisper":
+            raise ValueError("Only model.encoder.type='whisper' is supported")
+        if cfg.n_audio_state <= 0:
+            raise ValueError("model.encoder.n_audio_state must be greater than zero")
+        if cfg.n_audio_head <= 0:
+            raise ValueError("model.encoder.n_audio_head must be greater than zero")
+        if cfg.n_audio_layer <= 0:
+            raise ValueError("model.encoder.n_audio_layer must be greater than zero")
+
+    @staticmethod
+    def _validate_instance_head(cfg: InstanceHeadConfig) -> None:
+        if cfg.hidden_dim <= 0:
+            raise ValueError("model.instance_head.hidden_dim must be greater than zero")
+        if not (0.0 <= cfg.dropout < 1.0):
+            raise ValueError("model.instance_head.dropout must be within [0, 1)")
+
+    @staticmethod
+    def _validate_mil(cfg: MILConfig) -> None:
+        if cfg.aggregator == "topk" and cfg.topk.k <= 0:
+            raise ValueError("model.mil.topk.k must be greater than zero")
+        if cfg.attention.hidden_dim <= 0:
+            raise ValueError("model.mil.attention.hidden_dim must be greater than zero")
+        if not (0.0 <= cfg.attention.dropout < 1.0):
+            raise ValueError("model.mil.attention.dropout must be within [0, 1)")
+        if cfg.logsumexp.temperature <= 0:
+            raise ValueError(
+                "model.mil.logsumexp.temperature must be greater than zero"
+            )
+        if cfg.softmax_weighted.temperature <= 0:
+            raise ValueError(
+                "model.mil.softmax_weighted.temperature must be greater than zero"
+            )
+        if not (0.0 < cfg.noisy_or.clamp_eps < 0.5):
+            raise ValueError("model.mil.noisy_or.clamp_eps must be within (0, 0.5)")
+
+    @staticmethod
+    def _validate_model(cfg: ModelConfig) -> None:
+        JsonConfigLoader._validate_encoder(cfg.encoder)
+        JsonConfigLoader._validate_instance_head(cfg.instance_head)
+        JsonConfigLoader._validate_mil(cfg.mil)
+
+    @staticmethod
+    def _validate_train(cfg: TrainConfig) -> None:
+        if cfg.epochs <= 0:
+            raise ValueError("train.epochs must be greater than zero")
+        if cfg.top_k <= 0:
+            raise ValueError("train.top_k must be greater than zero")
+        if not (0.0 <= cfg.warmup_ratio <= 1.0):
+            raise ValueError("train.warmup_ratio must be within [0, 1]")
+        if cfg.max_grad_norm <= 0:
+            raise ValueError("train.max_grad_norm must be greater than zero")
+        if cfg.optimizer.lr <= 0:
+            raise ValueError("train.optimizer.lr must be greater than zero")
+        if cfg.optimizer.weight_decay < 0:
+            raise ValueError("train.optimizer.weight_decay must be non-negative")
+        if cfg.loss.type != "bce":
+            raise ValueError("Only train.loss.type='bce' is supported")
+        if cfg.loss.pos_weight is not None and cfg.loss.pos_weight <= 0:
+            raise ValueError("train.loss.pos_weight must be greater than zero")
+
+    @staticmethod
+    def _parse_experiment(raw: Mapping[str, Any]) -> ExperimentConfig:
+        cfg = ExperimentConfig(**dict(raw))
+        JsonConfigLoader._validate_experiment(cfg)
+        return cfg
+
+    @staticmethod
+    def _parse_data(raw: Mapping[str, Any]) -> DataConfig:
+        kwargs = dict(raw)
+        kwargs.setdefault("train_dirs", [])
+        kwargs.setdefault("val_dirs", [])
+        kwargs.setdefault("eval_dirs", [])
+        kwargs["audio"] = AudioConfig(**dict(raw["audio"]))
+        preprocessing = dict(raw["preprocessing"])
+        preprocessing["bandpass"] = BandPassConfig(**preprocessing.get("bandpass", {}))
+        kwargs["preprocessing"] = PreprocessingConfig(**preprocessing)
+        kwargs["segment"] = SegmentationConfig(**dict(raw["segment"]))
+        cfg = DataConfig(**kwargs)
+        JsonConfigLoader._validate_data(cfg)
+        return cfg
+
+    @staticmethod
+    def _parse_model(raw: Mapping[str, Any]) -> ModelConfig:
+        kwargs = dict(raw)
+        kwargs["encoder"] = EncoderConfig(**dict(raw["encoder"]))
+        kwargs["instance_head"] = InstanceHeadConfig(**dict(raw["instance_head"]))
+        mil = dict(raw["mil"])
+        mil["topk"] = TopKConfig(**mil.get("topk", {}))
+        mil["attention"] = AttentionConfig(**mil.get("attention", {}))
+        mil["logsumexp"] = TemperatureConfig(**mil.get("logsumexp", {}))
+        mil["softmax_weighted"] = TemperatureConfig(**mil.get("softmax_weighted", {}))
+        mil["noisy_or"] = NoisyOrConfig(**mil.get("noisy_or", {}))
+        kwargs["mil"] = MILConfig(**mil)
+        cfg = ModelConfig(**kwargs)
+        JsonConfigLoader._validate_model(cfg)
+        return cfg
+
+    @staticmethod
+    def _parse_train(raw: Mapping[str, Any]) -> TrainConfig:
+        kwargs = dict(raw)
+        kwargs["optimizer"] = OptimizerConfig(**dict(raw["optimizer"]))
+        kwargs["loss"] = LossConfig(**dict(raw.get("loss", {})))
+        kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))
+        cfg = TrainConfig(**kwargs)
+        JsonConfigLoader._validate_train(cfg)
+        return cfg
+
+    @staticmethod
+    def _parse_analysis(raw: Mapping[str, Any] | None) -> AnalysisConfig:
+        if raw is None:
+            return AnalysisConfig()
+        kwargs = dict(raw)
+        kwargs["outputs"] = AnalysisOutputConfig(**dict(raw.get("outputs", {})))
+        return AnalysisConfig(**kwargs)
 
     @staticmethod
     def load_training(path: str | Path) -> TrainingRunConfig:
         raw = JsonConfigLoader.load_json(path)
-        raw_data = dict(raw["data"])
-        raw_data["bandpass"] = BandPassConfig(**raw_data.get("bandpass", {}))
-        data = DataConfig(**raw_data)
-        JsonConfigLoader._validate_label_to_index(data.label_to_index)
-        JsonConfigLoader._validate_bandpass(data.bandpass, sample_rate=data.sample_rate)
-        pretrained = (
-            PretrainedConfig(**raw["pretrained"]) if "pretrained" in raw else None
-        )
-        model = JsonConfigLoader._parse_model_config(raw["model"])
-        training = TrainingHyperparams(**raw["training"])
-        imbalance = ImbalanceConfig(**raw.get("imbalance", {}))
-        threshold_optimization = ThresholdOptimizationConfig(
-            **raw.get("threshold_optimization", {})
-        )
-        JsonConfigLoader._validate_threshold_optimization(
-            threshold_optimization,
-            num_classes=len(data.label_to_index),
-        )
         return TrainingRunConfig(
-            run_name=raw["run_name"],
-            seed=raw["seed"],
-            device=raw["device"],
-            output_dir=raw["output_dir"],
-            top_k=raw["top_k"],
-            pretrained=pretrained,
-            data=data,
-            model=model,
-            training=training,
-            imbalance=imbalance,
-            threshold_optimization=threshold_optimization,
+            experiment=JsonConfigLoader._parse_experiment(raw["experiment"]),
+            data=JsonConfigLoader._parse_data(raw["data"]),
+            model=JsonConfigLoader._parse_model(raw["model"]),
+            train=JsonConfigLoader._parse_train(raw["train"]),
+            analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
         )
 
     @staticmethod
     def load_eval(path: str | Path) -> EvalConfig:
         raw = JsonConfigLoader.load_json(path)
-        raw_data = dict(raw["data"])
-        raw_data["bandpass"] = BandPassConfig(**raw_data.get("bandpass", {}))
-        data = DataConfig(**raw_data)
-        JsonConfigLoader._validate_label_to_index(data.label_to_index)
-        JsonConfigLoader._validate_bandpass(data.bandpass, sample_rate=data.sample_rate)
-        threshold = EvalThresholdConfig(**raw.get("threshold", {}))
-        JsonConfigLoader._validate_eval_threshold(threshold)
         return EvalConfig(
-            device=raw["device"],
-            checkpoint_path=raw["checkpoint_path"],
-            data=data,
-            threshold=threshold,
-            unsafe_pickle_load=bool(raw.get("unsafe_pickle_load", False)),
+            experiment=JsonConfigLoader._parse_experiment(raw["experiment"]),
+            checkpoint_path=str(raw["checkpoint_path"]),
+            data=JsonConfigLoader._parse_data(raw["data"]),
+            analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
         )
 
     @staticmethod
     def load_cv(path: str | Path) -> CvRunConfig:
         raw = JsonConfigLoader.load_json(path)
-        folds = [CvFoldConfig(**fold) for fold in raw["folds"]]
-        model = JsonConfigLoader._parse_model_config(raw["model"])
-        training = TrainingHyperparams(**raw["training"])
-        imbalance = ImbalanceConfig(**raw.get("imbalance", {}))
-        threshold_optimization = ThresholdOptimizationConfig(
-            **raw.get("threshold_optimization", {})
-        )
-        JsonConfigLoader._validate_label_to_index(raw["label_to_index"])
-        JsonConfigLoader._validate_threshold_optimization(
-            threshold_optimization,
-            num_classes=len(raw["label_to_index"]),
-        )
-        bandpass = BandPassConfig(**raw.get("bandpass", {}))
-        JsonConfigLoader._validate_bandpass(bandpass, sample_rate=raw["sample_rate"])
-        pretrained = (
-            PretrainedConfig(**raw["pretrained"]) if "pretrained" in raw else None
-        )
+        folds = [CvFoldConfig(**dict(item)) for item in raw["folds"]]
+        base_data = JsonConfigLoader._parse_data(raw["data"])
         return CvRunConfig(
-            run_name=raw["run_name"],
-            seed=raw["seed"],
-            device=raw["device"],
-            output_dir=raw["output_dir"],
-            top_k=raw["top_k"],
-            pretrained=pretrained,
+            experiment=JsonConfigLoader._parse_experiment(raw["experiment"]),
+            data=base_data,
+            model=JsonConfigLoader._parse_model(raw["model"]),
+            train=JsonConfigLoader._parse_train(raw["train"]),
+            analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
             folds=folds,
-            label_to_index=raw["label_to_index"],
-            sample_rate=raw["sample_rate"],
-            clip_seconds=raw["clip_seconds"],
-            source_type=raw.get("source_type", "original"),
-            batch_size=raw["batch_size"],
-            num_workers=raw["num_workers"],
-            model=model,
-            training=training,
-            imbalance=imbalance,
-            bandpass=bandpass,
-            threshold_optimization=threshold_optimization,
         )
-
-    @staticmethod
-    def load_finetune(path: str | Path) -> FineTuneRunConfig:
-        raw = JsonConfigLoader.load_json(path)
-        raw_data = dict(raw["data"])
-        raw_data["bandpass"] = BandPassConfig(**raw_data.get("bandpass", {}))
-        data = DataConfig(**raw_data)
-        JsonConfigLoader._validate_label_to_index(data.label_to_index)
-        JsonConfigLoader._validate_bandpass(data.bandpass, sample_rate=data.sample_rate)
-        training = TrainingHyperparams(**raw["training"])
-        finetune = FineTuneSettings(**raw["finetune"])
-        imbalance = ImbalanceConfig(**raw.get("imbalance", {}))
-        threshold_optimization = ThresholdOptimizationConfig(
-            **raw.get("threshold_optimization", {})
-        )
-        JsonConfigLoader._validate_threshold_optimization(
-            threshold_optimization,
-            num_classes=len(data.label_to_index),
-        )
-        return FineTuneRunConfig(
-            run_name=raw["run_name"],
-            seed=raw["seed"],
-            device=raw["device"],
-            output_dir=raw["output_dir"],
-            top_k=raw["top_k"],
-            finetune=finetune,
-            data=data,
-            training=training,
-            imbalance=imbalance,
-            threshold_optimization=threshold_optimization,
-        )
-
-
-@dataclass(frozen=True)
-class FineTuneRunConfig:
-    run_name: str
-    seed: int
-    device: str
-    output_dir: str
-    top_k: int
-    finetune: FineTuneSettings
-    data: DataConfig
-    training: TrainingHyperparams
-    imbalance: ImbalanceConfig = field(default_factory=ImbalanceConfig)
-    threshold_optimization: ThresholdOptimizationConfig = field(
-        default_factory=ThresholdOptimizationConfig
-    )

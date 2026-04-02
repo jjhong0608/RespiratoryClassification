@@ -1,28 +1,52 @@
 {
-  "device": "mps",
-  "checkpoint_path": "/Users/jjhong0608/Documents/AudioData/Whisper/checkpoints/for_wheeze/remove_crackle/to_give_CNUH/cv_5fold_lung_sound_original/fold_4/best_loss_0.544140.pt",
+  "experiment": {
+    "name": "wheeze_mil_eval",
+    "task": "normal_vs_wheeze",
+    "mode": "mil",
+    "seed": 42,
+    "device": "cpu",
+    "output_dir": "checkpoints"
+  },
+  "checkpoint_path": "checkpoints/wheeze_mil_sliding_topk/last.pt",
   "data": {
-    "eval_dirs": [
-      "datasets/for_wheeze/remove_crackle/test"
-    ],
+    "train_dirs": [],
+    "val_dirs": [],
+    "eval_dirs": ["datasets/wheeze/test"],
     "label_to_index": {
-      "non_wheeze": 0,
+      "normal": 0,
       "wheeze": 1
     },
-    "sample_rate": 16000,
-    "clip_seconds": 30.0,
-    "source_type": "original",
-    "bandpass": {
-      "enabled": false,
-      "low_freq": 500.0,
-      "high_freq": 4000.0,
-      "q": 0.707
+    "batch_size": 4,
+    "num_workers": 0,
+    "audio": {
+      "sample_rate": 16000,
+      "clip_duration_sec": 30.0
     },
-    "batch_size": 128,
-    "num_workers": 0
+    "preprocessing": {
+      "feature_type": "log_mel",
+      "source_type": "original",
+      "n_mels": 80,
+      "bandpass": {
+        "enabled": false,
+        "low_hz": 250.0,
+        "high_hz": 1000.0,
+        "q": 0.707
+      }
+    },
+    "segment": {
+      "mode": "sliding_window",
+      "length_sec": 5.0,
+      "stride_sec": 2.5,
+      "pad_last": true,
+      "drop_last": false
+    }
   },
-  "threshold": {
-    "manual": 0.5
-  },
-  "unsafe_pickle_load": false
+  "analysis": {
+    "outputs": {
+      "save_segment_scores": true,
+      "save_attention_weights": false,
+      "save_topk_indices": true,
+      "save_bag_metadata": true
+    }
+  }
 }

@@ -70,17 +70,22 @@ def main() -> None:
         f"n_audio_state={dims.n_audio_state}, n_audio_head={dims.n_audio_head}, "
         f"n_audio_layer={dims.n_audio_layer}"
     )
-    logger.info("Suggested config snippet (encoder dims):")
+    logger.info("Suggested config snippet (nested MIL encoder dims):")
     logger.info(
         json.dumps(
             {
                 "model": {
-                    "n_mels": dims.n_mels,
-                    "n_audio_ctx": dims.n_audio_ctx,
-                    "n_audio_state": dims.n_audio_state,
-                    "n_audio_head": dims.n_audio_head,
-                    "n_audio_layer": dims.n_audio_layer,
-                }
+                    "encoder": {
+                        "n_audio_state": dims.n_audio_state,
+                        "n_audio_head": dims.n_audio_head,
+                        "n_audio_layer": dims.n_audio_layer,
+                    },
+                },
+                "data": {
+                    "preprocessing": {
+                        "n_mels": dims.n_mels,
+                    },
+                },
             },
             indent=2,
         )

@@ -161,8 +161,8 @@ def main() -> None:
         clip_seconds=args.clip_seconds,
         source_type=args.source_type,
         bandpass_enabled=bool(args.bandpass_enabled),
-        bandpass_low_freq=args.bandpass_low_freq,
-        bandpass_high_freq=args.bandpass_high_freq,
+        bandpass_low_hz=args.bandpass_low_freq,
+        bandpass_high_hz=args.bandpass_high_freq,
         bandpass_q=args.bandpass_q,
     )
     formats = {part.strip() for part in str(args.formats).split(",") if part.strip()}

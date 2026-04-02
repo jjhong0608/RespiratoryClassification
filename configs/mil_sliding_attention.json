@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "wheeze_mil_sliding_topk",
+    "name": "wheeze_mil_sliding_attention",
     "task": "normal_vs_wheeze",
     "mode": "mil",
     "seed": 42,
@@ -53,12 +53,12 @@
       "n_audio_layer": 4
     },
     "instance_head": {
-      "type": "linear",
+      "type": "mlp",
       "hidden_dim": 256,
       "dropout": 0.1
     },
     "mil": {
-      "aggregator": "topk",
+      "aggregator": "attention",
       "return_instance_scores": true,
       "topk": {
         "k": 3
@@ -99,8 +99,8 @@
   "analysis": {
     "outputs": {
       "save_segment_scores": true,
-      "save_attention_weights": false,
-      "save_topk_indices": true,
+      "save_attention_weights": true,
+      "save_topk_indices": false,
       "save_bag_metadata": true
     }
   }

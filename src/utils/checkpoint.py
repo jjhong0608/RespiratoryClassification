@@ -1,69 +1,52 @@
 from __future__ import annotations
 
-from typing import Literal, cast
-
 import torch
 
-from src.models.model import WhisperClassifierConfig
+from src.models.model import MILModelConfig
 from src.models.whisper_encoder import WhisperEncoderDims
-from src.utils.logging import logger
 
 
 def torch_load_compat(path: str, *, device: torch.device, weights_only: bool) -> dict:
     if "weights_only" in torch.load.__code__.co_varnames:
-        out = torch.load(path, map_location=device, weights_only=weights_only)
+        checkpoint = torch.load(path, map_location=device, weights_only=weights_only)
     else:
-        out = torch.load(path, map_location=device)
-    if not isinstance(out, dict):
+        checkpoint = torch.load(path, map_location=device)
+    if not isinstance(checkpoint, dict):
         raise TypeError("Expected checkpoint dict")
-    return out
+    return checkpoint
 
 
-def load_checkpoint(path: str, *, device: torch.device, unsafe: bool) -> dict:
+def load_checkpoint(path: str, *, device: torch.device, unsafe: bool = False) -> dict:
     try:
         return torch_load_compat(path, device=device, weights_only=True)
     except Exception:
         if not unsafe:
             raise
-        logger.info(
-            "Retrying checkpoint load with weights_only=False (unsafe_pickle_load=true)."
-        )
         return torch_load_compat(path, device=device, weights_only=False)
 
 
-def parse_model_cfg(raw: object) -> WhisperClassifierConfig:
-    if isinstance(raw, WhisperClassifierConfig):
+def parse_model_cfg(raw: object) -> MILModelConfig:
+    if isinstance(raw, MILModelConfig):
         return raw
     if not isinstance(raw, dict):
-        raise TypeError(
-            "model_cfg must be a dict (new checkpoints) or WhisperClassifierConfig (legacy)"
-        )
+        raise TypeError("model_cfg must be a dict or MILModelConfig")
     encoder_raw = raw.get("encoder")
     if not isinstance(encoder_raw, dict):
-        raise TypeError("model_cfg['encoder'] must be a dict")
+        raise TypeError("model_cfg.encoder must be a dict")
     encoder = WhisperEncoderDims(**encoder_raw)
-
-    head_type_raw = raw.get("head_type", raw.get("classifier_type", "hf"))
-    if head_type_raw not in ("hf", "linear", "mlp"):
-        raise ValueError(f"Unsupported head_type: {head_type_raw}")
-    head_type = cast(Literal["hf", "linear", "mlp"], head_type_raw)
-
-    pooling_raw = raw.get("pooling", "mean")
-    if pooling_raw not in ("mean", "cls"):
-        raise ValueError(f"Unsupported pooling: {pooling_raw}")
-    if head_type != "hf" and pooling_raw != "mean":
-        raise ValueError(
-            f"Unsupported pooling `{pooling_raw}` for legacy head_type `{head_type}`"
-        )
-    pooling = cast(Literal["mean", "cls"], pooling_raw)
-
-    return WhisperClassifierConfig(
+    return MILModelConfig(
         encoder=encoder,
-        num_classes=int(raw["num_classes"]),
-        head_type=head_type,
-        pooling=pooling,
-        use_weighted_layer_sum=bool(raw.get("use_weighted_layer_sum", False)),
-        classifier_proj_size=int(raw.get("classifier_proj_size", 256)),
-        hidden_dim=int(raw.get("hidden_dim", 256)),
-        dropout=float(raw.get("dropout", 0.0)),
+        instance_head_type=raw.get("instance_head_type", "linear"),
+        instance_hidden_dim=int(raw.get("instance_hidden_dim", 256)),
+        instance_dropout=float(raw.get("instance_dropout", 0.0)),
+        aggregator=raw.get("aggregator", "max"),
+        topk_k=int(raw.get("topk_k", 1)),
+        attention_hidden_dim=int(raw.get("attention_hidden_dim", 128)),
+        attention_dropout=float(raw.get("attention_dropout", 0.0)),
+        attention_gated=bool(raw.get("attention_gated", True)),
+        logsumexp_temperature=float(raw.get("logsumexp_temperature", 1.0)),
+        softmax_weighted_temperature=float(
+            raw.get("softmax_weighted_temperature", 1.0)
+        ),
+        noisy_or_clamp_eps=float(raw.get("noisy_or_clamp_eps", 1e-6)),
     )

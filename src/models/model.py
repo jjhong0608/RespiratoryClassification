@@ -5,82 +5,105 @@ from typing import Literal
 
 from torch import Tensor, nn
 
-from src.models.classifier import (
-    ClassifierDims,
-    HuggingFaceClassifier,
-    HuggingFaceClassifierDims,
-    LinearClassifier,
-    MlpClassifier,
-)
-from src.models.whisper_encoder import AudioEncoder, WhisperEncoderDims
+from src.models.instance_head import InstanceHeadConfig, build_instance_head
+from src.models.mil_aggregators import build_mil_aggregator
+from src.models.segment_encoder import WhisperSegmentEncoder
+from src.models.whisper_encoder import WhisperEncoderDims
 
 
 @dataclass(frozen=True)
-class WhisperClassifierConfig:
+class MILModelConfig:
     encoder: WhisperEncoderDims
-    num_classes: int
-    head_type: Literal["hf", "linear", "mlp"] = "hf"
-    pooling: Literal["mean", "cls"] = "mean"
-    use_weighted_layer_sum: bool = False
-    classifier_proj_size: int = 256
-    hidden_dim: int = 256
-    dropout: float = 0.0
+    instance_head_type: Literal["linear", "mlp"] = "linear"
+    instance_hidden_dim: int = 256
+    instance_dropout: float = 0.0
+    aggregator: Literal[
+        "max",
+        "mean",
+        "topk",
+        "attention",
+        "logsumexp",
+        "softmax_weighted",
+        "noisy_or",
+    ] = "max"
+    topk_k: int = 1
+    attention_hidden_dim: int = 128
+    attention_dropout: float = 0.0
+    attention_gated: bool = True
+    logsumexp_temperature: float = 1.0
+    softmax_weighted_temperature: float = 1.0
+    noisy_or_clamp_eps: float = 1e-6
 
 
-class WhisperEncoderClassifier(nn.Module):
-    def __init__(self, cfg: WhisperClassifierConfig):
+@dataclass(frozen=True)
+class MILModelOutput:
+    bag_logits: Tensor
+    instance_logits: Tensor
+    instance_embeddings: Tensor
+    attention_weights: Tensor | None = None
+    topk_indices: Tensor | None = None
+
+
+class RespiratoryMILModel(nn.Module):
+    def __init__(self, cfg: MILModelConfig):
         super().__init__()
         self.cfg = cfg
-        if cfg.head_type != "hf" and cfg.pooling != "mean":
-            raise ValueError("Legacy linear/mlp heads only support pooling='mean'")
-        self.encoder = AudioEncoder(cfg.encoder)
-        if cfg.head_type == "hf":
-            self.classifier: nn.Module = HuggingFaceClassifier(
-                HuggingFaceClassifierDims(
-                    in_dim=cfg.encoder.n_audio_state,
-                    num_classes=cfg.num_classes,
-                    num_hidden_layers=cfg.encoder.n_audio_layer,
-                    pooling=cfg.pooling,
-                    classifier_proj_size=cfg.classifier_proj_size,
-                    use_weighted_layer_sum=cfg.use_weighted_layer_sum,
-                )
+        self.segment_encoder = WhisperSegmentEncoder(cfg.encoder)
+        self.instance_head = build_instance_head(
+            InstanceHeadConfig(
+                input_dim=cfg.encoder.n_audio_state,
+                head_type=cfg.instance_head_type,
+                hidden_dim=cfg.instance_hidden_dim,
+                dropout=cfg.instance_dropout,
             )
-        else:
-            dims = ClassifierDims(
-                in_dim=cfg.encoder.n_audio_state,
-                num_classes=cfg.num_classes,
-                hidden_dim=cfg.hidden_dim,
-                dropout=cfg.dropout,
-            )
-            if cfg.head_type == "linear":
-                self.classifier = LinearClassifier(dims)
-            else:
-                self.classifier = MlpClassifier(dims)
-
-    def forward(self, x: Tensor) -> Tensor:
-        need_hidden_states = (
-            self.cfg.head_type == "hf" and self.cfg.use_weighted_layer_sum
         )
-        if self.cfg.head_type == "hf":
-            if not isinstance(self.classifier, HuggingFaceClassifier):
-                raise RuntimeError("Expected HuggingFaceClassifier for head_type='hf'")
-            prefix_tokens = self.classifier.build_prefix_tokens(
-                x.shape[0],
-                device=x.device,
-                dtype=x.dtype,
+        self.aggregator = build_mil_aggregator(
+            cfg.aggregator,
+            input_dim=cfg.encoder.n_audio_state,
+            topk_k=cfg.topk_k,
+            attention_hidden_dim=cfg.attention_hidden_dim,
+            attention_dropout=cfg.attention_dropout,
+            attention_gated=cfg.attention_gated,
+            logsumexp_temperature=cfg.logsumexp_temperature,
+            softmax_weighted_temperature=cfg.softmax_weighted_temperature,
+            noisy_or_clamp_eps=cfg.noisy_or_clamp_eps,
+        )
+
+    @property
+    def encoder(self) -> nn.Module:
+        return self.segment_encoder.encoder
+
+    def forward(self, segments: Tensor, instance_mask: Tensor) -> MILModelOutput:
+        if segments.ndim != 4:
+            raise ValueError(
+                f"segments must have shape (B, M, n_mels, n_frames), got {tuple(segments.shape)}"
             )
-            features = self.encoder(
-                x,
-                output_hidden_states=need_hidden_states,
-                prefix_tokens=prefix_tokens,
+        if instance_mask.ndim != 2:
+            raise ValueError(
+                f"instance_mask must have shape (B, M), got {tuple(instance_mask.shape)}"
             )
-            return self.classifier(
-                features.last_hidden_state,
-                features.hidden_states,
-            )
-        features = self.encoder(x, output_hidden_states=need_hidden_states)
-        if self.cfg.pooling == "mean":
-            pooled = features.last_hidden_state.mean(dim=1)
-        else:
-            raise ValueError(f"Unsupported pooling: {self.cfg.pooling}")
-        return self.classifier(pooled)
+        batch_size, num_instances, _, _ = segments.shape
+        flat_segments = segments.view(
+            batch_size * num_instances,
+            segments.shape[2],
+            segments.shape[3],
+        )
+        encoded = self.segment_encoder(flat_segments)
+        instance_embeddings = encoded.embeddings.view(
+            batch_size,
+            num_instances,
+            self.cfg.encoder.n_audio_state,
+        )
+        instance_logits = self.instance_head(instance_embeddings)
+        aggregated = self.aggregator(
+            instance_logits=instance_logits,
+            instance_embeddings=instance_embeddings,
+            instance_mask=instance_mask,
+        )
+        return MILModelOutput(
+            bag_logits=aggregated.bag_logits,
+            instance_logits=instance_logits,
+            instance_embeddings=instance_embeddings,
+            attention_weights=aggregated.attention_weights,
+            topk_indices=aggregated.topk_indices,
+        )

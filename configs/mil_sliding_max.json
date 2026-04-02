@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "wheeze_mil_sliding_topk",
+    "name": "wheeze_mil_sliding_max",
     "task": "normal_vs_wheeze",
     "mode": "mil",
     "seed": 42,
@@ -58,7 +58,7 @@
       "dropout": 0.1
     },
     "mil": {
-      "aggregator": "topk",
+      "aggregator": "max",
       "return_instance_scores": true,
       "topk": {
         "k": 3
@@ -100,7 +100,7 @@
     "outputs": {
       "save_segment_scores": true,
       "save_attention_weights": false,
-      "save_topk_indices": true,
+      "save_topk_indices": false,
       "save_bag_metadata": true
     }
   }
