@@ -90,6 +90,7 @@
     },
     "loss": {
       "type": "bce",
+      "auto_pos_weight": true,
       "pos_weight": null
     },
     "sampler": {

@@ -96,6 +96,7 @@ def _training_payload() -> dict:
             },
             "loss": {
                 "type": "bce",
+                "auto_pos_weight": False,
                 "pos_weight": None,
             },
             "sampler": {
@@ -145,4 +146,30 @@ def test_invalid_topk_config_requires_positive_k(tmp_path: Path) -> None:
     config_path = _write_json(tmp_path / "invalid_topk.json", payload)
 
     with pytest.raises(ValueError, match="model.mil.topk.k must be greater than zero"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_training_config_parses_auto_pos_weight(tmp_path: Path) -> None:
+    payload = _training_payload()
+    payload["train"]["loss"]["auto_pos_weight"] = True
+    config_path = _write_json(tmp_path / "auto_pos_weight.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.auto_pos_weight is True
+    assert cfg.train.loss.pos_weight is None
+
+
+def test_training_config_rejects_conflicting_pos_weight_settings(
+    tmp_path: Path,
+) -> None:
+    payload = _training_payload()
+    payload["train"]["loss"]["auto_pos_weight"] = True
+    payload["train"]["loss"]["pos_weight"] = 3.0
+    config_path = _write_json(tmp_path / "conflicting_pos_weight.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="train.loss.auto_pos_weight and train.loss.pos_weight cannot both be set",
+    ):
         JsonConfigLoader.load_training(config_path)

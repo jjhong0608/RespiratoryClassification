@@ -161,6 +161,7 @@ class OptimizerConfig:
 @dataclass(frozen=True)
 class LossConfig:
     type: Literal["bce"] = "bce"
+    auto_pos_weight: bool = False
     pos_weight: float | None = None
 
 
@@ -384,6 +385,10 @@ class JsonConfigLoader:
             raise ValueError("train.optimizer.weight_decay must be non-negative")
         if cfg.loss.type != "bce":
             raise ValueError("Only train.loss.type='bce' is supported")
+        if cfg.loss.auto_pos_weight and cfg.loss.pos_weight is not None:
+            raise ValueError(
+                "train.loss.auto_pos_weight and train.loss.pos_weight cannot both be set"
+            )
         if cfg.loss.pos_weight is not None and cfg.loss.pos_weight <= 0:
             raise ValueError("train.loss.pos_weight must be greater than zero")
 

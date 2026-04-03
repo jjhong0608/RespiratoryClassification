@@ -4,7 +4,7 @@
     "task": "normal_vs_wheeze",
     "mode": "mil",
     "seed": 42,
-    "device": "cpu",
+    "device": "mps",
     "output_dir": "checkpoints"
   },
   "data": {
@@ -80,7 +80,7 @@
     }
   },
   "train": {
-    "epochs": 20,
+    "epochs": 100,
     "top_k": 3,
     "warmup_ratio": 0.05,
     "max_grad_norm": 1.0,
@@ -90,45 +90,46 @@
     },
     "loss": {
       "type": "bce",
+      "auto_pos_weight": true,
       "pos_weight": null
     },
     "sampler": {
-      "weighted_random": false
+      "weighted_random": true
     }
   },
   "analysis": {
     "outputs": {
       "save_segment_scores": true,
       "save_attention_weights": true,
-      "save_topk_indices": false,
+      "save_topk_indices": true,
       "save_bag_metadata": true
     }
   },
   "folds": [
     {
       "name": "fold_0",
-      "train_dirs": ["datasets/folds/fold_0/train"],
-      "val_dirs": ["datasets/folds/fold_0/val"]
+      "train_dirs": ["datasets/folds/fold_1/", "datasets/folds/fold_2/", "datasets/folds/fold_3/", "datasets/folds/fold_4/"],
+      "val_dirs": ["datasets/folds/fold_0/"]
     },
     {
       "name": "fold_1",
-      "train_dirs": ["datasets/folds/fold_1/train"],
-      "val_dirs": ["datasets/folds/fold_1/val"]
+      "train_dirs": ["datasets/folds/fold_0/", "datasets/folds/fold_2/", "datasets/folds/fold_3/", "datasets/folds/fold_4/"],
+      "val_dirs": ["datasets/folds/fold_1/"]
     },
     {
       "name": "fold_2",
-      "train_dirs": ["datasets/folds/fold_2/train"],
-      "val_dirs": ["datasets/folds/fold_2/val"]
+      "train_dirs": ["datasets/folds/fold_0/", "datasets/folds/fold_1/", "datasets/folds/fold_3/", "datasets/folds/fold_4/"],
+      "val_dirs": ["datasets/folds/fold_2/"]
     },
     {
       "name": "fold_3",
-      "train_dirs": ["datasets/folds/fold_3/train"],
-      "val_dirs": ["datasets/folds/fold_3/val"]
+      "train_dirs": ["datasets/folds/fold_0/", "datasets/folds/fold_1/", "datasets/folds/fold_2/", "datasets/folds/fold_4/"],
+      "val_dirs": ["datasets/folds/fold_3/"]
     },
     {
       "name": "fold_4",
-      "train_dirs": ["datasets/folds/fold_4/train"],
-      "val_dirs": ["datasets/folds/fold_4/val"]
+      "train_dirs": ["datasets/folds/fold_1/", "datasets/folds/fold_1/", "datasets/folds/fold_2/", "datasets/folds/fold_3/"],
+      "val_dirs": ["datasets/folds/fold_4/"]
     }
   ]
 }

@@ -1,16 +1,16 @@
 {
   "experiment": {
-    "name": "wheeze_mil_nonoverlap_mean",
+    "name": "wheeze_mil_sliding_max_cv",
     "task": "normal_vs_wheeze",
     "mode": "mil",
     "seed": 42,
-    "device": "cpu",
+    "device": "mps",
     "output_dir": "checkpoints"
   },
   "data": {
-    "train_dirs": ["datasets/wheeze/train"],
-    "val_dirs": ["datasets/wheeze/val"],
-    "eval_dirs": ["datasets/wheeze/test"],
+    "train_dirs": [],
+    "val_dirs": [],
+    "eval_dirs": [],
     "label_to_index": {
       "normal": 0,
       "wheeze": 1
@@ -33,24 +33,24 @@
       }
     },
     "segment": {
-      "mode": "non_overlap",
+      "mode": "sliding_window",
       "length_sec": 5.0,
-      "stride_sec": null,
-      "pad_last": false,
-      "drop_last": true
+      "stride_sec": 2.5,
+      "pad_last": true,
+      "drop_last": false
     }
   },
   "model": {
     "encoder": {
       "type": "whisper",
-      "backbone": "tiny",
-      "pretrained_name_or_path": "tiny",
+      "backbone": "base",
+      "pretrained_name_or_path": "base",
       "freeze": false,
       "strict": true,
       "download_root": null,
-      "n_audio_state": 384,
-      "n_audio_head": 6,
-      "n_audio_layer": 4
+      "n_audio_state": 512,
+      "n_audio_head": 8,
+      "n_audio_layer": 6
     },
     "instance_head": {
       "type": "linear",
@@ -58,7 +58,7 @@
       "dropout": 0.1
     },
     "mil": {
-      "aggregator": "mean",
+      "aggregator": "max",
       "return_instance_scores": true,
       "topk": {
         "k": 3
@@ -80,7 +80,7 @@
     }
   },
   "train": {
-    "epochs": 20,
+    "epochs": 100,
     "top_k": 3,
     "warmup_ratio": 0.05,
     "max_grad_norm": 1.0,
@@ -94,15 +94,42 @@
       "pos_weight": null
     },
     "sampler": {
-      "weighted_random": false
+      "weighted_random": true
     }
   },
   "analysis": {
     "outputs": {
       "save_segment_scores": true,
-      "save_attention_weights": false,
-      "save_topk_indices": false,
+      "save_attention_weights": true,
+      "save_topk_indices": true,
       "save_bag_metadata": true
     }
-  }
+  },
+  "folds": [
+    {
+      "name": "fold_0",
+      "train_dirs": ["datasets/folds/fold_1/", "datasets/folds/fold_2/", "datasets/folds/fold_3/", "datasets/folds/fold_4/"],
+      "val_dirs": ["datasets/folds/fold_0/"]
+    },
+    {
+      "name": "fold_1",
+      "train_dirs": ["datasets/folds/fold_0/", "datasets/folds/fold_2/", "datasets/folds/fold_3/", "datasets/folds/fold_4/"],
+      "val_dirs": ["datasets/folds/fold_1/"]
+    },
+    {
+      "name": "fold_2",
+      "train_dirs": ["datasets/folds/fold_0/", "datasets/folds/fold_1/", "datasets/folds/fold_3/", "datasets/folds/fold_4/"],
+      "val_dirs": ["datasets/folds/fold_2/"]
+    },
+    {
+      "name": "fold_3",
+      "train_dirs": ["datasets/folds/fold_0/", "datasets/folds/fold_1/", "datasets/folds/fold_2/", "datasets/folds/fold_4/"],
+      "val_dirs": ["datasets/folds/fold_3/"]
+    },
+    {
+      "name": "fold_4",
+      "train_dirs": ["datasets/folds/fold_0/", "datasets/folds/fold_1/", "datasets/folds/fold_2/", "datasets/folds/fold_3/"],
+      "val_dirs": ["datasets/folds/fold_4/"]
+    }
+  ]
 }

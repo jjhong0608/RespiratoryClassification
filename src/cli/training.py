@@ -54,11 +54,18 @@ def main() -> None:
     imbalance = resolve_imbalance(
         targets=train_targets,
         pos_weight=cfg.train.loss.pos_weight,
+        auto_pos_weight=cfg.train.loss.auto_pos_weight,
         weighted_random=cfg.train.sampler.weighted_random,
     )
     logger.info("Train class counts: %s", dict(imbalance.class_counts))
     if imbalance.pos_weight is not None:
-        logger.info("Using BCE pos_weight=%.6f", imbalance.pos_weight)
+        if cfg.train.loss.auto_pos_weight:
+            logger.info(
+                "Using auto-computed BCE pos_weight=%.6f from training bags",
+                imbalance.pos_weight,
+            )
+        else:
+            logger.info("Using BCE pos_weight=%.6f", imbalance.pos_weight)
 
     sampler = (
         build_weighted_sampler(train_targets) if imbalance.weighted_random else None

@@ -45,9 +45,18 @@ def resolve_imbalance(
     *,
     targets: Sequence[int],
     pos_weight: float | None,
+    auto_pos_weight: bool,
     weighted_random: bool,
 ) -> ResolvedImbalance:
-    resolved_pos_weight = None if pos_weight is None else float(pos_weight)
+    if auto_pos_weight and pos_weight is not None:
+        raise ValueError(
+            "Set only one of `train.loss.auto_pos_weight` or `train.loss.pos_weight`"
+        )
+    resolved_pos_weight: float | None
+    if auto_pos_weight:
+        resolved_pos_weight = compute_binary_pos_weight(targets)
+    else:
+        resolved_pos_weight = None if pos_weight is None else float(pos_weight)
     if resolved_pos_weight is not None and resolved_pos_weight <= 0:
         raise ValueError("train.loss.pos_weight must be greater than zero")
     return ResolvedImbalance(
