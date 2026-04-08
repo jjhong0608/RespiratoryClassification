@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 import torch
 from src.cli.evaluate import evaluate_checkpoint
 from src.data.loaders import build_bag_loader, build_dataset
+from src.evaluation.thresholds import ThresholdOptimizationConfig
 from src.models.model import MILModelConfig, RespiratoryMILModel
 from src.models.whisper_encoder import WhisperEncoderDims
 from src.training.trainer import Trainer, TrainerConfig
+from src.utils.checkpoint import load_checkpoint
 from src.utils.config import (
     AnalysisConfig,
     AnalysisOutputConfig,
@@ -28,6 +31,17 @@ def _write_wav(path: Path, duration_sec: float, sample_rate: int) -> None:
     t = np.linspace(0.0, duration_sec, int(duration_sec * sample_rate), endpoint=False)
     tone = 0.2 * np.sin(2.0 * np.pi * 320.0 * t)
     sf.write(path, tone.astype(np.float32), sample_rate)
+
+
+def _analysis_cfg() -> AnalysisConfig:
+    return AnalysisConfig(
+        outputs=AnalysisOutputConfig(
+            save_segment_scores=True,
+            save_attention_weights=True,
+            save_topk_indices=False,
+            save_bag_metadata=True,
+        )
+    )
 
 
 def _data_cfg(root: Path) -> DataConfig:
@@ -66,25 +80,8 @@ def _prepare_dataset(root: Path) -> DataConfig:
     return _data_cfg(root)
 
 
-def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
-    torch.manual_seed(0)
-    data_cfg = _prepare_dataset(tmp_path / "bags")
-    train_dataset = build_dataset(data_cfg, split="train")
-    val_dataset = build_dataset(data_cfg, split="val")
-    train_loader = build_bag_loader(
-        train_dataset,
-        batch_size=data_cfg.batch_size,
-        num_workers=data_cfg.num_workers,
-        shuffle=False,
-    )
-    val_loader = build_bag_loader(
-        val_dataset,
-        batch_size=data_cfg.batch_size,
-        num_workers=data_cfg.num_workers,
-        shuffle=False,
-    )
-
-    model = RespiratoryMILModel(
+def _build_model(train_dataset: object) -> RespiratoryMILModel:
+    return RespiratoryMILModel(
         MILModelConfig(
             encoder=WhisperEncoderDims(
                 n_mels=train_dataset.segment_n_mels,
@@ -106,6 +103,27 @@ def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
             noisy_or_clamp_eps=1e-6,
         )
     )
+
+
+def _train_smoke_run(tmp_path: Path) -> tuple[Path, DataConfig]:
+    torch.manual_seed(0)
+    data_cfg = _prepare_dataset(tmp_path / "bags")
+    train_dataset = build_dataset(data_cfg, split="train")
+    val_dataset = build_dataset(data_cfg, split="val")
+    train_loader = build_bag_loader(
+        train_dataset,
+        batch_size=data_cfg.batch_size,
+        num_workers=data_cfg.num_workers,
+        shuffle=False,
+    )
+    val_loader = build_bag_loader(
+        val_dataset,
+        batch_size=data_cfg.batch_size,
+        num_workers=data_cfg.num_workers,
+        shuffle=False,
+    )
+
+    model = _build_model(train_dataset)
     run_dir = tmp_path / "run"
     trainer = Trainer(
         TrainerConfig(
@@ -117,15 +135,10 @@ def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
             max_grad_norm=1.0,
             top_k=1,
             run_dir=run_dir,
-            pos_weight=None,
-            analysis=AnalysisConfig(
-                outputs=AnalysisOutputConfig(
-                    save_segment_scores=True,
-                    save_attention_weights=True,
-                    save_topk_indices=False,
-                    save_bag_metadata=True,
-                )
-            ),
+            loss_type="focal",
+            gamma=2.0,
+            pos_weight=2.0,
+            analysis=_analysis_cfg(),
         )
     )
     trainer.fit(
@@ -137,12 +150,15 @@ def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
             "label_to_index": dict(data_cfg.label_to_index),
         },
     )
+    return run_dir / "last.pt", data_cfg
 
-    checkpoint_path = run_dir / "last.pt"
-    assert checkpoint_path.exists()
-    assert (run_dir / "diagnostics" / "val_epoch_001.jsonl").exists()
 
-    eval_cfg = EvalConfig(
+def _eval_cfg(
+    tmp_path: Path,
+    checkpoint_path: Path,
+    data_cfg: DataConfig,
+) -> EvalConfig:
+    return EvalConfig(
         experiment=ExperimentConfig(
             name="eval",
             task="normal_vs_wheeze",
@@ -153,16 +169,37 @@ def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
         ),
         checkpoint_path=str(checkpoint_path),
         data=data_cfg,
-        analysis=AnalysisConfig(
-            outputs=AnalysisOutputConfig(
-                save_segment_scores=True,
-                save_attention_weights=True,
-                save_topk_indices=False,
-                save_bag_metadata=True,
-            )
+        analysis=_analysis_cfg(),
+        threshold_optimization=ThresholdOptimizationConfig(
+            enabled=True,
+            metric="f1",
         ),
     )
 
+
+def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
+    checkpoint_path, data_cfg = _train_smoke_run(tmp_path)
+    run_dir = checkpoint_path.parent
+
+    assert checkpoint_path.exists()
+    assert sorted(run_dir.glob("best_loss_*.pt"))
+    assert sorted(run_dir.glob("best_f1_*.pt"))
+    assert (run_dir / "diagnostics" / "val_epoch_001.jsonl").exists()
+
+    checkpoint = load_checkpoint(str(checkpoint_path), device=torch.device("cpu"))
+    assert "val_threshold_optimization" in checkpoint
+    assert checkpoint["val_threshold_optimization"]["selected_metric"] == "f1"
+    assert (
+        checkpoint["val_threshold_optimization"]["threshold_source"]
+        == "validation_optimization"
+    )
+    assert "val_metrics_optimized" in checkpoint
+    assert checkpoint["val_metrics_optimized"][0]["f1_score"] >= 0.0
+    saved_threshold = float(
+        checkpoint["val_threshold_optimization"]["selected_threshold"]
+    )
+
+    eval_cfg = _eval_cfg(tmp_path, checkpoint_path, data_cfg)
     metrics, rows, diagnostics = evaluate_checkpoint(
         eval_cfg,
         checkpoint_path,
@@ -171,5 +208,76 @@ def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
     )
 
     assert "accuracy" in metrics
+    assert metrics["decision_threshold"] == 0.5
+    assert metrics["threshold_optimization"]["enabled"] is True
+    assert metrics["threshold_optimization"]["applied"] is True
+    assert (
+        metrics["threshold_optimization"]["threshold_source"]
+        == "checkpoint_validation"
+    )
+    assert metrics["threshold_optimization"]["selected_threshold"] == pytest.approx(
+        saved_threshold
+    )
+    assert "optimized_metrics" in metrics
+    assert metrics["optimized_metrics"]["decision_threshold"] == pytest.approx(
+        saved_threshold
+    )
     assert len(rows) == 2
     assert len(diagnostics) == 2
+
+
+def test_evaluate_checkpoint_uses_checkpoint_validation_threshold_for_single_class_eval_set(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path, data_cfg = _train_smoke_run(tmp_path)
+    checkpoint = load_checkpoint(str(checkpoint_path), device=torch.device("cpu"))
+    saved_threshold = float(
+        checkpoint["val_threshold_optimization"]["selected_threshold"]
+    )
+    single_class_root = tmp_path / "eval_only_normal"
+    (single_class_root / "normal").mkdir(parents=True, exist_ok=True)
+    _write_wav(single_class_root / "normal" / "normal_only.wav", 1.1, 16000)
+
+    eval_cfg = _eval_cfg(
+        tmp_path,
+        checkpoint_path,
+        replace(data_cfg, eval_dirs=[str(single_class_root)]),
+    )
+    metrics = evaluate_checkpoint(eval_cfg, checkpoint_path)
+
+    assert metrics["threshold_optimization"]["enabled"] is True
+    assert metrics["threshold_optimization"]["applied"] is True
+    assert (
+        metrics["threshold_optimization"]["threshold_source"]
+        == "checkpoint_validation"
+    )
+    assert metrics["threshold_optimization"]["selected_threshold"] == pytest.approx(
+        saved_threshold
+    )
+    assert metrics["optimized_metrics"]["decision_threshold"] == pytest.approx(
+        saved_threshold
+    )
+
+
+def test_evaluate_checkpoint_falls_back_to_fixed_threshold_for_legacy_checkpoint(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path, data_cfg = _train_smoke_run(tmp_path)
+    checkpoint = load_checkpoint(str(checkpoint_path), device=torch.device("cpu"))
+    checkpoint.pop("val_threshold_optimization", None)
+    checkpoint.pop("val_metrics_optimized", None)
+
+    legacy_checkpoint_path = tmp_path / "legacy.pt"
+    torch.save(checkpoint, legacy_checkpoint_path)
+
+    eval_cfg = _eval_cfg(tmp_path, legacy_checkpoint_path, data_cfg)
+    metrics = evaluate_checkpoint(eval_cfg, legacy_checkpoint_path)
+
+    assert metrics["threshold_optimization"]["enabled"] is True
+    assert metrics["threshold_optimization"]["applied"] is False
+    assert metrics["threshold_optimization"]["threshold_source"] == "fixed_default"
+    assert metrics["threshold_optimization"]["selected_threshold"] == 0.5
+    assert "missing val_threshold_optimization" in metrics["threshold_optimization"][
+        "reason"
+    ]
+    assert metrics["optimized_metrics"]["decision_threshold"] == 0.5

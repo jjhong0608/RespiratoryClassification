@@ -15,7 +15,9 @@ from tqdm import tqdm
 from src.data.loaders import BagBatch
 from src.evaluation.diagnostics import build_diagnostic_rows, write_diagnostics_jsonl
 from src.evaluation.metrics import EvalMetrics, MetricsComputer
+from src.evaluation.thresholds import compute_threshold_optimized_metrics
 from src.models.model import MILModelOutput
+from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
 from src.utils.config import AnalysisConfig
 from src.utils.fs import Fs
@@ -32,6 +34,8 @@ class TrainerConfig:
     max_grad_norm: float
     top_k: int
     run_dir: Path
+    loss_type: str = "bce"
+    gamma: float = 2.0
     pos_weight: float | None = None
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
 
@@ -50,7 +54,7 @@ class CheckpointManager(LoggingMixin):
     def __init__(self, run_dir: Path, top_k: int):
         self.run_dir = run_dir
         self.top_k = top_k
-        self._best: list[tuple[float, Path]] = []
+        self._best: dict[str, list[tuple[float, Path]]] = {}
 
     def save_last(self, state: dict[str, Any]) -> Path:
         path = self.run_dir / "last.pt"
@@ -58,29 +62,45 @@ class CheckpointManager(LoggingMixin):
         self.logger.info("Saved last checkpoint: %s", path)
         return path
 
-    def maybe_save_best(self, val_loss: float, state: dict[str, Any]) -> None:
-        path = self.run_dir / f"best_loss_{val_loss:.6f}.pt"
+    def maybe_save_best(
+        self,
+        name: str,
+        score: float,
+        state: dict[str, Any],
+        *,
+        maximize: bool = False,
+    ) -> None:
+        path = self.run_dir / f"best_{name}_{score:.6f}.pt"
         torch.save(state, path)
-        self._best.append((val_loss, path))
-        self._best.sort(key=lambda item: item[0])
+        monitor = self._best.setdefault(name, [])
+        monitor[:] = [
+            (existing_score, existing_path)
+            for existing_score, existing_path in monitor
+            if existing_path != path
+        ]
+        monitor.append((score, path))
+        monitor.sort(key=lambda item: item[0], reverse=maximize)
         rank = next(
             index
-            for index, (_, item_path) in enumerate(self._best, start=1)
+            for index, (_, item_path) in enumerate(monitor, start=1)
             if item_path == path
         )
         self.logger.info(
-            "Saved best checkpoint (rank %d/%d): %s (val_loss=%.6f)",
+            "Saved best checkpoint [%s] (rank %d/%d): %s (%s=%.6f)",
+            name,
             rank,
             self.top_k,
             path,
-            val_loss,
+            name,
+            score,
         )
-        while len(self._best) > self.top_k:
-            _, to_remove = self._best.pop(-1)
+        while len(monitor) > self.top_k:
+            _, to_remove = monitor.pop(-1)
             with suppress(FileNotFoundError):
                 to_remove.unlink()
             self.logger.info(
-                "Removed checkpoint (exceeds top_k=%d): %s",
+                "Removed checkpoint [%s] (exceeds top_k=%d): %s",
+                name,
                 self.top_k,
                 to_remove,
             )
@@ -97,14 +117,23 @@ class Trainer(LoggingMixin):
             else torch.tensor(cfg.pos_weight, dtype=torch.float32)
         )
 
-    def _criterion_on(self, device: torch.device) -> nn.BCEWithLogitsLoss:
-        if self.cfg.pos_weight is None:
-            return self._criterion
-        return nn.BCEWithLogitsLoss(
-            pos_weight=torch.tensor(
-                self.cfg.pos_weight, device=device, dtype=torch.float32
+    def _criterion_on(self, device: torch.device) -> nn.Module:
+        if self.cfg.loss_type == "bce":
+            if self.cfg.pos_weight is None:
+                return self._criterion
+            return nn.BCEWithLogitsLoss(
+                pos_weight=torch.tensor(
+                    self.cfg.pos_weight,
+                    device=device,
+                    dtype=torch.float32,
+                )
             )
-        )
+        if self.cfg.loss_type == "focal":
+            return FocalLoss(
+                gamma=self.cfg.gamma,
+                pos_weight=self.cfg.pos_weight,
+            ).to(device)
+        raise ValueError(f"Unknown loss type: {self.cfg.loss_type}")
 
     def _epoch(
         self,
@@ -212,6 +241,13 @@ class Trainer(LoggingMixin):
                     scheduler=None,
                     device=device,
                 )
+            val_threshold_optimization, val_metrics_optimized = (
+                compute_threshold_optimized_metrics(
+                    val_result.targets,
+                    val_result.probabilities,
+                    "f1",
+                )
+            )
 
             train_losses.append(train_result.loss)
             val_losses.append(val_result.loss)
@@ -225,7 +261,8 @@ class Trainer(LoggingMixin):
                 "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
                 "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
                 "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
-                "Val Precision: %.4f | Val F1: %.4f | Val Balanced Acc: %.4f",
+                "Val Precision: %.4f | Val F1@0.5: %.4f | Val Balanced Acc@0.5: %.4f | "
+                "Val F1@opt: %.4f | Val Balanced Acc@opt: %.4f | Val Opt Threshold: %.4f",
                 epoch,
                 self.cfg.epochs,
                 lr_str,
@@ -240,6 +277,9 @@ class Trainer(LoggingMixin):
                 val_result.metrics.precision,
                 val_result.metrics.f1_score,
                 val_result.metrics.balanced_accuracy,
+                val_metrics_optimized.f1_score,
+                val_metrics_optimized.balanced_accuracy,
+                val_threshold_optimization.selected_threshold,
             )
 
             diagnostics_path = None
@@ -266,6 +306,8 @@ class Trainer(LoggingMixin):
                 "val_losses": val_losses,
                 "train_metrics": [train_result.metrics.to_dict()],
                 "val_metrics": [result.to_dict() for result in [val_result.metrics]],
+                "val_threshold_optimization": val_threshold_optimization.to_dict(),
+                "val_metrics_optimized": [val_metrics_optimized.to_dict()],
                 "diagnostics_path": str(diagnostics_path) if diagnostics_path else None,
             }
             if extra_state:
@@ -275,4 +317,10 @@ class Trainer(LoggingMixin):
                     else:
                         state[key] = value
             self.ckpt.save_last(state)
-            self.ckpt.maybe_save_best(val_result.loss, state)
+            self.ckpt.maybe_save_best("loss", val_result.loss, state, maximize=False)
+            self.ckpt.maybe_save_best(
+                "f1",
+                val_metrics_optimized.f1_score,
+                state,
+                maximize=True,
+            )

@@ -8,6 +8,10 @@
     "output_dir": "checkpoints"
   },
   "checkpoint_path": "checkpoints/wheeze_mil_sliding_attention_cv/fold_0/last.pt",
+  "threshold_optimization": {
+    "enabled": true,
+    "metric": "f1"
+  },
   "data": {
     "train_dirs": [],
     "val_dirs": [],

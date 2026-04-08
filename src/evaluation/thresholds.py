@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 import numpy as np
 from sklearn.metrics import precision_recall_curve, roc_curve
 
+from src.evaluation.metrics import EvalMetrics, MetricsComputer
+
 ThresholdMetric = Literal["f1", "balanced_accuracy", "youden_j"]
+ThresholdSource = Literal[
+    "validation_optimization",
+    "checkpoint_validation",
+    "fixed_default",
+    "disabled",
+]
 
 
 @dataclass(frozen=True)
@@ -30,9 +39,29 @@ class ThresholdOptimizationResult:
     selected_threshold: float
     selected_score: float | None
     reason: str | None
+    threshold_source: ThresholdSource
     f1: ThresholdMetricResult | None
     balanced_accuracy: ThresholdMetricResult | None
     youden_j: ThresholdMetricResult | None
+
+    @staticmethod
+    def disabled(
+        metric: ThresholdMetric,
+        *,
+        threshold: float = 0.5,
+    ) -> ThresholdOptimizationResult:
+        return ThresholdOptimizationResult(
+            enabled=False,
+            applied=False,
+            selected_metric=metric,
+            selected_threshold=threshold,
+            selected_score=None,
+            reason="threshold optimization disabled",
+            threshold_source="disabled",
+            f1=None,
+            balanced_accuracy=None,
+            youden_j=None,
+        )
 
     @staticmethod
     def fallback(
@@ -40,6 +69,7 @@ class ThresholdOptimizationResult:
         *,
         reason: str,
         threshold: float = 0.5,
+        threshold_source: ThresholdSource = "fixed_default",
     ) -> ThresholdOptimizationResult:
         return ThresholdOptimizationResult(
             enabled=True,
@@ -48,6 +78,7 @@ class ThresholdOptimizationResult:
             selected_threshold=threshold,
             selected_score=None,
             reason=reason,
+            threshold_source=threshold_source,
             f1=None,
             balanced_accuracy=None,
             youden_j=None,
@@ -99,6 +130,7 @@ class ThresholdOptimizer:
             selected_threshold=selected.threshold,
             selected_score=selected.score,
             reason=None,
+            threshold_source="validation_optimization",
             f1=f1,
             balanced_accuracy=balanced_accuracy,
             youden_j=youden_j,
@@ -160,3 +192,142 @@ class ThresholdOptimizer:
         closest_mask = np.isclose(distances, min_distance, rtol=1e-12, atol=1e-12)
         selected_threshold = float(np.max(candidate_thresholds[closest_mask]))
         return selected_threshold, best_score
+
+
+def compute_threshold_optimized_metrics(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    metric: ThresholdMetric,
+) -> tuple[ThresholdOptimizationResult, EvalMetrics]:
+    target_arr = np.asarray(y_true, dtype=int).reshape(-1)
+    score_arr = np.asarray(y_score, dtype=float).reshape(-1)
+    optimization = ThresholdOptimizer(target_arr, score_arr).optimize(metric)
+    metrics = compute_metrics_at_threshold(
+        target_arr,
+        score_arr,
+        optimization.selected_threshold,
+    )
+    return optimization, metrics
+
+
+def compute_metrics_at_threshold(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    threshold: float,
+) -> EvalMetrics:
+    target_arr = np.asarray(y_true, dtype=int).reshape(-1)
+    score_arr = np.asarray(y_score, dtype=float).reshape(-1)
+    predictions = ThresholdOptimizer.predict(score_arr, threshold)
+    return MetricsComputer.compute(target_arr, predictions, score_arr)
+
+
+def _parse_metric_result(
+    raw: object,
+    metric: ThresholdMetric,
+) -> ThresholdMetricResult | None:
+    if not isinstance(raw, Mapping):
+        return None
+    threshold_raw = raw.get("threshold")
+    score_raw = raw.get("score")
+    try:
+        threshold = float(threshold_raw)
+        score = float(score_raw)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(threshold) or not np.isfinite(score):
+        return None
+    return ThresholdMetricResult(metric=metric, threshold=threshold, score=score)
+
+
+def load_checkpoint_threshold_optimization(
+    raw: object,
+    metric: ThresholdMetric,
+    *,
+    default_threshold: float = 0.5,
+) -> ThresholdOptimizationResult:
+    if not isinstance(raw, Mapping):
+        return ThresholdOptimizationResult.fallback(
+            metric,
+            reason="checkpoint missing val_threshold_optimization metadata",
+            threshold=default_threshold,
+            threshold_source="fixed_default",
+        )
+
+    metric_results = {
+        "f1": _parse_metric_result(raw.get("f1"), "f1"),
+        "balanced_accuracy": _parse_metric_result(
+            raw.get("balanced_accuracy"),
+            "balanced_accuracy",
+        ),
+        "youden_j": _parse_metric_result(raw.get("youden_j"), "youden_j"),
+    }
+    selected_metric_result = metric_results[metric]
+    if selected_metric_result is not None:
+        return ThresholdOptimizationResult(
+            enabled=True,
+            applied=True,
+            selected_metric=metric,
+            selected_threshold=selected_metric_result.threshold,
+            selected_score=selected_metric_result.score,
+            reason=None,
+            threshold_source="checkpoint_validation",
+            f1=metric_results["f1"],
+            balanced_accuracy=metric_results["balanced_accuracy"],
+            youden_j=metric_results["youden_j"],
+        )
+
+    selected_metric_raw = raw.get("selected_metric")
+    selected_threshold_raw = raw.get("selected_threshold")
+    selected_score_raw = raw.get("selected_score")
+    raw_applied = raw.get("applied")
+    try:
+        selected_threshold = float(selected_threshold_raw)
+    except (TypeError, ValueError):
+        selected_threshold = None
+    if (
+        selected_metric_raw == metric
+        and selected_threshold is not None
+        and np.isfinite(selected_threshold)
+        and raw_applied is not False
+    ):
+        try:
+            selected_score = (
+                None if selected_score_raw is None else float(selected_score_raw)
+            )
+        except (TypeError, ValueError):
+            selected_score = None
+        if selected_score is not None and not np.isfinite(selected_score):
+            selected_score = None
+        return ThresholdOptimizationResult(
+            enabled=True,
+            applied=True,
+            selected_metric=metric,
+            selected_threshold=selected_threshold,
+            selected_score=selected_score,
+            reason=None,
+            threshold_source="checkpoint_validation",
+            f1=metric_results["f1"],
+            balanced_accuracy=metric_results["balanced_accuracy"],
+            youden_j=metric_results["youden_j"],
+        )
+
+    raw_reason = raw.get("reason")
+    if isinstance(raw_reason, str) and raw_reason:
+        reason = f"checkpoint validation threshold unavailable: {raw_reason}"
+    else:
+        reason = (
+            "checkpoint threshold metadata missing requested metric "
+            f"'{metric}'"
+        )
+    return ThresholdOptimizationResult(
+        enabled=True,
+        applied=False,
+        selected_metric=metric,
+        selected_threshold=default_threshold,
+        selected_score=None,
+        reason=reason,
+        threshold_source="fixed_default",
+        f1=metric_results["f1"],
+        balanced_accuracy=metric_results["balanced_accuracy"],
+        youden_j=metric_results["youden_j"],
+    )

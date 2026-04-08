@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from src.evaluation.thresholds import ThresholdOptimizationConfig
+
 
 @dataclass(frozen=True)
 class ExperimentConfig:
@@ -160,9 +162,10 @@ class OptimizerConfig:
 
 @dataclass(frozen=True)
 class LossConfig:
-    type: Literal["bce"] = "bce"
+    type: Literal["bce", "focal"] = "bce"
     auto_pos_weight: bool = False
     pos_weight: float | None = None
+    gamma: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -209,6 +212,9 @@ class EvalConfig:
     checkpoint_path: str
     data: DataConfig
     analysis: AnalysisConfig
+    threshold_optimization: ThresholdOptimizationConfig = field(
+        default_factory=ThresholdOptimizationConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -229,6 +235,8 @@ class CvRunConfig:
 
 
 class JsonConfigLoader:
+    _THRESHOLD_METRICS = {"f1", "balanced_accuracy", "youden_j"}
+
     @staticmethod
     def load_json(path: str | Path) -> dict[str, Any]:
         config_path = Path(path)
@@ -383,8 +391,8 @@ class JsonConfigLoader:
             raise ValueError("train.optimizer.lr must be greater than zero")
         if cfg.optimizer.weight_decay < 0:
             raise ValueError("train.optimizer.weight_decay must be non-negative")
-        if cfg.loss.type != "bce":
-            raise ValueError("Only train.loss.type='bce' is supported")
+        if cfg.loss.type not in ["bce", "focal"]:
+            raise ValueError("Only train.loss.type='bce' or 'focal' is supported")
         if cfg.loss.auto_pos_weight and cfg.loss.pos_weight is not None:
             raise ValueError(
                 "train.loss.auto_pos_weight and train.loss.pos_weight cannot both be set"
@@ -448,6 +456,18 @@ class JsonConfigLoader:
         return AnalysisConfig(**kwargs)
 
     @staticmethod
+    def _parse_threshold_optimization(
+        raw: Mapping[str, Any] | None,
+    ) -> ThresholdOptimizationConfig:
+        cfg = ThresholdOptimizationConfig(**dict(raw or {}))
+        if cfg.metric not in JsonConfigLoader._THRESHOLD_METRICS:
+            raise ValueError(
+                "threshold_optimization.metric must be one of "
+                f"{sorted(JsonConfigLoader._THRESHOLD_METRICS)}"
+            )
+        return cfg
+
+    @staticmethod
     def load_training(path: str | Path) -> TrainingRunConfig:
         raw = JsonConfigLoader.load_json(path)
         return TrainingRunConfig(
@@ -466,6 +486,9 @@ class JsonConfigLoader:
             checkpoint_path=str(raw["checkpoint_path"]),
             data=JsonConfigLoader._parse_data(raw["data"]),
             analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
+            threshold_optimization=JsonConfigLoader._parse_threshold_optimization(
+                raw.get("threshold_optimization")
+            ),
         )
 
     @staticmethod

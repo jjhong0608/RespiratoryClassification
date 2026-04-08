@@ -114,6 +114,17 @@ def _training_payload() -> dict:
     }
 
 
+def _eval_payload() -> dict:
+    payload = _training_payload()
+    payload.pop("train")
+    payload["checkpoint_path"] = "checkpoints/wheeze_mil_topk/last.pt"
+    payload["threshold_optimization"] = {
+        "enabled": True,
+        "metric": "f1",
+    }
+    return payload
+
+
 def test_load_training_config_uses_nested_mil_schema(tmp_path: Path) -> None:
     config_path = _write_json(tmp_path / "train.json", _training_payload())
 
@@ -160,6 +171,19 @@ def test_training_config_parses_auto_pos_weight(tmp_path: Path) -> None:
     assert cfg.train.loss.pos_weight is None
 
 
+def test_training_config_allows_auto_pos_weight_for_focal_loss(tmp_path: Path) -> None:
+    payload = _training_payload()
+    payload["train"]["loss"]["type"] = "focal"
+    payload["train"]["loss"]["auto_pos_weight"] = True
+    config_path = _write_json(tmp_path / "focal_auto_pos_weight.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.type == "focal"
+    assert cfg.train.loss.auto_pos_weight is True
+    assert cfg.train.loss.gamma == pytest.approx(2.0)
+
+
 def test_training_config_rejects_conflicting_pos_weight_settings(
     tmp_path: Path,
 ) -> None:
@@ -173,3 +197,24 @@ def test_training_config_rejects_conflicting_pos_weight_settings(
         match="train.loss.auto_pos_weight and train.loss.pos_weight cannot both be set",
     ):
         JsonConfigLoader.load_training(config_path)
+
+
+def test_eval_config_parses_threshold_optimization(tmp_path: Path) -> None:
+    config_path = _write_json(tmp_path / "eval.json", _eval_payload())
+
+    cfg = JsonConfigLoader.load_eval(config_path)
+
+    assert cfg.threshold_optimization.enabled is True
+    assert cfg.threshold_optimization.metric == "f1"
+
+
+def test_eval_config_rejects_invalid_threshold_metric(tmp_path: Path) -> None:
+    payload = _eval_payload()
+    payload["threshold_optimization"]["metric"] = "invalid_metric"
+    config_path = _write_json(tmp_path / "invalid_eval.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="threshold_optimization.metric must be one of",
+    ):
+        JsonConfigLoader.load_eval(config_path)

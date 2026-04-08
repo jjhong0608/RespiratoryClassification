@@ -31,6 +31,22 @@ Ready-to-run example configs:
 
 Artifacts are written under `experiment.output_dir/experiment.name/`.
 
+Training keeps:
+
+- `last.pt`
+- `best_loss_*.pt`
+- `best_f1_*.pt`
+
+Class-imbalance handling lives under `train.loss`:
+
+- `auto_pos_weight: true`
+  - computes `negatives / positives` from the active training split
+- `pos_weight`
+  - optional manual override when `auto_pos_weight` is `false`
+- `type: "bce" | "focal"`
+- `gamma`
+  - focal-loss focusing parameter
+
 ## Evaluate
 
 ```bash
@@ -42,6 +58,31 @@ This writes:
 - `eval_metrics.json`
 - `eval_predictions.csv`
 - `eval_diagnostics.jsonl` when diagnostics are enabled
+
+`eval_metrics.json` keeps the fixed-threshold (`0.5`) metrics at the top level and
+also includes:
+
+- `decision_threshold`
+- `threshold_optimization`
+- `optimized_metrics`
+
+Standard evaluation does not tune thresholds on eval or test labels.
+When threshold optimization is enabled in the eval config, evaluation loads the
+validation-derived threshold saved in the checkpoint and applies that threshold
+to the eval probabilities. If checkpoint threshold metadata is unavailable,
+evaluation falls back safely to `0.5`.
+
+Enable threshold tuning in eval configs with:
+
+```json
+"threshold_optimization": {
+  "enabled": true,
+  "metric": "f1"
+}
+```
+
+This block selects which validation-derived checkpoint threshold is applied
+during evaluation. It does not trigger threshold fitting on the eval split.
 
 ## Cross-Validation
 
@@ -203,6 +244,11 @@ The experiment interface is nested JSON:
     "device": "cpu",
     "output_dir": "checkpoints"
   },
+  "checkpoint_path": "checkpoints/wheeze_mil_sliding_attention/last.pt",
+  "threshold_optimization": {
+    "enabled": true,
+    "metric": "f1"
+  },
   "data": {
     "train_dirs": ["datasets/wheeze/train"],
     "val_dirs": ["datasets/wheeze/val"],
@@ -285,7 +331,8 @@ The experiment interface is nested JSON:
       "weight_decay": 0.01
     },
     "loss": {
-      "type": "bce",
+      "type": "focal",
+      "auto_pos_weight": true,
       "pos_weight": null
     },
     "sampler": {

@@ -12,6 +12,11 @@ import torch
 from src.data.loaders import build_bag_loader, build_dataset
 from src.evaluation.diagnostics import build_diagnostic_rows, write_diagnostics_jsonl
 from src.evaluation.metrics import MetricsComputer
+from src.evaluation.thresholds import (
+    ThresholdOptimizationResult,
+    compute_metrics_at_threshold,
+    load_checkpoint_threshold_optimization,
+)
 from src.models.model import RespiratoryMILModel
 from src.utils.checkpoint import load_checkpoint, parse_model_cfg
 from src.utils.config import EvalConfig, JsonConfigLoader
@@ -96,9 +101,32 @@ def evaluate_checkpoint(
     y_true = np.asarray(targets, dtype=np.int64)
     y_pred = np.asarray(predictions, dtype=np.int64)
     y_prob = np.asarray(probabilities, dtype=np.float64)
-    metrics = MetricsComputer.compute(y_true, y_pred, y_prob).to_dict()
+    baseline_metrics = MetricsComputer.compute(y_true, y_pred, y_prob)
+    if cfg.threshold_optimization.enabled:
+        threshold_optimization = load_checkpoint_threshold_optimization(
+            checkpoint.get("val_threshold_optimization"),
+            cfg.threshold_optimization.metric,
+        )
+        optimized_metrics = compute_metrics_at_threshold(
+            y_true,
+            y_prob,
+            threshold_optimization.selected_threshold,
+        )
+    else:
+        threshold_optimization = ThresholdOptimizationResult.disabled(
+            cfg.threshold_optimization.metric
+        )
+        optimized_metrics = baseline_metrics
+
+    metrics = baseline_metrics.to_dict()
+    metrics["decision_threshold"] = 0.5
     metrics["targets"] = y_true.tolist()
     metrics["predicted_probability"] = y_prob.tolist()
+    metrics["threshold_optimization"] = threshold_optimization.to_dict()
+    metrics["optimized_metrics"] = optimized_metrics.to_dict()
+    metrics["optimized_metrics"]["decision_threshold"] = (
+        threshold_optimization.selected_threshold
+    )
 
     if return_predictions and return_diagnostics:
         return metrics, prediction_rows, diagnostics

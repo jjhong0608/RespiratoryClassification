@@ -71,15 +71,17 @@ def main() -> None:
         if imbalance.pos_weight is not None:
             if cfg.train.loss.auto_pos_weight:
                 logger.info(
-                    "[%s] Using auto-computed BCE pos_weight=%.6f from training bags",
+                    "[%s] Using auto-computed positive-class weight=%.6f from training bags (loss=%s)",
                     fold.name,
                     imbalance.pos_weight,
+                    cfg.train.loss.type,
                 )
             else:
                 logger.info(
-                    "[%s] Using BCE pos_weight=%.6f",
+                    "[%s] Using positive-class weight=%.6f (loss=%s)",
                     fold.name,
                     imbalance.pos_weight,
+                    cfg.train.loss.type,
                 )
         sampler = (
             build_weighted_sampler(train_targets) if imbalance.weighted_random else None
@@ -117,6 +119,8 @@ def main() -> None:
                 max_grad_norm=cfg.train.max_grad_norm,
                 top_k=cfg.train.top_k,
                 run_dir=fold_dir,
+                loss_type=cfg.train.loss.type,
+                gamma=cfg.train.loss.gamma,
                 pos_weight=imbalance.pos_weight,
                 analysis=cfg.analysis,
             )
