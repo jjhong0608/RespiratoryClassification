@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 from src.models.whisper_encoder import WhisperEncoderDims
-from src.utils.config import EncoderConfig
+from src.utils.config import SegmentEncoderConfig
 from src.utils.logging import LoggingMixin
 
 _OPENAI_WHISPER_MODELS: dict[str, str] = {
@@ -172,12 +172,14 @@ class OpenAIWhisperCheckpointLoader(LoggingMixin):
     def load_encoder_into(
         self,
         model: Any,
-        cfg: EncoderConfig,
+        cfg: SegmentEncoderConfig,
         *,
         target_dims: WhisperEncoderDims,
     ) -> LoadedPretrainedInfo:
         if cfg.pretrained_name_or_path is None:
-            raise ValueError("model.encoder.pretrained_name_or_path must be set")
+            raise ValueError(
+                "model.segment_encoder.pretrained_name_or_path must be set"
+            )
         if not hasattr(model, "encoder"):
             raise TypeError("model must expose an encoder attribute")
 
@@ -208,10 +210,6 @@ class OpenAIWhisperCheckpointLoader(LoggingMixin):
                 f"missing={missing}\n"
                 f"unexpected={unexpected}"
             )
-
-        if cfg.freeze:
-            for parameter in model.encoder.parameters():
-                parameter.requires_grad = False
 
         source = (
             "local_path"

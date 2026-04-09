@@ -1,17 +1,32 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 import soundfile as sf
 import torch
+
 from src.cli.evaluate import evaluate_checkpoint
 from src.data.loaders import build_bag_loader, build_dataset
 from src.evaluation.thresholds import ThresholdOptimizationConfig
-from src.models.model import MILModelConfig, RespiratoryMILModel
+from src.models.model import (
+    InterAttentionConfig,
+    InstanceHeadConfig,
+    MILConfig,
+    MILModelConfig,
+    RespiratoryMILModel,
+    SegmentEncoderAdaptationConfig,
+    SegmentEncoderConfig,
+    TopKConfig,
+)
+from src.models.segment_encoder import SegmentEncoderPoolingConfig
 from src.models.whisper_encoder import WhisperEncoderDims
+from src.training.mil_setup import (
+    apply_encoder_adaptation,
+    build_grouped_optimizer,
+)
 from src.training.trainer import Trainer, TrainerConfig
 from src.utils.checkpoint import load_checkpoint
 from src.utils.config import (
@@ -20,6 +35,7 @@ from src.utils.config import (
     AudioConfig,
     BandPassConfig,
     DataConfig,
+    EarlyStoppingConfig,
     EvalConfig,
     ExperimentConfig,
     PreprocessingConfig,
@@ -37,7 +53,9 @@ def _analysis_cfg() -> AnalysisConfig:
     return AnalysisConfig(
         outputs=AnalysisOutputConfig(
             save_segment_scores=True,
-            save_attention_weights=True,
+            save_instance_logits=True,
+            save_intra_attention_weights=True,
+            save_inter_attention_weights=True,
             save_topk_indices=False,
             save_bag_metadata=True,
         )
@@ -83,29 +101,49 @@ def _prepare_dataset(root: Path) -> DataConfig:
 def _build_model(train_dataset: object) -> RespiratoryMILModel:
     return RespiratoryMILModel(
         MILModelConfig(
-            encoder=WhisperEncoderDims(
-                n_mels=train_dataset.segment_n_mels,
-                n_audio_ctx=train_dataset.segment_audio_ctx,
-                n_audio_state=8,
-                n_audio_head=2,
-                n_audio_layer=1,
+            segment_encoder=SegmentEncoderConfig(
+                dims=WhisperEncoderDims(
+                    n_mels=train_dataset.segment_n_mels,
+                    n_audio_ctx=train_dataset.segment_audio_ctx,
+                    n_audio_state=8,
+                    n_audio_head=2,
+                    n_audio_layer=1,
+                ),
+                pooling=SegmentEncoderPoolingConfig(
+                    type="attention",
+                    hidden_dim=8,
+                    dropout=0.0,
+                    gated=True,
+                ),
+                adaptation=SegmentEncoderAdaptationConfig(
+                    mode="partial",
+                    num_layers=1,
+                ),
             ),
-            instance_head_type="linear",
-            instance_hidden_dim=8,
-            instance_dropout=0.0,
-            aggregator="attention",
-            topk_k=1,
-            attention_hidden_dim=8,
-            attention_dropout=0.0,
-            attention_gated=True,
-            logsumexp_temperature=1.0,
-            softmax_weighted_temperature=1.0,
-            noisy_or_clamp_eps=1e-6,
+            instance_head=InstanceHeadConfig(
+                type="linear",
+                hidden_dim=8,
+                dropout=0.0,
+            ),
+            mil=MILConfig(
+                aggregator="attention",
+                attention=InterAttentionConfig(
+                    hidden_dim=8,
+                    dropout=0.0,
+                    gated=True,
+                ),
+                topk=TopKConfig(k=1),
+            ),
         )
     )
 
 
-def _train_smoke_run(tmp_path: Path) -> tuple[Path, DataConfig]:
+def _train_smoke_run(
+    tmp_path: Path,
+    *,
+    epochs: int = 1,
+    early_stopping: EarlyStoppingConfig | None = None,
+) -> tuple[Path, DataConfig]:
     torch.manual_seed(0)
     data_cfg = _prepare_dataset(tmp_path / "bags")
     train_dataset = build_dataset(data_cfg, split="train")
@@ -124,12 +162,24 @@ def _train_smoke_run(tmp_path: Path) -> tuple[Path, DataConfig]:
     )
 
     model = _build_model(train_dataset)
+    adaptation_summary = apply_encoder_adaptation(
+        model,
+        model.cfg.segment_encoder.adaptation,
+    )
+    optimizer, optimizer_summary = build_grouped_optimizer(
+        model,
+        encoder_lr=1e-4,
+        head_lr=1e-3,
+        weight_decay=0.0,
+    )
+
     run_dir = tmp_path / "run"
     trainer = Trainer(
         TrainerConfig(
             device="cpu",
-            epochs=1,
-            learning_rate=1e-3,
+            epochs=epochs,
+            encoder_lr=1e-4,
+            head_lr=1e-3,
             weight_decay=0.0,
             warmup_ratio=0.0,
             max_grad_norm=1.0,
@@ -139,15 +189,25 @@ def _train_smoke_run(tmp_path: Path) -> tuple[Path, DataConfig]:
             gamma=2.0,
             pos_weight=2.0,
             analysis=_analysis_cfg(),
+            early_stopping=early_stopping
+            or EarlyStoppingConfig(
+                enabled=True,
+                monitor="val_loss",
+                patience=5,
+                min_delta=1e-4,
+            ),
         )
     )
     trainer.fit(
         model,
         train_loader,
         val_loader,
+        optimizer,
         extra_state={
-            "model_cfg": asdict(model.cfg),
+            "model_cfg": model.cfg,
             "label_to_index": dict(data_cfg.label_to_index),
+            "adaptation_summary": adaptation_summary,
+            "optimizer_summary": optimizer_summary,
         },
     )
     return run_dir / "last.pt", data_cfg
@@ -193,8 +253,10 @@ def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
         checkpoint["val_threshold_optimization"]["threshold_source"]
         == "validation_optimization"
     )
-    assert "val_metrics_optimized" in checkpoint
-    assert checkpoint["val_metrics_optimized"][0]["f1_score"] >= 0.0
+    assert checkpoint["adaptation_summary"]["mode"] == "partial"
+    assert checkpoint["optimizer_summary"]["param_group_count"] == 2
+    assert checkpoint["early_stopping"]["monitor"] == "val_loss"
+    assert checkpoint["early_stopping"]["stopped_early"] is False
     saved_threshold = float(
         checkpoint["val_threshold_optimization"]["selected_threshold"]
     )
@@ -224,6 +286,10 @@ def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
     )
     assert len(rows) == 2
     assert len(diagnostics) == 2
+    assert "bag_logit" in diagnostics[0]
+    assert "instance_logits" in diagnostics[0]
+    assert "intra_attention_weights" in diagnostics[0]
+    assert "inter_attention_weights" in diagnostics[0]
 
 
 def test_evaluate_checkpoint_uses_checkpoint_validation_threshold_for_single_class_eval_set(
@@ -281,3 +347,21 @@ def test_evaluate_checkpoint_falls_back_to_fixed_threshold_for_legacy_checkpoint
         "reason"
     ]
     assert metrics["optimized_metrics"]["decision_threshold"] == 0.5
+
+
+def test_early_stopping_stops_before_max_epochs(tmp_path: Path) -> None:
+    checkpoint_path, _ = _train_smoke_run(
+        tmp_path,
+        epochs=4,
+        early_stopping=EarlyStoppingConfig(
+            enabled=True,
+            monitor="val_loss",
+            patience=1,
+            min_delta=10.0,
+        ),
+    )
+    checkpoint = load_checkpoint(str(checkpoint_path), device=torch.device("cpu"))
+
+    assert checkpoint["epoch"] < 4
+    assert checkpoint["early_stopping"]["stopped_early"] is True
+    assert "Early stopping triggered" in checkpoint["early_stopping"]["stop_reason"]

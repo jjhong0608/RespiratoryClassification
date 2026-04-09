@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from src.utils.config import JsonConfigLoader
 
 
@@ -25,6 +26,7 @@ def _training_payload() -> dict:
         "data": {
             "train_dirs": ["datasets/train"],
             "val_dirs": ["datasets/val"],
+            "eval_dirs": ["datasets/eval"],
             "label_to_index": {"normal": 0, "wheeze": 1},
             "batch_size": 2,
             "num_workers": 0,
@@ -49,14 +51,26 @@ def _training_payload() -> dict:
             },
         },
         "model": {
-            "encoder": {
+            "segment_encoder": {
                 "type": "whisper",
                 "backbone": "tiny",
                 "pretrained_name_or_path": "tiny",
-                "freeze": False,
-                "n_audio_state": 384,
-                "n_audio_head": 6,
-                "n_audio_layer": 4,
+                "strict": True,
+                "dims": {
+                    "n_audio_state": 384,
+                    "n_audio_head": 6,
+                    "n_audio_layer": 4,
+                },
+                "pooling": {
+                    "type": "attention",
+                    "hidden_dim": 64,
+                    "dropout": 0.1,
+                    "gated": True,
+                },
+                "adaptation": {
+                    "mode": "partial",
+                    "num_layers": 1,
+                },
             },
             "instance_head": {
                 "type": "mlp",
@@ -65,7 +79,6 @@ def _training_payload() -> dict:
             },
             "mil": {
                 "aggregator": "topk",
-                "return_instance_scores": True,
                 "topk": {
                     "k": 3,
                 },
@@ -74,25 +87,19 @@ def _training_payload() -> dict:
                     "dropout": 0.1,
                     "gated": True,
                 },
-                "logsumexp": {
-                    "temperature": 1.0,
-                },
-                "softmax_weighted": {
-                    "temperature": 1.0,
-                },
-                "noisy_or": {
-                    "clamp_eps": 1e-6,
-                },
             },
         },
         "train": {
             "epochs": 3,
             "top_k": 2,
-            "warmup_ratio": 0.1,
             "max_grad_norm": 1.0,
             "optimizer": {
-                "lr": 1e-4,
+                "encoder_lr": 1e-5,
+                "head_lr": 1e-4,
                 "weight_decay": 0.01,
+            },
+            "scheduler": {
+                "warmup_ratio": 0.1,
             },
             "loss": {
                 "type": "bce",
@@ -102,16 +109,36 @@ def _training_payload() -> dict:
             "sampler": {
                 "weighted_random": True,
             },
+            "early_stopping": {
+                "enabled": True,
+                "monitor": "val_loss",
+                "patience": 5,
+                "min_delta": 1e-4,
+            },
         },
         "analysis": {
             "outputs": {
                 "save_segment_scores": True,
-                "save_attention_weights": True,
+                "save_instance_logits": True,
+                "save_intra_attention_weights": True,
+                "save_inter_attention_weights": True,
                 "save_topk_indices": True,
                 "save_bag_metadata": True,
             },
         },
     }
+
+
+def _cv_payload() -> dict:
+    payload = _training_payload()
+    payload["folds"] = [
+        {
+            "name": "fold_0",
+            "train_dirs": ["datasets/folds/fold_1"],
+            "val_dirs": ["datasets/folds/fold_0"],
+        }
+    ]
+    return payload
 
 
 def _eval_payload() -> dict:
@@ -125,18 +152,32 @@ def _eval_payload() -> dict:
     return payload
 
 
-def test_load_training_config_uses_nested_mil_schema(tmp_path: Path) -> None:
+def test_load_training_config_uses_nested_final_model_schema(tmp_path: Path) -> None:
     config_path = _write_json(tmp_path / "train.json", _training_payload())
 
     cfg = JsonConfigLoader.load_training(config_path)
 
     assert cfg.experiment.name == "wheeze_mil_topk"
     assert cfg.data.segment.mode == "sliding_window"
-    assert cfg.data.segment.length_sec == pytest.approx(5.0)
+    assert cfg.model.segment_encoder.pooling.type == "attention"
+    assert cfg.model.segment_encoder.adaptation.mode == "partial"
     assert cfg.model.mil.aggregator == "topk"
     assert cfg.model.mil.topk.k == 3
-    assert cfg.train.sampler.weighted_random is True
-    assert cfg.analysis.outputs.save_attention_weights is True
+    assert cfg.train.optimizer.encoder_lr == pytest.approx(1e-5)
+    assert cfg.train.optimizer.head_lr == pytest.approx(1e-4)
+    assert cfg.train.scheduler.warmup_ratio == pytest.approx(0.1)
+    assert cfg.train.early_stopping.enabled is True
+    assert cfg.analysis.outputs.save_inter_attention_weights is True
+
+
+def test_load_cv_config_uses_nested_schema(tmp_path: Path) -> None:
+    config_path = _write_json(tmp_path / "cv.json", _cv_payload())
+
+    cfg = JsonConfigLoader.load_cv(config_path)
+
+    assert len(cfg.folds) == 1
+    assert cfg.folds[0].name == "fold_0"
+    assert cfg.model.segment_encoder.adaptation.num_layers == 1
 
 
 def test_invalid_segment_config_rejects_conflicting_tail_policy(
@@ -151,6 +192,17 @@ def test_invalid_segment_config_rejects_conflicting_tail_policy(
         JsonConfigLoader.load_training(config_path)
 
 
+def test_invalid_pooling_type_is_rejected(tmp_path: Path) -> None:
+    payload = _training_payload()
+    payload["model"]["segment_encoder"]["pooling"]["type"] = "mean"
+    config_path = _write_json(tmp_path / "invalid_pooling.json", payload)
+
+    with pytest.raises(
+        ValueError, match="model.segment_encoder.pooling.type must be 'attention'"
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
 def test_invalid_topk_config_requires_positive_k(tmp_path: Path) -> None:
     payload = _training_payload()
     payload["model"]["mil"]["topk"]["k"] = 0
@@ -160,15 +212,18 @@ def test_invalid_topk_config_requires_positive_k(tmp_path: Path) -> None:
         JsonConfigLoader.load_training(config_path)
 
 
-def test_training_config_parses_auto_pos_weight(tmp_path: Path) -> None:
+def test_partial_unfreeze_rejects_num_layers_past_encoder_depth(
+    tmp_path: Path,
+) -> None:
     payload = _training_payload()
-    payload["train"]["loss"]["auto_pos_weight"] = True
-    config_path = _write_json(tmp_path / "auto_pos_weight.json", payload)
+    payload["model"]["segment_encoder"]["adaptation"]["num_layers"] = 8
+    config_path = _write_json(tmp_path / "invalid_adaptation.json", payload)
 
-    cfg = JsonConfigLoader.load_training(config_path)
-
-    assert cfg.train.loss.auto_pos_weight is True
-    assert cfg.train.loss.pos_weight is None
+    with pytest.raises(
+        ValueError,
+        match="model.segment_encoder.adaptation.num_layers must not exceed",
+    ):
+        JsonConfigLoader.load_training(config_path)
 
 
 def test_training_config_allows_auto_pos_weight_for_focal_loss(tmp_path: Path) -> None:
@@ -195,6 +250,20 @@ def test_training_config_rejects_conflicting_pos_weight_settings(
     with pytest.raises(
         ValueError,
         match="train.loss.auto_pos_weight and train.loss.pos_weight cannot both be set",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_training_config_rejects_invalid_early_stopping_monitor(
+    tmp_path: Path,
+) -> None:
+    payload = _training_payload()
+    payload["train"]["early_stopping"]["monitor"] = "val_f1"
+    config_path = _write_json(tmp_path / "invalid_monitor.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="train.early_stopping.monitor must be one of",
     ):
         JsonConfigLoader.load_training(config_path)
 

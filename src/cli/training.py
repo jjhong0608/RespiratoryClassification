@@ -12,7 +12,12 @@ from src.training.imbalance import (
     collect_targets,
     resolve_imbalance,
 )
-from src.training.mil_setup import build_mil_model, maybe_initialize_encoder
+from src.training.mil_setup import (
+    apply_encoder_adaptation,
+    build_grouped_optimizer,
+    build_mil_model,
+    maybe_initialize_encoder,
+)
 from src.training.trainer import Trainer, TrainerConfig
 from src.utils.config import JsonConfigLoader
 from src.utils.fs import Fs
@@ -39,16 +44,27 @@ def main() -> None:
         segment_audio_ctx=train_dataset.segment_audio_ctx,
     )
     pretrained_info = maybe_initialize_encoder(model, cfg.model)
+    adaptation_summary = apply_encoder_adaptation(
+        model,
+        model.cfg.segment_encoder.adaptation,
+    )
     if pretrained_info is not None:
         logger.info(
-            "Loaded pretrained encoder | source=%s | path=%s | loaded_keys=%d | missing=%d | unexpected=%d | freeze_encoder=%s",
+            "Loaded pretrained encoder | source=%s | path=%s | loaded_keys=%d | missing=%d | unexpected=%d | adaptation_mode=%s",
             pretrained_info.source,
             pretrained_info.resolved_path,
             pretrained_info.loaded_keys,
             len(pretrained_info.missing_keys),
             len(pretrained_info.unexpected_keys),
-            cfg.model.encoder.freeze,
+            model.cfg.segment_encoder.adaptation.mode,
         )
+    logger.info(
+        "Encoder adaptation | mode=%s | num_layers=%d | trainable_params=%d | frozen_params=%d",
+        adaptation_summary.mode,
+        adaptation_summary.num_layers,
+        adaptation_summary.trainable_parameters,
+        adaptation_summary.frozen_parameters,
+    )
 
     train_targets = collect_targets(train_dataset)
     imbalance = resolve_imbalance(
@@ -92,14 +108,29 @@ def main() -> None:
         shuffle=False,
     )
     logger.info("Train bags: %d | Val bags: %d", len(train_dataset), len(val_dataset))
+    optimizer, optimizer_summary = build_grouped_optimizer(
+        model,
+        encoder_lr=cfg.train.optimizer.encoder_lr,
+        head_lr=cfg.train.optimizer.head_lr,
+        weight_decay=cfg.train.optimizer.weight_decay,
+    )
+    logger.info(
+        "Optimizer groups | encoder_lr=%.8f | head_lr=%.8f | encoder_params=%d | head_params=%d | groups=%d",
+        optimizer_summary.encoder_lr,
+        optimizer_summary.head_lr,
+        optimizer_summary.encoder_trainable_parameters,
+        optimizer_summary.head_trainable_parameters,
+        optimizer_summary.param_group_count,
+    )
 
     trainer = Trainer(
         TrainerConfig(
             device=cfg.experiment.device,
             epochs=cfg.train.epochs,
-            learning_rate=cfg.train.optimizer.lr,
+            encoder_lr=cfg.train.optimizer.encoder_lr,
+            head_lr=cfg.train.optimizer.head_lr,
             weight_decay=cfg.train.optimizer.weight_decay,
-            warmup_ratio=cfg.train.warmup_ratio,
+            warmup_ratio=cfg.train.scheduler.warmup_ratio,
             max_grad_norm=cfg.train.max_grad_norm,
             top_k=cfg.train.top_k,
             run_dir=run_dir,
@@ -107,12 +138,14 @@ def main() -> None:
             gamma=cfg.train.loss.gamma,
             pos_weight=imbalance.pos_weight,
             analysis=cfg.analysis,
+            early_stopping=cfg.train.early_stopping,
         )
     )
     trainer.fit(
         model,
         train_loader,
         val_loader,
+        optimizer,
         extra_state={
             "run_config": asdict(cfg),
             "model_cfg": asdict(model.cfg),
@@ -120,6 +153,8 @@ def main() -> None:
             "pretrained_info": (
                 asdict(pretrained_info) if pretrained_info is not None else None
             ),
+            "adaptation_summary": asdict(adaptation_summary),
+            "optimizer_summary": asdict(optimizer_summary),
         },
     )
 

@@ -15,7 +15,9 @@
   "data": {
     "train_dirs": [],
     "val_dirs": [],
-    "eval_dirs": ["datasets/test/"],
+    "eval_dirs": [
+      "datasets/test/"
+    ],
     "label_to_index": {
       "normal": 0,
       "wheeze": 1
@@ -48,8 +50,10 @@
   "analysis": {
     "outputs": {
       "save_segment_scores": true,
-      "save_attention_weights": true,
-      "save_topk_indices": true,
+      "save_instance_logits": true,
+      "save_intra_attention_weights": true,
+      "save_inter_attention_weights": true,
+      "save_topk_indices": false,
       "save_bag_metadata": true
     }
   }

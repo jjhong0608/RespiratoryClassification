@@ -8,9 +8,15 @@
     "output_dir": "checkpoints"
   },
   "data": {
-    "train_dirs": ["datasets/wheeze/train"],
-    "val_dirs": ["datasets/wheeze/val"],
-    "eval_dirs": ["datasets/wheeze/test"],
+    "train_dirs": [
+      "datasets/wheeze/train"
+    ],
+    "val_dirs": [
+      "datasets/wheeze/val"
+    ],
+    "eval_dirs": [
+      "datasets/wheeze/test"
+    ],
     "label_to_index": {
       "normal": 0,
       "wheeze": 1
@@ -41,16 +47,27 @@
     }
   },
   "model": {
-    "encoder": {
+    "segment_encoder": {
       "type": "whisper",
       "backbone": "tiny",
       "pretrained_name_or_path": "tiny",
-      "freeze": false,
       "strict": true,
       "download_root": null,
-      "n_audio_state": 384,
-      "n_audio_head": 6,
-      "n_audio_layer": 4
+      "dims": {
+        "n_audio_state": 384,
+        "n_audio_head": 6,
+        "n_audio_layer": 4
+      },
+      "pooling": {
+        "type": "attention",
+        "hidden_dim": 128,
+        "dropout": 0.1,
+        "gated": true
+      },
+      "adaptation": {
+        "mode": "partial",
+        "num_layers": 1
+      }
     },
     "instance_head": {
       "type": "linear",
@@ -59,34 +76,27 @@
     },
     "mil": {
       "aggregator": "max",
-      "return_instance_scores": true,
-      "topk": {
-        "k": 3
-      },
       "attention": {
         "hidden_dim": 128,
         "dropout": 0.1,
         "gated": true
       },
-      "logsumexp": {
-        "temperature": 1.0
-      },
-      "softmax_weighted": {
-        "temperature": 1.0
-      },
-      "noisy_or": {
-        "clamp_eps": 1e-6
+      "topk": {
+        "k": 3
       }
     }
   },
   "train": {
     "epochs": 20,
     "top_k": 3,
-    "warmup_ratio": 0.05,
     "max_grad_norm": 1.0,
     "optimizer": {
-      "lr": 0.0001,
+      "encoder_lr": 2e-05,
+      "head_lr": 0.0001,
       "weight_decay": 0.01
+    },
+    "scheduler": {
+      "warmup_ratio": 0.05
     },
     "loss": {
       "type": "bce",
@@ -95,12 +105,20 @@
     },
     "sampler": {
       "weighted_random": false
+    },
+    "early_stopping": {
+      "enabled": true,
+      "monitor": "val_loss",
+      "patience": 15,
+      "min_delta": 0.0001
     }
   },
   "analysis": {
     "outputs": {
       "save_segment_scores": true,
-      "save_attention_weights": false,
+      "save_instance_logits": true,
+      "save_intra_attention_weights": true,
+      "save_inter_attention_weights": false,
       "save_topk_indices": false,
       "save_bag_metadata": true
     }

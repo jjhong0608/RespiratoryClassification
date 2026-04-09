@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import torch
 
-from src.models.model import MILModelConfig
+from src.models.model import (
+    InterAttentionConfig,
+    InstanceHeadConfig,
+    MILConfig,
+    MILModelConfig,
+    SegmentEncoderAdaptationConfig,
+    SegmentEncoderConfig,
+    TopKConfig,
+)
+from src.models.segment_encoder import SegmentEncoderPoolingConfig
 from src.models.whisper_encoder import WhisperEncoderDims
 
 
@@ -30,23 +39,39 @@ def parse_model_cfg(raw: object) -> MILModelConfig:
         return raw
     if not isinstance(raw, dict):
         raise TypeError("model_cfg must be a dict or MILModelConfig")
-    encoder_raw = raw.get("encoder")
-    if not isinstance(encoder_raw, dict):
-        raise TypeError("model_cfg.encoder must be a dict")
-    encoder = WhisperEncoderDims(**encoder_raw)
+
+    segment_encoder_raw = raw.get("segment_encoder")
+    if not isinstance(segment_encoder_raw, dict):
+        raise TypeError("model_cfg.segment_encoder must be a dict")
+    dims_raw = segment_encoder_raw.get("dims")
+    if not isinstance(dims_raw, dict):
+        raise TypeError("model_cfg.segment_encoder.dims must be a dict")
+    pooling_raw = segment_encoder_raw.get("pooling", {})
+    adaptation_raw = segment_encoder_raw.get("adaptation", {})
+    instance_head_raw = raw.get("instance_head")
+    if not isinstance(instance_head_raw, dict):
+        raise TypeError("model_cfg.instance_head must be a dict")
+    mil_raw = raw.get("mil")
+    if not isinstance(mil_raw, dict):
+        raise TypeError("model_cfg.mil must be a dict")
+
     return MILModelConfig(
-        encoder=encoder,
-        instance_head_type=raw.get("instance_head_type", "linear"),
-        instance_hidden_dim=int(raw.get("instance_hidden_dim", 256)),
-        instance_dropout=float(raw.get("instance_dropout", 0.0)),
-        aggregator=raw.get("aggregator", "max"),
-        topk_k=int(raw.get("topk_k", 1)),
-        attention_hidden_dim=int(raw.get("attention_hidden_dim", 128)),
-        attention_dropout=float(raw.get("attention_dropout", 0.0)),
-        attention_gated=bool(raw.get("attention_gated", True)),
-        logsumexp_temperature=float(raw.get("logsumexp_temperature", 1.0)),
-        softmax_weighted_temperature=float(
-            raw.get("softmax_weighted_temperature", 1.0)
+        segment_encoder=SegmentEncoderConfig(
+            dims=WhisperEncoderDims(**dims_raw),
+            type=segment_encoder_raw.get("type", "whisper"),
+            backbone=segment_encoder_raw.get("backbone", "custom"),
+            pretrained_name_or_path=segment_encoder_raw.get(
+                "pretrained_name_or_path"
+            ),
+            strict=bool(segment_encoder_raw.get("strict", True)),
+            download_root=segment_encoder_raw.get("download_root"),
+            pooling=SegmentEncoderPoolingConfig(**dict(pooling_raw)),
+            adaptation=SegmentEncoderAdaptationConfig(**dict(adaptation_raw)),
         ),
-        noisy_or_clamp_eps=float(raw.get("noisy_or_clamp_eps", 1e-6)),
+        instance_head=InstanceHeadConfig(**dict(instance_head_raw)),
+        mil=MILConfig(
+            aggregator=mil_raw.get("aggregator", "attention"),
+            attention=InterAttentionConfig(**dict(mil_raw.get("attention", {}))),
+            topk=TopKConfig(**dict(mil_raw.get("topk", {}))),
+        ),
     )

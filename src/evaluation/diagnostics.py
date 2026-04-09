@@ -21,29 +21,41 @@ def build_diagnostic_rows(
     analysis: AnalysisOutputConfig,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    instance_scores = torch.sigmoid(output.instance_logits).detach().cpu()
-    attention_weights = (
+    instance_logits = output.instance_logits.detach().cpu()
+    segment_scores = torch.sigmoid(instance_logits)
+    intra_attention_weights = output.intra_attention_weights.detach().cpu()
+    inter_attention_weights = (
         None
-        if output.attention_weights is None
-        else output.attention_weights.detach().cpu()
+        if output.inter_attention_weights is None
+        else output.inter_attention_weights.detach().cpu()
     )
     topk_indices = (
         None if output.topk_indices is None else output.topk_indices.detach().cpu()
     )
+    bag_logits = output.bag_logits.detach().cpu()
 
     for bag_index, audio_path in enumerate(batch.audio_paths):
+        valid_count = int(batch.instance_mask[bag_index].sum().item())
         row: dict[str, Any] = {
             "audio_path": audio_path,
             "true_label": int(batch.labels[bag_index].item()),
+            "bag_logit": float(bag_logits[bag_index].item()),
             "predicted_probability": float(probabilities[bag_index].item()),
             "predicted_label": int(predicted_labels[bag_index].item()),
         }
         if analysis.save_segment_scores:
-            valid_count = int(batch.instance_mask[bag_index].sum().item())
-            row["segment_scores"] = instance_scores[bag_index, :valid_count].tolist()
-        if analysis.save_attention_weights and attention_weights is not None:
-            valid_count = int(batch.instance_mask[bag_index].sum().item())
-            row["attention_weights"] = attention_weights[
+            row["segment_scores"] = segment_scores[bag_index, :valid_count].tolist()
+        if analysis.save_instance_logits:
+            row["instance_logits"] = instance_logits[bag_index, :valid_count].tolist()
+        if analysis.save_intra_attention_weights:
+            row["intra_attention_weights"] = intra_attention_weights[
+                bag_index, :valid_count
+            ].tolist()
+        if (
+            analysis.save_inter_attention_weights
+            and inter_attention_weights is not None
+        ):
+            row["inter_attention_weights"] = inter_attention_weights[
                 bag_index, :valid_count
             ].tolist()
         if analysis.save_topk_indices and topk_indices is not None:

@@ -10,7 +10,7 @@ from torch import Tensor, nn
 @dataclass(frozen=True)
 class MILAggregatorOutput:
     bag_logits: Tensor
-    attention_weights: Tensor | None = None
+    inter_attention_weights: Tensor | None = None
     topk_indices: Tensor | None = None
 
 
@@ -25,16 +25,6 @@ class AttentionMILConfig:
     hidden_dim: int = 128
     dropout: float = 0.0
     gated: bool = True
-
-
-@dataclass(frozen=True)
-class TemperatureMILConfig:
-    temperature: float = 1.0
-
-
-@dataclass(frozen=True)
-class NoisyOrMILConfig:
-    clamp_eps: float = 1e-6
 
 
 class BaseMILAggregator(nn.Module):
@@ -78,21 +68,6 @@ class MaxMILAggregator(BaseMILAggregator):
             .values
         )
         return MILAggregatorOutput(bag_logits=bag_logits)
-
-
-class MeanMILAggregator(BaseMILAggregator):
-    def forward(
-        self,
-        *,
-        instance_logits: Tensor,
-        instance_embeddings: Tensor,
-        instance_mask: Tensor,
-    ) -> MILAggregatorOutput:
-        del instance_embeddings
-        _validate_mask(instance_mask)
-        masked_logits = instance_logits * instance_mask.to(dtype=instance_logits.dtype)
-        counts = instance_mask.sum(dim=1).clamp_min(1).to(dtype=instance_logits.dtype)
-        return MILAggregatorOutput(bag_logits=masked_logits.sum(dim=1) / counts)
 
 
 class TopKMILAggregator(BaseMILAggregator):
@@ -162,113 +137,21 @@ class AttentionMILAggregator(BaseMILAggregator):
         bag_logits = (weights * instance_logits).sum(dim=1)
         return MILAggregatorOutput(
             bag_logits=bag_logits,
-            attention_weights=weights,
+            inter_attention_weights=weights,
         )
-
-
-class LogSumExpMILAggregator(BaseMILAggregator):
-    def __init__(self, cfg: TemperatureMILConfig):
-        super().__init__()
-        self.temperature = cfg.temperature
-
-    def forward(
-        self,
-        *,
-        instance_logits: Tensor,
-        instance_embeddings: Tensor,
-        instance_mask: Tensor,
-    ) -> MILAggregatorOutput:
-        del instance_embeddings
-        _validate_mask(instance_mask)
-        scaled = _masked_fill_invalid(
-            instance_logits / self.temperature,
-            instance_mask,
-            float("-inf"),
-        )
-        return MILAggregatorOutput(
-            bag_logits=self.temperature * torch.logsumexp(scaled, dim=1)
-        )
-
-
-class SoftmaxWeightedMILAggregator(BaseMILAggregator):
-    def __init__(self, cfg: TemperatureMILConfig):
-        super().__init__()
-        self.temperature = cfg.temperature
-
-    def forward(
-        self,
-        *,
-        instance_logits: Tensor,
-        instance_embeddings: Tensor,
-        instance_mask: Tensor,
-    ) -> MILAggregatorOutput:
-        del instance_embeddings
-        _validate_mask(instance_mask)
-        weights = torch.softmax(
-            _masked_fill_invalid(
-                instance_logits / self.temperature,
-                instance_mask,
-                float("-inf"),
-            ),
-            dim=1,
-        )
-        weights = weights * instance_mask.to(dtype=weights.dtype)
-        weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-12)
-        return MILAggregatorOutput(bag_logits=(weights * instance_logits).sum(dim=1))
-
-
-class NoisyOrMILAggregator(BaseMILAggregator):
-    def __init__(self, cfg: NoisyOrMILConfig):
-        super().__init__()
-        self.clamp_eps = cfg.clamp_eps
-
-    def forward(
-        self,
-        *,
-        instance_logits: Tensor,
-        instance_embeddings: Tensor,
-        instance_mask: Tensor,
-    ) -> MILAggregatorOutput:
-        del instance_embeddings
-        _validate_mask(instance_mask)
-        probs = torch.sigmoid(instance_logits).clamp(
-            min=self.clamp_eps,
-            max=1.0 - self.clamp_eps,
-        )
-        probs = torch.where(instance_mask, probs, torch.zeros_like(probs))
-        log_not_prob = torch.log1p(-probs.clamp(max=1.0 - self.clamp_eps))
-        bag_neg_log = (log_not_prob * instance_mask.to(dtype=log_not_prob.dtype)).sum(
-            dim=1
-        )
-        bag_prob = 1.0 - torch.exp(bag_neg_log)
-        bag_prob = bag_prob.clamp(self.clamp_eps, 1.0 - self.clamp_eps)
-        return MILAggregatorOutput(bag_logits=torch.logit(bag_prob, eps=self.clamp_eps))
 
 
 def build_mil_aggregator(
-    aggregator: Literal[
-        "max",
-        "mean",
-        "topk",
-        "attention",
-        "logsumexp",
-        "softmax_weighted",
-        "noisy_or",
-    ],
+    aggregator: Literal["attention", "max", "topk"],
     *,
     input_dim: int,
     topk_k: int,
     attention_hidden_dim: int,
     attention_dropout: float,
     attention_gated: bool,
-    logsumexp_temperature: float,
-    softmax_weighted_temperature: float,
-    noisy_or_clamp_eps: float,
 ) -> BaseMILAggregator:
     if aggregator == "max":
         return MaxMILAggregator()
-    if aggregator == "mean":
-        return MeanMILAggregator()
     if aggregator == "topk":
         return TopKMILAggregator(TopKMILConfig(k=topk_k))
     if aggregator == "attention":
@@ -280,14 +163,4 @@ def build_mil_aggregator(
                 gated=attention_gated,
             )
         )
-    if aggregator == "logsumexp":
-        return LogSumExpMILAggregator(
-            TemperatureMILConfig(temperature=logsumexp_temperature)
-        )
-    if aggregator == "softmax_weighted":
-        return SoftmaxWeightedMILAggregator(
-            TemperatureMILConfig(temperature=softmax_weighted_temperature)
-        )
-    if aggregator == "noisy_or":
-        return NoisyOrMILAggregator(NoisyOrMILConfig(clamp_eps=noisy_or_clamp_eps))
     raise ValueError(f"Unsupported MIL aggregator: {aggregator}")

@@ -87,16 +87,40 @@ class DataConfig:
 
 
 @dataclass(frozen=True)
-class EncoderConfig:
-    type: Literal["whisper"] = "whisper"
-    backbone: str = "custom"
-    pretrained_name_or_path: str | None = None
-    freeze: bool = False
-    strict: bool = True
-    download_root: str | None = None
+class EncoderDimsConfig:
     n_audio_state: int = 384
     n_audio_head: int = 6
     n_audio_layer: int = 4
+
+
+@dataclass(frozen=True)
+class SegmentEncoderPoolingConfig:
+    type: Literal["attention"] = "attention"
+    hidden_dim: int = 128
+    dropout: float = 0.0
+    gated: bool = True
+
+
+@dataclass(frozen=True)
+class EncoderAdaptationConfig:
+    mode: Literal["frozen", "partial", "full"] = "partial"
+    num_layers: int = 1
+
+
+@dataclass(frozen=True)
+class SegmentEncoderConfig:
+    type: Literal["whisper"] = "whisper"
+    backbone: str = "custom"
+    pretrained_name_or_path: str | None = None
+    strict: bool = True
+    download_root: str | None = None
+    dims: EncoderDimsConfig = field(default_factory=EncoderDimsConfig)
+    pooling: SegmentEncoderPoolingConfig = field(
+        default_factory=SegmentEncoderPoolingConfig
+    )
+    adaptation: EncoderAdaptationConfig = field(
+        default_factory=EncoderAdaptationConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -107,57 +131,41 @@ class InstanceHeadConfig:
 
 
 @dataclass(frozen=True)
-class TopKConfig:
-    k: int = 1
-
-
-@dataclass(frozen=True)
-class AttentionConfig:
+class InterAttentionConfig:
     hidden_dim: int = 128
     dropout: float = 0.0
     gated: bool = True
 
 
 @dataclass(frozen=True)
-class TemperatureConfig:
-    temperature: float = 1.0
-
-
-@dataclass(frozen=True)
-class NoisyOrConfig:
-    clamp_eps: float = 1e-6
+class TopKConfig:
+    k: int = 1
 
 
 @dataclass(frozen=True)
 class MILConfig:
-    aggregator: Literal[
-        "max",
-        "mean",
-        "topk",
-        "attention",
-        "logsumexp",
-        "softmax_weighted",
-        "noisy_or",
-    ]
-    return_instance_scores: bool = True
+    aggregator: Literal["attention", "max", "topk"] = "attention"
+    attention: InterAttentionConfig = field(default_factory=InterAttentionConfig)
     topk: TopKConfig = field(default_factory=TopKConfig)
-    attention: AttentionConfig = field(default_factory=AttentionConfig)
-    logsumexp: TemperatureConfig = field(default_factory=TemperatureConfig)
-    softmax_weighted: TemperatureConfig = field(default_factory=TemperatureConfig)
-    noisy_or: NoisyOrConfig = field(default_factory=NoisyOrConfig)
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    encoder: EncoderConfig
+    segment_encoder: SegmentEncoderConfig
     instance_head: InstanceHeadConfig
     mil: MILConfig
 
 
 @dataclass(frozen=True)
 class OptimizerConfig:
-    lr: float
+    encoder_lr: float
+    head_lr: float
     weight_decay: float = 0.0
+
+
+@dataclass(frozen=True)
+class SchedulerConfig:
+    warmup_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -174,20 +182,31 @@ class SamplerConfig:
 
 
 @dataclass(frozen=True)
+class EarlyStoppingConfig:
+    enabled: bool = True
+    monitor: Literal["val_loss"] = "val_loss"
+    patience: int = 15
+    min_delta: float = 1e-4
+
+
+@dataclass(frozen=True)
 class TrainConfig:
     epochs: int
     top_k: int
-    warmup_ratio: float
     max_grad_norm: float
     optimizer: OptimizerConfig
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     sampler: SamplerConfig = field(default_factory=SamplerConfig)
+    early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
 
 
 @dataclass(frozen=True)
 class AnalysisOutputConfig:
     save_segment_scores: bool = True
-    save_attention_weights: bool = True
+    save_instance_logits: bool = True
+    save_intra_attention_weights: bool = True
+    save_inter_attention_weights: bool = True
     save_topk_indices: bool = True
     save_bag_metadata: bool = True
 
@@ -236,6 +255,7 @@ class CvRunConfig:
 
 class JsonConfigLoader:
     _THRESHOLD_METRICS = {"f1", "balanced_accuracy", "youden_j"}
+    _EARLY_STOPPING_MONITORS = {"val_loss"}
 
     @staticmethod
     def load_json(path: str | Path) -> dict[str, Any]:
@@ -335,15 +355,46 @@ class JsonConfigLoader:
             raise ValueError("data.num_workers must be non-negative")
 
     @staticmethod
-    def _validate_encoder(cfg: EncoderConfig) -> None:
+    def _validate_segment_encoder(cfg: SegmentEncoderConfig) -> None:
         if cfg.type != "whisper":
-            raise ValueError("Only model.encoder.type='whisper' is supported")
-        if cfg.n_audio_state <= 0:
-            raise ValueError("model.encoder.n_audio_state must be greater than zero")
-        if cfg.n_audio_head <= 0:
-            raise ValueError("model.encoder.n_audio_head must be greater than zero")
-        if cfg.n_audio_layer <= 0:
-            raise ValueError("model.encoder.n_audio_layer must be greater than zero")
+            raise ValueError("Only model.segment_encoder.type='whisper' is supported")
+        if cfg.dims.n_audio_state <= 0:
+            raise ValueError(
+                "model.segment_encoder.dims.n_audio_state must be greater than zero"
+            )
+        if cfg.dims.n_audio_head <= 0:
+            raise ValueError(
+                "model.segment_encoder.dims.n_audio_head must be greater than zero"
+            )
+        if cfg.dims.n_audio_layer <= 0:
+            raise ValueError(
+                "model.segment_encoder.dims.n_audio_layer must be greater than zero"
+            )
+        if cfg.pooling.type != "attention":
+            raise ValueError("model.segment_encoder.pooling.type must be 'attention'")
+        if cfg.pooling.hidden_dim <= 0:
+            raise ValueError(
+                "model.segment_encoder.pooling.hidden_dim must be greater than zero"
+            )
+        if not (0.0 <= cfg.pooling.dropout < 1.0):
+            raise ValueError(
+                "model.segment_encoder.pooling.dropout must be within [0, 1)"
+            )
+        if cfg.adaptation.mode not in {"frozen", "partial", "full"}:
+            raise ValueError(
+                "model.segment_encoder.adaptation.mode must be one of "
+                "['frozen', 'full', 'partial']"
+            )
+        if cfg.adaptation.mode == "partial":
+            if cfg.adaptation.num_layers <= 0:
+                raise ValueError(
+                    "model.segment_encoder.adaptation.num_layers must be greater than zero"
+                )
+            if cfg.adaptation.num_layers > cfg.dims.n_audio_layer:
+                raise ValueError(
+                    "model.segment_encoder.adaptation.num_layers must not exceed "
+                    "model.segment_encoder.dims.n_audio_layer"
+                )
 
     @staticmethod
     def _validate_instance_head(cfg: InstanceHeadConfig) -> None:
@@ -354,26 +405,18 @@ class JsonConfigLoader:
 
     @staticmethod
     def _validate_mil(cfg: MILConfig) -> None:
-        if cfg.aggregator == "topk" and cfg.topk.k <= 0:
+        if cfg.aggregator not in {"attention", "max", "topk"}:
+            raise ValueError("model.mil.aggregator must be one of ['attention', 'max', 'topk']")
+        if cfg.topk.k <= 0:
             raise ValueError("model.mil.topk.k must be greater than zero")
         if cfg.attention.hidden_dim <= 0:
             raise ValueError("model.mil.attention.hidden_dim must be greater than zero")
         if not (0.0 <= cfg.attention.dropout < 1.0):
             raise ValueError("model.mil.attention.dropout must be within [0, 1)")
-        if cfg.logsumexp.temperature <= 0:
-            raise ValueError(
-                "model.mil.logsumexp.temperature must be greater than zero"
-            )
-        if cfg.softmax_weighted.temperature <= 0:
-            raise ValueError(
-                "model.mil.softmax_weighted.temperature must be greater than zero"
-            )
-        if not (0.0 < cfg.noisy_or.clamp_eps < 0.5):
-            raise ValueError("model.mil.noisy_or.clamp_eps must be within (0, 0.5)")
 
     @staticmethod
     def _validate_model(cfg: ModelConfig) -> None:
-        JsonConfigLoader._validate_encoder(cfg.encoder)
+        JsonConfigLoader._validate_segment_encoder(cfg.segment_encoder)
         JsonConfigLoader._validate_instance_head(cfg.instance_head)
         JsonConfigLoader._validate_mil(cfg.mil)
 
@@ -383,14 +426,16 @@ class JsonConfigLoader:
             raise ValueError("train.epochs must be greater than zero")
         if cfg.top_k <= 0:
             raise ValueError("train.top_k must be greater than zero")
-        if not (0.0 <= cfg.warmup_ratio <= 1.0):
-            raise ValueError("train.warmup_ratio must be within [0, 1]")
         if cfg.max_grad_norm <= 0:
             raise ValueError("train.max_grad_norm must be greater than zero")
-        if cfg.optimizer.lr <= 0:
-            raise ValueError("train.optimizer.lr must be greater than zero")
+        if cfg.optimizer.encoder_lr <= 0:
+            raise ValueError("train.optimizer.encoder_lr must be greater than zero")
+        if cfg.optimizer.head_lr <= 0:
+            raise ValueError("train.optimizer.head_lr must be greater than zero")
         if cfg.optimizer.weight_decay < 0:
             raise ValueError("train.optimizer.weight_decay must be non-negative")
+        if not (0.0 <= cfg.scheduler.warmup_ratio <= 1.0):
+            raise ValueError("train.scheduler.warmup_ratio must be within [0, 1]")
         if cfg.loss.type not in ["bce", "focal"]:
             raise ValueError("Only train.loss.type='bce' or 'focal' is supported")
         if cfg.loss.auto_pos_weight and cfg.loss.pos_weight is not None:
@@ -399,6 +444,19 @@ class JsonConfigLoader:
             )
         if cfg.loss.pos_weight is not None and cfg.loss.pos_weight <= 0:
             raise ValueError("train.loss.pos_weight must be greater than zero")
+        if cfg.early_stopping.monitor not in JsonConfigLoader._EARLY_STOPPING_MONITORS:
+            raise ValueError(
+                "train.early_stopping.monitor must be one of "
+                f"{sorted(JsonConfigLoader._EARLY_STOPPING_MONITORS)}"
+            )
+        if cfg.early_stopping.patience <= 0:
+            raise ValueError(
+                "train.early_stopping.patience must be greater than zero"
+            )
+        if cfg.early_stopping.min_delta < 0:
+            raise ValueError(
+                "train.early_stopping.min_delta must be non-negative"
+            )
 
     @staticmethod
     def _parse_experiment(raw: Mapping[str, Any]) -> ExperimentConfig:
@@ -424,14 +482,19 @@ class JsonConfigLoader:
     @staticmethod
     def _parse_model(raw: Mapping[str, Any]) -> ModelConfig:
         kwargs = dict(raw)
-        kwargs["encoder"] = EncoderConfig(**dict(raw["encoder"]))
+        segment_encoder = dict(raw["segment_encoder"])
+        segment_encoder["dims"] = EncoderDimsConfig(**segment_encoder.get("dims", {}))
+        segment_encoder["pooling"] = SegmentEncoderPoolingConfig(
+            **segment_encoder.get("pooling", {})
+        )
+        segment_encoder["adaptation"] = EncoderAdaptationConfig(
+            **segment_encoder.get("adaptation", {})
+        )
+        kwargs["segment_encoder"] = SegmentEncoderConfig(**segment_encoder)
         kwargs["instance_head"] = InstanceHeadConfig(**dict(raw["instance_head"]))
         mil = dict(raw["mil"])
+        mil["attention"] = InterAttentionConfig(**mil.get("attention", {}))
         mil["topk"] = TopKConfig(**mil.get("topk", {}))
-        mil["attention"] = AttentionConfig(**mil.get("attention", {}))
-        mil["logsumexp"] = TemperatureConfig(**mil.get("logsumexp", {}))
-        mil["softmax_weighted"] = TemperatureConfig(**mil.get("softmax_weighted", {}))
-        mil["noisy_or"] = NoisyOrConfig(**mil.get("noisy_or", {}))
         kwargs["mil"] = MILConfig(**mil)
         cfg = ModelConfig(**kwargs)
         JsonConfigLoader._validate_model(cfg)
@@ -441,8 +504,12 @@ class JsonConfigLoader:
     def _parse_train(raw: Mapping[str, Any]) -> TrainConfig:
         kwargs = dict(raw)
         kwargs["optimizer"] = OptimizerConfig(**dict(raw["optimizer"]))
+        kwargs["scheduler"] = SchedulerConfig(**dict(raw.get("scheduler", {})))
         kwargs["loss"] = LossConfig(**dict(raw.get("loss", {})))
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))
+        kwargs["early_stopping"] = EarlyStoppingConfig(
+            **dict(raw.get("early_stopping", {}))
+        )
         cfg = TrainConfig(**kwargs)
         JsonConfigLoader._validate_train(cfg)
         return cfg

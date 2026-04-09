@@ -1,11 +1,12 @@
 # Wheeze MIL Experiments
 
-This branch is a MIL-first refactor for weakly supervised wheeze detection.
+This branch uses a final-model-oriented MIL architecture for weakly supervised wheeze detection.
 
 - One audio file is one bag.
 - Shorter audio segments cut from that file are the instances.
 - Training and evaluation are bag-level binary classification (`normal` vs `wheeze`).
-- Segmentation mode and MIL aggregation mode are independent config choices.
+- Every segment embedding is built with intra-segment attention pooling over Whisper token states.
+- The bag-level reducer remains configurable with `attention`, `max`, or `topk`.
 
 ## Setup
 
@@ -16,7 +17,7 @@ pip install -r requirements.txt
 
 ## Train
 
-Use the default MIL training config:
+Use the default training config:
 
 ```bash
 python -m src.cli.training --config configs/training.json
@@ -24,10 +25,9 @@ python -m src.cli.training --config configs/training.json
 
 Ready-to-run example configs:
 
+- `configs/mil_sliding_attention.json`
 - `configs/mil_sliding_max.json`
 - `configs/mil_sliding_topk.json`
-- `configs/mil_sliding_attention.json`
-- `configs/mil_nonoverlap_mean.json`
 
 Artifacts are written under `experiment.output_dir/experiment.name/`.
 
@@ -37,15 +37,11 @@ Training keeps:
 - `best_loss_*.pt`
 - `best_f1_*.pt`
 
-Class-imbalance handling lives under `train.loss`:
+Loose early stopping now runs alongside top-k checkpoint saving:
 
-- `auto_pos_weight: true`
-  - computes `negatives / positives` from the active training split
-- `pos_weight`
-  - optional manual override when `auto_pos_weight` is `false`
-- `type: "bce" | "focal"`
-- `gamma`
-  - focal-loss focusing parameter
+- monitor: `val_loss`
+- default patience: `15`
+- default `min_delta`: `1e-4`
 
 ## Evaluate
 
@@ -72,18 +68,6 @@ validation-derived threshold saved in the checkpoint and applies that threshold
 to the eval probabilities. If checkpoint threshold metadata is unavailable,
 evaluation falls back safely to `0.5`.
 
-Enable threshold tuning in eval configs with:
-
-```json
-"threshold_optimization": {
-  "enabled": true,
-  "metric": "f1"
-}
-```
-
-This block selects which validation-derived checkpoint threshold is applied
-during evaluation. It does not trigger threshold fitting on the eval split.
-
 ## Cross-Validation
 
 ```bash
@@ -92,107 +76,102 @@ python -m src.cli.cv --config configs/cv_run.json
 
 Each fold is trained independently under `experiment.output_dir/experiment.name/fold_x/`.
 
-## Bag And Instance Definition
+## Model Structure
 
-The MIL pipeline uses the dataset layout:
+The MIL model is explicitly hierarchical:
 
-```text
-<root>/
-  normal/
-    *.wav
-  wheeze/
-    *.wav
-```
+1. Segment waveform/features
+2. Whisper audio encoder token states
+3. Intra-segment attention pooling
+4. Segment embedding
+5. Instance head -> segment logit
+6. Inter-segment reducer
+7. Bag logit
 
-`label_to_index` must stay binary and contiguous:
+### Intra-segment attention
 
-```json
-{
-  "normal": 0,
-  "wheeze": 1
-}
-```
+The segment encoder always uses token-level attention pooling. It is configured under:
 
-Bag formation works like this:
+- `model.segment_encoder.pooling.type`
+- `model.segment_encoder.pooling.hidden_dim`
+- `model.segment_encoder.pooling.dropout`
+- `model.segment_encoder.pooling.gated`
 
-1. Load one full waveform.
-2. Resample to `data.audio.sample_rate`.
-3. Trim to at most `data.audio.clip_duration_sec`.
-4. Apply waveform preprocessing such as band-pass and `source_type`.
-5. Segment the waveform into instances.
-6. Convert each segment into the Whisper-like log-mel tensor seen by the encoder.
+`model.segment_encoder.pooling.type` must be `attention`.
 
-## Segmentation Modes
+### Inter-segment reducers
 
-`data.segment.mode` controls how bags are split:
+`model.mil.aggregator` selects the bag-level reducer.
 
-- `full_clip`
-  - One bag contains one instance spanning the full trimmed clip.
-- `non_overlap`
-  - The bag is cut into equal non-overlapping windows.
-- `sliding_window`
-  - The bag is cut with `length_sec` and `stride_sec`.
+Supported reducers:
 
-Important segmentation fields:
-
-- `data.audio.clip_duration_sec`
-  - Maximum waveform duration used for each bag.
-- `data.segment.length_sec`
-  - Segment/window length for `non_overlap` and `sliding_window`.
-- `data.segment.stride_sec`
-  - Window stride for `sliding_window`.
-- `data.segment.pad_last`
-  - Keep an incomplete tail window and pad it during feature extraction.
-- `data.segment.drop_last`
-  - Drop the incomplete tail window.
-
-`pad_last` and `drop_last` are mutually exclusive.
-
-## MIL Aggregators
-
-`model.mil.aggregator` selects the bag-level reducer independently of segmentation.
-
-Supported aggregators:
-
-- `max`
-- `mean`
-- `topk`
 - `attention`
-- `logsumexp`
-- `softmax_weighted`
-- `noisy_or`
+- `max`
+- `topk`
 
-Aggregator-specific nested config:
+Reducer-specific config:
 
-- `model.mil.topk.k`
 - `model.mil.attention.hidden_dim`
 - `model.mil.attention.dropout`
 - `model.mil.attention.gated`
-- `model.mil.logsumexp.temperature`
-- `model.mil.softmax_weighted.temperature`
-- `model.mil.noisy_or.clamp_eps`
+- `model.mil.topk.k`
 
-This means combinations such as:
+Retired paths:
 
-- sliding window + max
-- sliding window + top-k
-- sliding window + attention
-- non-overlap + mean
+- `mean`
+- `logsumexp`
+- `softmax_weighted`
+- `noisy_or`
+- `nonoverlap_mean`
 
-are selected only by config edits.
+## Encoder Adaptation
 
-## Model Structure
+Encoder adaptation is configured under `model.segment_encoder.adaptation`:
 
-The MIL model is explicit:
+- `mode: "frozen" | "partial" | "full"`
+- `num_layers`
 
-1. Segment encoder
-   - Whisper audio encoder applied to each segment.
-2. Instance head
-   - Produces one per-segment logit from the segment embedding.
-3. Bag aggregator
-   - Reduces instance logits into one bag-level logit.
+Primary configs use:
 
-The current segment encoder is Whisper-based and configured under `model.encoder`.
+- `mode: "partial"`
+- `num_layers: 1`
+
+Partial unfreezing keeps most of the Whisper encoder frozen and only unfreezes:
+
+- the last `num_layers` encoder blocks
+- the final encoder layer norm
+
+The convolutional front-end remains frozen in partial mode.
+
+## Optimizer Layout
+
+Training uses two AdamW parameter groups:
+
+- encoder trainable parameters -> `train.optimizer.encoder_lr`
+- non-encoder trainable parameters -> `train.optimizer.head_lr`
+
+Shared optimizer fields:
+
+- `train.optimizer.weight_decay`
+- `train.scheduler.warmup_ratio`
+
+Primary configs use a smaller encoder LR than head LR so the pretrained encoder adapts conservatively.
+
+## Class Imbalance Handling
+
+Class-imbalance handling lives under `train.loss`:
+
+- `auto_pos_weight: true`
+  - computes `negatives / positives` from the active training split
+- `pos_weight`
+  - optional manual override when `auto_pos_weight` is `false`
+- `type: "bce" | "focal"`
+- `gamma`
+  - focal-loss focusing parameter
+
+Weighted sampling remains configurable under:
+
+- `train.sampler.weighted_random`
 
 ## Diagnostics
 
@@ -202,18 +181,22 @@ Diagnostics are controlled by `analysis.outputs`:
 "analysis": {
   "outputs": {
     "save_segment_scores": true,
-    "save_attention_weights": true,
+    "save_instance_logits": true,
+    "save_intra_attention_weights": true,
+    "save_inter_attention_weights": true,
     "save_topk_indices": true,
     "save_bag_metadata": true
   }
 }
 ```
 
-Available diagnostics:
+Available diagnostics include:
 
 - per-segment scores
-- attention weights when using attention MIL
-- selected top-k indices when using top-k MIL
+- per-segment logits
+- intra-segment token attention weights
+- inter-segment attention weights when using attention MIL
+- selected top-k segment indices when using top-k MIL
 - bag metadata including segment start/end mapping
 
 Training saves validation diagnostics under:
@@ -230,9 +213,11 @@ Evaluation writes:
 
 These files are intended for false positive / false negative inspection.
 
-## Nested Config Structure
+## Config Shape
 
-The experiment interface is nested JSON:
+The branch now uses a nested config schema only.
+
+Example training shape:
 
 ```json
 {
@@ -243,11 +228,6 @@ The experiment interface is nested JSON:
     "seed": 42,
     "device": "cpu",
     "output_dir": "checkpoints"
-  },
-  "checkpoint_path": "checkpoints/wheeze_mil_sliding_attention/last.pt",
-  "threshold_optimization": {
-    "enabled": true,
-    "metric": "f1"
   },
   "data": {
     "train_dirs": ["datasets/wheeze/train"],
@@ -283,16 +263,27 @@ The experiment interface is nested JSON:
     }
   },
   "model": {
-    "encoder": {
+    "segment_encoder": {
       "type": "whisper",
       "backbone": "tiny",
       "pretrained_name_or_path": "tiny",
-      "freeze": false,
       "strict": true,
       "download_root": null,
-      "n_audio_state": 384,
-      "n_audio_head": 6,
-      "n_audio_layer": 4
+      "dims": {
+        "n_audio_state": 384,
+        "n_audio_head": 6,
+        "n_audio_layer": 4
+      },
+      "pooling": {
+        "type": "attention",
+        "hidden_dim": 128,
+        "dropout": 0.1,
+        "gated": true
+      },
+      "adaptation": {
+        "mode": "partial",
+        "num_layers": 1
+      }
     },
     "instance_head": {
       "type": "mlp",
@@ -301,34 +292,27 @@ The experiment interface is nested JSON:
     },
     "mil": {
       "aggregator": "attention",
-      "return_instance_scores": true,
-      "topk": {
-        "k": 3
-      },
       "attention": {
         "hidden_dim": 128,
         "dropout": 0.1,
         "gated": true
       },
-      "logsumexp": {
-        "temperature": 1.0
-      },
-      "softmax_weighted": {
-        "temperature": 1.0
-      },
-      "noisy_or": {
-        "clamp_eps": 1e-6
+      "topk": {
+        "k": 3
       }
     }
   },
   "train": {
     "epochs": 20,
     "top_k": 3,
-    "warmup_ratio": 0.05,
     "max_grad_norm": 1.0,
     "optimizer": {
-      "lr": 0.0001,
+      "encoder_lr": 0.00002,
+      "head_lr": 0.0001,
       "weight_decay": 0.01
+    },
+    "scheduler": {
+      "warmup_ratio": 0.05
     },
     "loss": {
       "type": "focal",
@@ -337,12 +321,20 @@ The experiment interface is nested JSON:
     },
     "sampler": {
       "weighted_random": false
+    },
+    "early_stopping": {
+      "enabled": true,
+      "monitor": "val_loss",
+      "patience": 15,
+      "min_delta": 0.0001
     }
   },
   "analysis": {
     "outputs": {
       "save_segment_scores": true,
-      "save_attention_weights": true,
+      "save_instance_logits": true,
+      "save_intra_attention_weights": true,
+      "save_inter_attention_weights": true,
       "save_topk_indices": false,
       "save_bag_metadata": true
     }
@@ -352,6 +344,6 @@ The experiment interface is nested JSON:
 
 ## Notes
 
-- `model.encoder.pretrained_name_or_path` can point to an official OpenAI Whisper checkpoint name such as `tiny`, `base`, or `small`, or to a local MIL checkpoint.
+- `model.segment_encoder.pretrained_name_or_path` can point to an official OpenAI Whisper checkpoint name such as `tiny`, `base`, or `small`, or to a local MIL checkpoint.
 - MIL segment length controls the encoder context length automatically; it no longer has to match Whisper’s original 30-second context.
 - `python -m src.cli.pretrained_info --name_or_path tiny` prints the encoder dimensions for a given Whisper checkpoint.

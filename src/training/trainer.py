@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
-from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -19,7 +18,7 @@ from src.evaluation.thresholds import compute_threshold_optimized_metrics
 from src.models.model import MILModelOutput
 from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
-from src.utils.config import AnalysisConfig
+from src.utils.config import AnalysisConfig, EarlyStoppingConfig
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
 
@@ -28,7 +27,8 @@ from src.utils.logging import LoggingMixin
 class TrainerConfig:
     device: str
     epochs: int
-    learning_rate: float
+    encoder_lr: float
+    head_lr: float
     weight_decay: float
     warmup_ratio: float
     max_grad_norm: float
@@ -38,6 +38,9 @@ class TrainerConfig:
     gamma: float = 2.0
     pos_weight: float | None = None
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    early_stopping: EarlyStoppingConfig = field(
+        default_factory=EarlyStoppingConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -205,24 +208,24 @@ class Trainer(LoggingMixin):
         model: nn.Module,
         train_loader: DataLoader[BagBatch],
         val_loader: DataLoader[BagBatch],
-        optimizer: torch.optim.Optimizer | None = None,
+        optimizer: torch.optim.Optimizer,
         *,
         extra_state: dict[str, Any] | None = None,
     ) -> None:
         device = torch.device(self.cfg.device)
         model.to(device)
-        if optimizer is None:
-            optimizer = AdamW(
-                model.parameters(),
-                lr=self.cfg.learning_rate,
-                weight_decay=self.cfg.weight_decay,
-            )
         total_steps = self.cfg.epochs * max(1, len(train_loader))
         warmup_steps = int(total_steps * self.cfg.warmup_ratio)
         scheduler = WarmupCosineScheduler(optimizer, warmup_steps, total_steps)
 
         train_losses: list[float] = []
         val_losses: list[float] = []
+        train_metrics_history: list[dict[str, Any]] = []
+        val_metrics_history: list[dict[str, Any]] = []
+        val_metrics_optimized_history: list[dict[str, Any]] = []
+        best_monitor_value: float | None = None
+        epochs_without_improvement = 0
+
         for epoch in range(1, self.cfg.epochs + 1):
             model.train()
             train_result = self._epoch(
@@ -251,6 +254,10 @@ class Trainer(LoggingMixin):
 
             train_losses.append(train_result.loss)
             val_losses.append(val_result.loss)
+            train_metrics_history.append(train_result.metrics.to_dict())
+            val_metrics_history.append(val_result.metrics.to_dict())
+            val_metrics_optimized_history.append(val_metrics_optimized.to_dict())
+
             lrs = [float(group["lr"]) for group in optimizer.param_groups]
             lr_str = (
                 f"{lrs[0]:.8f}"
@@ -282,6 +289,28 @@ class Trainer(LoggingMixin):
                 val_threshold_optimization.selected_threshold,
             )
 
+            current_monitor_value = val_result.loss
+            stopped_early = False
+            stop_reason: str | None = None
+            if self.cfg.early_stopping.enabled:
+                improved = best_monitor_value is None or current_monitor_value < (
+                    best_monitor_value - self.cfg.early_stopping.min_delta
+                )
+                if improved:
+                    best_monitor_value = current_monitor_value
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
+                    if (
+                        epochs_without_improvement
+                        >= self.cfg.early_stopping.patience
+                    ):
+                        stopped_early = True
+                        stop_reason = (
+                            "Early stopping triggered on val_loss after "
+                            f"{epochs_without_improvement} epochs without improvement"
+                        )
+
             diagnostics_path = None
             if val_result.diagnostics:
                 diagnostics_path = write_diagnostics_jsonl(
@@ -293,10 +322,22 @@ class Trainer(LoggingMixin):
             model_cfg = getattr(model, "cfg", None)
             dims = None
             if model_cfg is not None:
-                encoder_dims = getattr(model_cfg, "encoder", None)
+                segment_encoder_cfg = getattr(model_cfg, "segment_encoder", None)
+                encoder_dims = getattr(segment_encoder_cfg, "dims", None)
                 if encoder_dims is not None and is_dataclass(encoder_dims):
                     dims = asdict(encoder_dims)
 
+            early_stopping_state = {
+                "enabled": self.cfg.early_stopping.enabled,
+                "monitor": self.cfg.early_stopping.monitor,
+                "patience": self.cfg.early_stopping.patience,
+                "min_delta": self.cfg.early_stopping.min_delta,
+                "best_value": best_monitor_value,
+                "current_value": current_monitor_value,
+                "epochs_without_improvement": epochs_without_improvement,
+                "stopped_early": stopped_early,
+                "stop_reason": stop_reason,
+            }
             state: dict[str, Any] = {
                 "epoch": epoch,
                 "dims": dims,
@@ -304,10 +345,12 @@ class Trainer(LoggingMixin):
                 "optimizer_state_dict": optimizer.state_dict(),
                 "train_losses": train_losses,
                 "val_losses": val_losses,
-                "train_metrics": [train_result.metrics.to_dict()],
-                "val_metrics": [result.to_dict() for result in [val_result.metrics]],
+                "train_metrics": train_metrics_history,
+                "val_metrics": val_metrics_history,
                 "val_threshold_optimization": val_threshold_optimization.to_dict(),
-                "val_metrics_optimized": [val_metrics_optimized.to_dict()],
+                "val_metrics_optimized": val_metrics_optimized_history,
+                "early_stopping": early_stopping_state,
+                "optimizer_group_lrs": lrs,
                 "diagnostics_path": str(diagnostics_path) if diagnostics_path else None,
             }
             if extra_state:
@@ -324,3 +367,7 @@ class Trainer(LoggingMixin):
                 state,
                 maximize=True,
             )
+
+            if stopped_early:
+                self.logger.info("%s", stop_reason)
+                break
