@@ -4,155 +4,166 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from torch import Tensor, nn
+from transformers import ASTConfig, ASTModel
 
-from src.models.instance_head import (
-    InstanceHeadConfig as RuntimeInstanceHeadConfig,
-)
-from src.models.instance_head import (
-    build_instance_head,
-)
-from src.models.mil_aggregators import build_mil_aggregator
-from src.models.segment_encoder import (
-    SegmentEncoderPoolingConfig,
-    WhisperSegmentEncoder,
-    WhisperSegmentEncoderConfig,
-)
-from src.models.whisper_encoder import WhisperEncoderDims
+from src.models.classifier import ClassifierDims, LinearClassifier, MlpClassifier
 
 
 @dataclass(frozen=True)
-class SegmentEncoderAdaptationConfig:
+class AstFeatureDims:
+    num_mel_bins: int
+    max_length: int
+
+
+@dataclass(frozen=True)
+class EncoderAdaptationConfig:
     mode: Literal["frozen", "partial", "full"] = "partial"
     num_layers: int = 1
 
 
 @dataclass(frozen=True)
-class SegmentEncoderConfig:
-    dims: WhisperEncoderDims
-    type: Literal["whisper"] = "whisper"
-    backbone: str = "custom"
-    pretrained_name_or_path: str | None = None
-    strict: bool = True
-    download_root: str | None = None
-    pooling: SegmentEncoderPoolingConfig = field(
-        default_factory=SegmentEncoderPoolingConfig
-    )
-    adaptation: SegmentEncoderAdaptationConfig = field(
-        default_factory=SegmentEncoderAdaptationConfig
-    )
+class AstArchitectureConfig:
+    hidden_size: int = 768
+    num_hidden_layers: int = 12
+    num_attention_heads: int = 12
+    intermediate_size: int = 3072
+    hidden_dropout_prob: float = 0.0
+    attention_probs_dropout_prob: float = 0.0
+    frequency_stride: int = 10
+    time_stride: int = 10
+    patch_size: int = 16
+    qkv_bias: bool = True
+    layer_norm_eps: float = 1e-12
+    initializer_range: float = 0.02
 
 
 @dataclass(frozen=True)
-class InstanceHeadConfig:
+class AstEncoderConfig:
+    feature_dims: AstFeatureDims
+    type: Literal["ast"] = "ast"
+    pretrained_name_or_path: str | None = None
+    cache_dir: str | None = None
+    adaptation: EncoderAdaptationConfig = field(default_factory=EncoderAdaptationConfig)
+    architecture: AstArchitectureConfig = field(default_factory=AstArchitectureConfig)
+
+
+@dataclass(frozen=True)
+class ClassifierConfig:
     type: Literal["linear", "mlp"] = "linear"
     hidden_dim: int = 256
     dropout: float = 0.0
+    pooling: Literal["cls", "mean"] = "cls"
 
 
 @dataclass(frozen=True)
-class InterAttentionConfig:
-    hidden_dim: int = 128
-    dropout: float = 0.0
-    gated: bool = True
+class AstModelConfig:
+    encoder: AstEncoderConfig
+    classifier: ClassifierConfig
+    num_classes: int
 
 
 @dataclass(frozen=True)
-class TopKConfig:
-    k: int = 1
+class AstModelOutput:
+    logits: Tensor
+    pooled_embedding: Tensor
 
 
-@dataclass(frozen=True)
-class MILConfig:
-    aggregator: Literal["attention", "max", "topk"] = "attention"
-    attention: InterAttentionConfig = field(default_factory=InterAttentionConfig)
-    topk: TopKConfig = field(default_factory=TopKConfig)
-
-
-@dataclass(frozen=True)
-class MILModelConfig:
-    segment_encoder: SegmentEncoderConfig
-    instance_head: InstanceHeadConfig
-    mil: MILConfig = field(default_factory=MILConfig)
-
-
-@dataclass(frozen=True)
-class MILModelOutput:
-    bag_logits: Tensor
-    instance_logits: Tensor
-    instance_embeddings: Tensor
-    intra_attention_weights: Tensor
-    inter_attention_weights: Tensor | None = None
-    topk_indices: Tensor | None = None
-
-
-class RespiratoryMILModel(nn.Module):
-    def __init__(self, cfg: MILModelConfig):
+class RespiratoryAstModel(nn.Module):
+    def __init__(self, cfg: AstModelConfig):
         super().__init__()
         self.cfg = cfg
-        self.segment_encoder = WhisperSegmentEncoder(
-            WhisperSegmentEncoderConfig(
-                dims=cfg.segment_encoder.dims,
-                pooling=cfg.segment_encoder.pooling,
-            )
+        self.encoder = self._build_encoder(cfg.encoder)
+        self.classifier: nn.Module
+        hidden_size = int(self.encoder.config.hidden_size)
+        output_dim = 1 if cfg.num_classes == 2 else cfg.num_classes
+        classifier_dims = ClassifierDims(
+            in_dim=hidden_size,
+            num_classes=output_dim,
+            hidden_dim=cfg.classifier.hidden_dim,
+            dropout=cfg.classifier.dropout,
         )
-        self.instance_head = build_instance_head(
-            RuntimeInstanceHeadConfig(
-                input_dim=cfg.segment_encoder.dims.n_audio_state,
-                head_type=cfg.instance_head.type,
-                hidden_dim=cfg.instance_head.hidden_dim,
-                dropout=cfg.instance_head.dropout,
-            )
-        )
-        self.aggregator = build_mil_aggregator(
-            cfg.mil.aggregator,
-            input_dim=cfg.segment_encoder.dims.n_audio_state,
-            topk_k=cfg.mil.topk.k,
-            attention_hidden_dim=cfg.mil.attention.hidden_dim,
-            attention_dropout=cfg.mil.attention.dropout,
-            attention_gated=cfg.mil.attention.gated,
+        if cfg.classifier.type == "linear":
+            self.classifier = LinearClassifier(classifier_dims)
+        elif cfg.classifier.type == "mlp":
+            self.classifier = MlpClassifier(classifier_dims)
+        else:
+            raise ValueError(f"Unsupported classifier type: {cfg.classifier.type}")
+
+    @staticmethod
+    def _validate_pretrained_feature_dims(
+        pretrained_cfg: ASTConfig,
+        feature_dims: AstFeatureDims,
+        *,
+        name_or_path: str,
+    ) -> None:
+        actual_bins = int(pretrained_cfg.num_mel_bins)
+        actual_length = int(pretrained_cfg.max_length)
+        if (
+            actual_bins == feature_dims.num_mel_bins
+            and actual_length == feature_dims.max_length
+        ):
+            return
+        raise ValueError(
+            "Pretrained AST encoder input dims do not match model feature dims.\n"
+            f"- encoder: num_mel_bins={actual_bins}, max_length={actual_length}\n"
+            f"- model:   num_mel_bins={feature_dims.num_mel_bins}, "
+            f"max_length={feature_dims.max_length}\n"
+            f"- name_or_path: {name_or_path}"
         )
 
-    @property
-    def encoder(self) -> nn.Module:
-        return self.segment_encoder.encoder
+    @staticmethod
+    def _build_scratch_config(cfg: AstEncoderConfig) -> ASTConfig:
+        architecture = cfg.architecture
+        ast_config = ASTConfig()
+        ast_config.hidden_size = architecture.hidden_size
+        ast_config.num_hidden_layers = architecture.num_hidden_layers
+        ast_config.num_attention_heads = architecture.num_attention_heads
+        ast_config.intermediate_size = architecture.intermediate_size
+        ast_config.hidden_dropout_prob = architecture.hidden_dropout_prob
+        ast_config.attention_probs_dropout_prob = (
+            architecture.attention_probs_dropout_prob
+        )
+        ast_config.frequency_stride = architecture.frequency_stride
+        ast_config.time_stride = architecture.time_stride
+        ast_config.patch_size = architecture.patch_size
+        ast_config.qkv_bias = architecture.qkv_bias
+        ast_config.layer_norm_eps = architecture.layer_norm_eps
+        ast_config.initializer_range = architecture.initializer_range
+        ast_config.num_mel_bins = cfg.feature_dims.num_mel_bins
+        ast_config.max_length = cfg.feature_dims.max_length
+        return ast_config
 
-    def forward(self, segments: Tensor, instance_mask: Tensor) -> MILModelOutput:
-        if segments.ndim != 4:
-            raise ValueError(
-                f"segments must have shape (B, M, n_mels, n_frames), got {tuple(segments.shape)}"
+    def _build_encoder(self, cfg: AstEncoderConfig) -> ASTModel:
+        if cfg.pretrained_name_or_path is not None:
+            pretrained_cfg = ASTConfig.from_pretrained(
+                cfg.pretrained_name_or_path,
+                cache_dir=cfg.cache_dir,
             )
-        if instance_mask.ndim != 2:
-            raise ValueError(
-                f"instance_mask must have shape (B, M), got {tuple(instance_mask.shape)}"
+            self._validate_pretrained_feature_dims(
+                pretrained_cfg,
+                cfg.feature_dims,
+                name_or_path=cfg.pretrained_name_or_path,
             )
-        batch_size, num_instances, _, _ = segments.shape
-        flat_segments = segments.reshape(
-            batch_size * num_instances,
-            segments.shape[2],
-            segments.shape[3],
-        )
-        encoded = self.segment_encoder(flat_segments)
-        instance_embeddings = encoded.embeddings.reshape(
-            batch_size,
-            num_instances,
-            self.cfg.segment_encoder.dims.n_audio_state,
-        )
-        intra_attention_weights = encoded.attention_weights.reshape(
-            batch_size,
-            num_instances,
-            encoded.attention_weights.shape[1],
-        )
-        instance_logits = self.instance_head(instance_embeddings)
-        aggregated = self.aggregator(
-            instance_logits=instance_logits,
-            instance_embeddings=instance_embeddings,
-            instance_mask=instance_mask,
-        )
-        return MILModelOutput(
-            bag_logits=aggregated.bag_logits,
-            instance_logits=instance_logits,
-            instance_embeddings=instance_embeddings,
-            intra_attention_weights=intra_attention_weights,
-            inter_attention_weights=aggregated.inter_attention_weights,
-            topk_indices=aggregated.topk_indices,
-        )
+            return ASTModel.from_pretrained(
+                cfg.pretrained_name_or_path,
+                cache_dir=cfg.cache_dir,
+            )
+        return ASTModel(self._build_scratch_config(cfg))
+
+    def _pool(self, hidden_states: Tensor) -> Tensor:
+        if self.cfg.classifier.pooling == "cls":
+            return hidden_states[:, 0, :]
+        return hidden_states.mean(dim=1)
+
+    def forward(self, input_values: Tensor) -> AstModelOutput:
+        if input_values.ndim != 3:
+            raise ValueError(
+                "input_values must have shape (B, max_length, num_mel_bins), "
+                f"got {tuple(input_values.shape)}"
+            )
+        outputs = self.encoder(input_values=input_values, return_dict=True)
+        pooled_embedding = self._pool(outputs.last_hidden_state)
+        logits = self.classifier(pooled_embedding)
+        if logits.ndim == 2 and logits.shape[1] == 1:
+            logits = logits.squeeze(1)
+        return AstModelOutput(logits=logits, pooled_embedding=pooled_embedding)

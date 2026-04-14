@@ -6,17 +6,17 @@ from pathlib import Path
 
 import torch
 
-from src.data.loaders import build_bag_loader, build_dataset
+from src.data.loaders import build_clip_loader, build_dataset
+from src.training.ast_setup import (
+    apply_encoder_adaptation,
+    build_ast_model,
+    build_grouped_optimizer,
+    inspect_pretrained_encoder,
+)
 from src.training.imbalance import (
     build_weighted_sampler,
     collect_targets,
     resolve_imbalance,
-)
-from src.training.mil_setup import (
-    apply_encoder_adaptation,
-    build_grouped_optimizer,
-    build_mil_model,
-    maybe_initialize_encoder,
 )
 from src.training.trainer import Trainer, TrainerConfig
 from src.utils.config import JsonConfigLoader
@@ -38,29 +38,28 @@ def main() -> None:
 
     train_dataset = build_dataset(cfg.data, split="train")
     val_dataset = build_dataset(cfg.data, split="val")
-    model = build_mil_model(
+    num_classes = len(cfg.data.label_to_index)
+    model = build_ast_model(
         cfg.model,
-        segment_n_mels=train_dataset.segment_n_mels,
-        segment_audio_ctx=train_dataset.segment_audio_ctx,
+        num_mel_bins=train_dataset.num_mel_bins,
+        max_length=train_dataset.max_length,
+        num_classes=num_classes,
     )
-    pretrained_info = maybe_initialize_encoder(
-        model,
-        cfg.model,
-        feature_type=cfg.data.preprocessing.feature_type,
-    )
-    adaptation_summary = apply_encoder_adaptation(
-        model,
-        model.cfg.segment_encoder.adaptation,
-    )
+    pretrained_info = inspect_pretrained_encoder(cfg.model)
+    adaptation_summary = apply_encoder_adaptation(model, model.cfg.encoder.adaptation)
     if pretrained_info is not None:
         logger.info(
-            "Loaded pretrained encoder | source=%s | path=%s | loaded_keys=%d | missing=%d | unexpected=%d | adaptation_mode=%s",
+            "Loaded pretrained AST encoder | source=%s | name_or_path=%s | "
+            "num_mel_bins=%d | max_length=%d | hidden_size=%d | "
+            "num_layers=%d | num_heads=%d | adaptation_mode=%s",
             pretrained_info.source,
-            pretrained_info.resolved_path,
-            pretrained_info.loaded_keys,
-            len(pretrained_info.missing_keys),
-            len(pretrained_info.unexpected_keys),
-            model.cfg.segment_encoder.adaptation.mode,
+            pretrained_info.name_or_path,
+            pretrained_info.num_mel_bins,
+            pretrained_info.max_length,
+            pretrained_info.hidden_size,
+            pretrained_info.num_hidden_layers,
+            pretrained_info.num_attention_heads,
+            model.cfg.encoder.adaptation.mode,
         )
     logger.info(
         "Encoder adaptation | mode=%s | num_layers=%d | trainable_params=%d | frozen_params=%d",
@@ -73,6 +72,7 @@ def main() -> None:
     train_targets = collect_targets(train_dataset)
     imbalance = resolve_imbalance(
         targets=train_targets,
+        num_classes=num_classes,
         pos_weight=cfg.train.loss.pos_weight,
         auto_pos_weight=cfg.train.loss.auto_pos_weight,
         weighted_random=cfg.train.sampler.weighted_random,
@@ -81,7 +81,7 @@ def main() -> None:
     if imbalance.pos_weight is not None:
         if cfg.train.loss.auto_pos_weight:
             logger.info(
-                "Using auto-computed positive-class weight=%.6f from training bags (loss=%s)",
+                "Using auto-computed positive-class weight=%.6f from training clips (loss=%s)",
                 imbalance.pos_weight,
                 cfg.train.loss.type,
             )
@@ -96,22 +96,22 @@ def main() -> None:
         build_weighted_sampler(train_targets) if imbalance.weighted_random else None
     )
     if sampler is not None:
-        logger.info("Using weighted random sampler for bag training")
+        logger.info("Using weighted random sampler for clip training")
 
-    train_loader = build_bag_loader(
+    train_loader = build_clip_loader(
         train_dataset,
         batch_size=cfg.data.batch_size,
         num_workers=cfg.data.num_workers,
         shuffle=sampler is None,
         sampler=sampler,
     )
-    val_loader = build_bag_loader(
+    val_loader = build_clip_loader(
         val_dataset,
         batch_size=cfg.data.batch_size,
         num_workers=cfg.data.num_workers,
         shuffle=False,
     )
-    logger.info("Train bags: %d | Val bags: %d", len(train_dataset), len(val_dataset))
+    logger.info("Train clips: %d | Val clips: %d", len(train_dataset), len(val_dataset))
     optimizer, optimizer_summary = build_grouped_optimizer(
         model,
         encoder_lr=cfg.train.optimizer.encoder_lr,
@@ -138,6 +138,7 @@ def main() -> None:
             max_grad_norm=cfg.train.max_grad_norm,
             top_k=cfg.train.top_k,
             run_dir=run_dir,
+            num_classes=num_classes,
             loss_type=cfg.train.loss.type,
             gamma=cfg.train.loss.gamma,
             pos_weight=imbalance.pos_weight,

@@ -1,5 +1,5 @@
 [project]
-name = "whisper-respiratory-classification"
+name = "ast-respiratory-classification"
 version = "0.0.0"
 requires-python = ">=3.13"
 

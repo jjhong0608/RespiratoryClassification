@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from torch.utils.data import WeightedRandomSampler
 
-from src.data.dataset import RespiratoryBagDataset
+from src.data.dataset import RespiratoryClipDataset
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,7 @@ class ResolvedImbalance:
     class_counts: Mapping[int, int]
 
 
-def collect_targets(dataset: RespiratoryBagDataset) -> list[int]:
+def collect_targets(dataset: RespiratoryClipDataset) -> list[int]:
     return dataset.targets
 
 
@@ -44,10 +44,25 @@ def build_weighted_sampler(targets: Sequence[int]) -> WeightedRandomSampler:
 def resolve_imbalance(
     *,
     targets: Sequence[int],
+    num_classes: int = 2,
     pos_weight: float | None,
     auto_pos_weight: bool,
     weighted_random: bool,
 ) -> ResolvedImbalance:
+    if num_classes > 2:
+        if auto_pos_weight:
+            raise ValueError(
+                "train.loss.auto_pos_weight is only supported for binary classification"
+            )
+        if pos_weight is not None:
+            raise ValueError(
+                "train.loss.pos_weight is only supported for binary classification"
+            )
+        return ResolvedImbalance(
+            pos_weight=None,
+            weighted_random=weighted_random,
+            class_counts=class_counts(targets),
+        )
     if auto_pos_weight and pos_weight is not None:
         raise ValueError(
             "Set only one of `train.loss.auto_pos_weight` or `train.loss.pos_weight`"

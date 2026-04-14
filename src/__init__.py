@@ -1,1 +1,1 @@
-"""Project code for Whisper-encoder respiratory sound classification."""
+"""Project code for AST-based respiratory sound classification."""

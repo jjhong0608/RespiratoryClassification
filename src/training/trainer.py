@@ -7,15 +7,18 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch import nn
+from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.data.loaders import BagBatch
+from src.data.loaders import ClipBatch
 from src.evaluation.diagnostics import build_diagnostic_rows, write_diagnostics_jsonl
 from src.evaluation.metrics import EvalMetrics, MetricsComputer
-from src.evaluation.thresholds import compute_threshold_optimized_metrics
-from src.models.model import MILModelOutput
+from src.evaluation.thresholds import (
+    ThresholdOptimizationResult,
+    compute_threshold_optimized_metrics,
+)
+from src.models.model import AstModelOutput
 from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
 from src.utils.config import AnalysisConfig, EarlyStoppingConfig
@@ -34,6 +37,7 @@ class TrainerConfig:
     max_grad_norm: float
     top_k: int
     run_dir: Path
+    num_classes: int
     loss_type: str = "bce"
     gamma: float = 2.0
     pos_weight: float | None = None
@@ -112,16 +116,11 @@ class Trainer(LoggingMixin):
         self.cfg = cfg
         Fs.ensure_dir(cfg.run_dir)
         self.ckpt = CheckpointManager(cfg.run_dir, cfg.top_k)
-        self._criterion = nn.BCEWithLogitsLoss(
-            pos_weight=None
-            if cfg.pos_weight is None
-            else torch.tensor(cfg.pos_weight, dtype=torch.float32)
-        )
 
     def _criterion_on(self, device: torch.device) -> nn.Module:
         if self.cfg.loss_type == "bce":
             if self.cfg.pos_weight is None:
-                return self._criterion
+                return nn.BCEWithLogitsLoss()
             return nn.BCEWithLogitsLoss(
                 pos_weight=torch.tensor(
                     self.cfg.pos_weight,
@@ -134,12 +133,35 @@ class Trainer(LoggingMixin):
                 gamma=self.cfg.gamma,
                 pos_weight=self.cfg.pos_weight,
             ).to(device)
+        if self.cfg.loss_type == "cross_entropy":
+            return nn.CrossEntropyLoss().to(device)
         raise ValueError(f"Unknown loss type: {self.cfg.loss_type}")
+
+    def _compute_loss(
+        self,
+        criterion: nn.Module,
+        logits: Tensor,
+        labels: Tensor,
+    ) -> Tensor:
+        if self.cfg.num_classes == 2:
+            return criterion(
+                logits, labels.to(device=logits.device, dtype=logits.dtype)
+            )
+        return criterion(logits, labels.to(device=logits.device, dtype=torch.long))
+
+    def _predict(self, logits: Tensor) -> tuple[Tensor, Tensor]:
+        if self.cfg.num_classes == 2:
+            probabilities = torch.sigmoid(logits.detach())
+            predictions = (probabilities >= 0.5).to(torch.long)
+            return probabilities, predictions
+        probabilities = torch.softmax(logits.detach(), dim=-1)
+        predictions = probabilities.argmax(dim=-1)
+        return probabilities, predictions
 
     def _epoch(
         self,
         model: nn.Module,
-        loader: DataLoader[BagBatch],
+        loader: DataLoader[ClipBatch],
         *,
         optimizer: torch.optim.Optimizer | None,
         scheduler: WarmupCosineScheduler | None,
@@ -149,17 +171,19 @@ class Trainer(LoggingMixin):
         total_loss = 0.0
         total_examples = 0
         targets: list[int] = []
-        probabilities: list[float] = []
+        probabilities: list[float] | list[list[float]] = []
         predictions: list[int] = []
         diagnostics: list[dict[str, Any]] = []
 
         for batch in tqdm(loader, leave=False):
             batch = batch.to(device)
-            output = model(batch.segments, batch.instance_mask)
-            if not isinstance(output, MILModelOutput):
-                raise TypeError("MIL model must return MILModelOutput")
-            bag_logits = output.bag_logits
-            loss = criterion(bag_logits, batch.labels)
+            output = model(batch.input_values)
+            if not isinstance(output, AstModelOutput):
+                raise TypeError("AST model must return AstModelOutput")
+
+            logits = output.logits
+            loss = self._compute_loss(criterion, logits, batch.labels)
+
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -168,11 +192,10 @@ class Trainer(LoggingMixin):
                 if scheduler is not None:
                     scheduler.step()
 
-            batch_probs = torch.sigmoid(bag_logits.detach())
-            batch_preds = (batch_probs >= 0.5).to(torch.long)
+            batch_probs, batch_preds = self._predict(logits)
             targets.extend(batch.labels.detach().cpu().to(torch.long).tolist())
-            probabilities.extend(batch_probs.cpu().tolist())
             predictions.extend(batch_preds.cpu().tolist())
+            probabilities.extend(batch_probs.cpu().tolist())
 
             total_examples += int(batch.labels.numel())
             total_loss += float(loss.item()) * float(batch.labels.numel())
@@ -204,8 +227,8 @@ class Trainer(LoggingMixin):
     def fit(
         self,
         model: nn.Module,
-        train_loader: DataLoader[BagBatch],
-        val_loader: DataLoader[BagBatch],
+        train_loader: DataLoader[ClipBatch],
+        val_loader: DataLoader[ClipBatch],
         optimizer: torch.optim.Optimizer,
         *,
         extra_state: dict[str, Any] | None = None,
@@ -242,13 +265,23 @@ class Trainer(LoggingMixin):
                     scheduler=None,
                     device=device,
                 )
-            val_threshold_optimization, val_metrics_optimized = (
-                compute_threshold_optimized_metrics(
-                    val_result.targets,
-                    val_result.probabilities,
-                    "f1",
+
+            if self.cfg.num_classes == 2:
+                val_threshold_optimization, val_metrics_optimized = (
+                    compute_threshold_optimized_metrics(
+                        val_result.targets,
+                        val_result.probabilities,
+                        "f1",
+                    )
                 )
-            )
+                best_f1 = val_metrics_optimized.f1_score
+            else:
+                val_threshold_optimization = ThresholdOptimizationResult.disabled(
+                    "f1",
+                    reason="threshold optimization is only supported for binary classification",
+                )
+                val_metrics_optimized = val_result.metrics
+                best_f1 = val_result.metrics.f1_score
 
             train_losses.append(train_result.loss)
             val_losses.append(val_result.loss)
@@ -262,30 +295,52 @@ class Trainer(LoggingMixin):
                 if len(lrs) == 1
                 else "[" + ", ".join(f"{lr:.8f}" for lr in lrs) + "]"
             )
-            self.logger.info(
-                "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
-                "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
-                "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
-                "Val Precision: %.4f | Val F1@0.5: %.4f | Val Balanced Acc@0.5: %.4f | "
-                "Val F1@opt: %.4f | Val Balanced Acc@opt: %.4f | Val Opt Threshold: %.4f",
-                epoch,
-                self.cfg.epochs,
-                lr_str,
-                train_result.loss,
-                train_result.metrics.accuracy,
-                train_result.metrics.recall,
-                train_result.metrics.precision,
-                train_result.metrics.f1_score,
-                val_result.loss,
-                val_result.metrics.accuracy,
-                val_result.metrics.recall,
-                val_result.metrics.precision,
-                val_result.metrics.f1_score,
-                val_result.metrics.balanced_accuracy,
-                val_metrics_optimized.f1_score,
-                val_metrics_optimized.balanced_accuracy,
-                val_threshold_optimization.selected_threshold,
-            )
+            if self.cfg.num_classes == 2:
+                self.logger.info(
+                    "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
+                    "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
+                    "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
+                    "Val Precision: %.4f | Val F1@0.5: %.4f | Val Balanced Acc@0.5: %.4f | "
+                    "Val F1@opt: %.4f | Val Balanced Acc@opt: %.4f | Val Opt Threshold: %.4f",
+                    epoch,
+                    self.cfg.epochs,
+                    lr_str,
+                    train_result.loss,
+                    train_result.metrics.accuracy,
+                    train_result.metrics.recall,
+                    train_result.metrics.precision,
+                    train_result.metrics.f1_score,
+                    val_result.loss,
+                    val_result.metrics.accuracy,
+                    val_result.metrics.recall,
+                    val_result.metrics.precision,
+                    val_result.metrics.f1_score,
+                    val_result.metrics.balanced_accuracy,
+                    val_metrics_optimized.f1_score,
+                    val_metrics_optimized.balanced_accuracy,
+                    val_threshold_optimization.selected_threshold,
+                )
+            else:
+                self.logger.info(
+                    "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
+                    "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
+                    "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
+                    "Val Precision: %.4f | Val F1: %.4f | Val Balanced Acc: %.4f",
+                    epoch,
+                    self.cfg.epochs,
+                    lr_str,
+                    train_result.loss,
+                    train_result.metrics.accuracy,
+                    train_result.metrics.recall,
+                    train_result.metrics.precision,
+                    train_result.metrics.f1_score,
+                    val_result.loss,
+                    val_result.metrics.accuracy,
+                    val_result.metrics.recall,
+                    val_result.metrics.precision,
+                    val_result.metrics.f1_score,
+                    val_result.metrics.balanced_accuracy,
+                )
 
             current_monitor_value = val_result.loss
             stopped_early = False
@@ -317,10 +372,10 @@ class Trainer(LoggingMixin):
             model_cfg = getattr(model, "cfg", None)
             dims = None
             if model_cfg is not None:
-                segment_encoder_cfg = getattr(model_cfg, "segment_encoder", None)
-                encoder_dims = getattr(segment_encoder_cfg, "dims", None)
-                if encoder_dims is not None and is_dataclass(encoder_dims):
-                    dims = asdict(encoder_dims)
+                encoder_cfg = getattr(model_cfg, "encoder", None)
+                feature_dims = getattr(encoder_cfg, "feature_dims", None)
+                if feature_dims is not None and is_dataclass(feature_dims):
+                    dims = asdict(feature_dims)
 
             early_stopping_state = {
                 "enabled": self.cfg.early_stopping.enabled,
@@ -356,12 +411,7 @@ class Trainer(LoggingMixin):
                         state[key] = value
             self.ckpt.save_last(state)
             self.ckpt.maybe_save_best("loss", val_result.loss, state, maximize=False)
-            self.ckpt.maybe_save_best(
-                "f1",
-                val_metrics_optimized.f1_score,
-                state,
-                maximize=True,
-            )
+            self.ckpt.maybe_save_best("f1", best_f1, state, maximize=True)
 
             if stopped_early:
                 self.logger.info("%s", stop_reason)

@@ -7,32 +7,27 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-from src.data.dataset import BagSample, RespiratoryBagDataset
-from src.data.segment import SegmentMetadata
+from src.data.dataset import ClipSample, RespiratoryClipDataset
 from src.utils.config import DataConfig
 
 
 @dataclass(frozen=True)
-class BagBatch:
-    segments: Tensor
-    instance_mask: Tensor
+class ClipBatch:
+    input_values: Tensor
     labels: Tensor
     audio_paths: tuple[str, ...]
     label_names: tuple[str, ...]
-    segment_metadata: tuple[tuple[SegmentMetadata, ...], ...]
 
-    def to(self, device: torch.device) -> BagBatch:
-        return BagBatch(
-            segments=self.segments.to(device),
-            instance_mask=self.instance_mask.to(device),
+    def to(self, device: torch.device) -> ClipBatch:
+        return ClipBatch(
+            input_values=self.input_values.to(device),
             labels=self.labels.to(device),
             audio_paths=self.audio_paths,
             label_names=self.label_names,
-            segment_metadata=self.segment_metadata,
         )
 
 
-def build_dataset(cfg: DataConfig, *, split: str = "train") -> RespiratoryBagDataset:
+def build_dataset(cfg: DataConfig, *, split: str = "train") -> RespiratoryClipDataset:
     split_to_roots = {
         "train": cfg.train_dirs,
         "val": cfg.val_dirs,
@@ -40,7 +35,7 @@ def build_dataset(cfg: DataConfig, *, split: str = "train") -> RespiratoryBagDat
     }
     if split not in split_to_roots:
         raise ValueError(f"Unsupported split: {split}")
-    dataset = RespiratoryBagDataset(cfg, split_to_roots[split])
+    dataset = RespiratoryClipDataset(cfg, split_to_roots[split])
     if len(dataset) == 0:
         raise ValueError(
             f"No usable .wav files found for split={split} under {split_to_roots[split]}"
@@ -48,61 +43,33 @@ def build_dataset(cfg: DataConfig, *, split: str = "train") -> RespiratoryBagDat
     return dataset
 
 
-def bag_collate_fn(samples: list[BagSample]) -> BagBatch:
+def clip_collate_fn(samples: list[ClipSample]) -> ClipBatch:
     if not samples:
-        raise ValueError("Cannot collate an empty bag batch")
-
-    batch_size = len(samples)
-    max_instances = max(sample.instances.shape[0] for sample in samples)
-    n_mels = samples[0].instances.shape[1]
-    n_frames = samples[0].instances.shape[2]
-    segments = torch.zeros(
-        batch_size,
-        max_instances,
-        n_mels,
-        n_frames,
-        dtype=samples[0].instances.dtype,
-    )
-    mask = torch.zeros(batch_size, max_instances, dtype=torch.bool)
-    labels = torch.tensor([sample.label for sample in samples], dtype=torch.float32)
-
-    audio_paths: list[str] = []
-    label_names: list[str] = []
-    metadata: list[tuple[SegmentMetadata, ...]] = []
-    for bag_index, sample in enumerate(samples):
-        count = sample.instances.shape[0]
-        segments[bag_index, :count] = sample.instances
-        mask[bag_index, :count] = True
-        audio_paths.append(sample.audio_path)
-        label_names.append(sample.label_name)
-        metadata.append(sample.segment_metadata)
-
-    return BagBatch(
-        segments=segments,
-        instance_mask=mask,
-        labels=labels,
-        audio_paths=tuple(audio_paths),
-        label_names=tuple(label_names),
-        segment_metadata=tuple(metadata),
+        raise ValueError("Cannot collate an empty clip batch")
+    return ClipBatch(
+        input_values=torch.stack([sample.input_values for sample in samples], dim=0),
+        labels=torch.tensor([sample.label for sample in samples], dtype=torch.long),
+        audio_paths=tuple(sample.audio_path for sample in samples),
+        label_names=tuple(sample.label_name for sample in samples),
     )
 
 
-def build_bag_loader(
-    dataset: RespiratoryBagDataset,
+def build_clip_loader(
+    dataset: RespiratoryClipDataset,
     *,
     batch_size: int,
     num_workers: int,
     shuffle: bool,
     sampler: WeightedRandomSampler | None = None,
-) -> DataLoader[BagBatch]:
+) -> DataLoader[ClipBatch]:
     return cast(
-        DataLoader[BagBatch],
+        DataLoader[ClipBatch],
         DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle if sampler is None else False,
             sampler=sampler,
             num_workers=num_workers,
-            collate_fn=bag_collate_fn,
+            collate_fn=clip_collate_fn,
         ),
     )

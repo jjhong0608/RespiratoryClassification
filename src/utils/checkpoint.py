@@ -3,16 +3,13 @@ from __future__ import annotations
 import torch
 
 from src.models.model import (
-    InstanceHeadConfig,
-    InterAttentionConfig,
-    MILConfig,
-    MILModelConfig,
-    SegmentEncoderAdaptationConfig,
-    SegmentEncoderConfig,
-    TopKConfig,
+    AstArchitectureConfig,
+    AstEncoderConfig,
+    AstFeatureDims,
+    AstModelConfig,
+    ClassifierConfig,
+    EncoderAdaptationConfig,
 )
-from src.models.segment_encoder import SegmentEncoderPoolingConfig
-from src.models.whisper_encoder import WhisperEncoderDims
 
 
 def torch_load_compat(path: str, *, device: torch.device, weights_only: bool) -> dict:
@@ -34,42 +31,36 @@ def load_checkpoint(path: str, *, device: torch.device, unsafe: bool = False) ->
         return torch_load_compat(path, device=device, weights_only=False)
 
 
-def parse_model_cfg(raw: object) -> MILModelConfig:
-    if isinstance(raw, MILModelConfig):
+def parse_model_cfg(raw: object) -> AstModelConfig:
+    if isinstance(raw, AstModelConfig):
         return raw
     if not isinstance(raw, dict):
-        raise TypeError("model_cfg must be a dict or MILModelConfig")
+        raise TypeError("model_cfg must be a dict or AstModelConfig")
 
-    segment_encoder_raw = raw.get("segment_encoder")
-    if not isinstance(segment_encoder_raw, dict):
-        raise TypeError("model_cfg.segment_encoder must be a dict")
-    dims_raw = segment_encoder_raw.get("dims")
-    if not isinstance(dims_raw, dict):
-        raise TypeError("model_cfg.segment_encoder.dims must be a dict")
-    pooling_raw = segment_encoder_raw.get("pooling", {})
-    adaptation_raw = segment_encoder_raw.get("adaptation", {})
-    instance_head_raw = raw.get("instance_head")
-    if not isinstance(instance_head_raw, dict):
-        raise TypeError("model_cfg.instance_head must be a dict")
-    mil_raw = raw.get("mil")
-    if not isinstance(mil_raw, dict):
-        raise TypeError("model_cfg.mil must be a dict")
+    encoder_raw = raw.get("encoder")
+    if not isinstance(encoder_raw, dict):
+        raise TypeError("model_cfg.encoder must be a dict")
+    feature_dims_raw = encoder_raw.get("feature_dims")
+    if not isinstance(feature_dims_raw, dict):
+        raise TypeError("model_cfg.encoder.feature_dims must be a dict")
+    adaptation_raw = encoder_raw.get("adaptation", {})
+    architecture_raw = encoder_raw.get("architecture", {})
+    classifier_raw = raw.get("classifier")
+    if not isinstance(classifier_raw, dict):
+        raise TypeError("model_cfg.classifier must be a dict")
+    num_classes_raw = raw.get("num_classes")
+    if not isinstance(num_classes_raw, int):
+        raise TypeError("model_cfg.num_classes must be an int")
 
-    return MILModelConfig(
-        segment_encoder=SegmentEncoderConfig(
-            dims=WhisperEncoderDims(**dims_raw),
-            type=segment_encoder_raw.get("type", "whisper"),
-            backbone=segment_encoder_raw.get("backbone", "custom"),
-            pretrained_name_or_path=segment_encoder_raw.get("pretrained_name_or_path"),
-            strict=bool(segment_encoder_raw.get("strict", True)),
-            download_root=segment_encoder_raw.get("download_root"),
-            pooling=SegmentEncoderPoolingConfig(**dict(pooling_raw)),
-            adaptation=SegmentEncoderAdaptationConfig(**dict(adaptation_raw)),
+    return AstModelConfig(
+        encoder=AstEncoderConfig(
+            feature_dims=AstFeatureDims(**feature_dims_raw),
+            type=encoder_raw.get("type", "ast"),
+            pretrained_name_or_path=encoder_raw.get("pretrained_name_or_path"),
+            cache_dir=encoder_raw.get("cache_dir"),
+            adaptation=EncoderAdaptationConfig(**dict(adaptation_raw)),
+            architecture=AstArchitectureConfig(**dict(architecture_raw)),
         ),
-        instance_head=InstanceHeadConfig(**dict(instance_head_raw)),
-        mil=MILConfig(
-            aggregator=mil_raw.get("aggregator", "attention"),
-            attention=InterAttentionConfig(**dict(mil_raw.get("attention", {}))),
-            topk=TopKConfig(**dict(mil_raw.get("topk", {}))),
-        ),
+        classifier=ClassifierConfig(**dict(classifier_raw)),
+        num_classes=num_classes_raw,
     )

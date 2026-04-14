@@ -1,1 +1,1 @@
-"""Model components (Whisper-like encoder + classifier)."""
+"""Model components for AST-based respiratory sound classification."""

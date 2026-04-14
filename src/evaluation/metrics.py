@@ -51,7 +51,16 @@ class MetricsComputer:
     def compute(
         y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | None
     ) -> EvalMetrics:
-        cm = confusion_matrix(y_true, y_pred)
+        if y_prob is not None and y_prob.ndim == 1:
+            labels = [0, 1]
+        elif y_prob is not None and y_prob.ndim == 2:
+            labels = list(range(y_prob.shape[1]))
+        else:
+            labels = sorted(
+                set(np.asarray(y_true, dtype=int).tolist())
+                | set(np.asarray(y_pred, dtype=int).tolist())
+            )
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
 
         if cm.shape[0] >= 2:
             total = float(cm.sum())
@@ -70,8 +79,7 @@ class MetricsComputer:
         else:
             specificity = float("nan")
 
-        classes = np.unique(y_true)
-        is_binary = len(classes) == 2
+        is_binary = y_prob is not None and y_prob.ndim == 1
         average = "binary" if is_binary else "macro"
 
         roc_auc: float | None = None

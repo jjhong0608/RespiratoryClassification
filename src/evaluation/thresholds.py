@@ -20,7 +20,7 @@ ThresholdSource = Literal[
 
 @dataclass(frozen=True)
 class ThresholdOptimizationConfig:
-    enabled: bool = False
+    enabled: bool = True
     metric: ThresholdMetric = "f1"
 
 
@@ -49,6 +49,7 @@ class ThresholdOptimizationResult:
         metric: ThresholdMetric,
         *,
         threshold: float = 0.5,
+        reason: str = "threshold optimization disabled",
     ) -> ThresholdOptimizationResult:
         return ThresholdOptimizationResult(
             enabled=False,
@@ -56,7 +57,7 @@ class ThresholdOptimizationResult:
             selected_metric=metric,
             selected_threshold=threshold,
             selected_score=None,
-            reason="threshold optimization disabled",
+            reason=reason,
             threshold_source="disabled",
             f1=None,
             balanced_accuracy=None,
@@ -263,72 +264,27 @@ def load_checkpoint_threshold_optimization(
         ),
         "youden_j": _parse_metric_result(raw.get("youden_j"), "youden_j"),
     }
-    selected_metric_result = metric_results[metric]
-    if selected_metric_result is not None:
-        return ThresholdOptimizationResult(
-            enabled=True,
-            applied=True,
-            selected_metric=metric,
-            selected_threshold=selected_metric_result.threshold,
-            selected_score=selected_metric_result.score,
-            reason=None,
-            threshold_source="checkpoint_validation",
-            f1=metric_results["f1"],
-            balanced_accuracy=metric_results["balanced_accuracy"],
-            youden_j=metric_results["youden_j"],
+
+    selected_result = metric_results[metric]
+    if selected_result is None:
+        return ThresholdOptimizationResult.fallback(
+            metric,
+            reason=(
+                "checkpoint val_threshold_optimization metadata is missing "
+                f"the '{metric}' threshold result"
+            ),
+            threshold=default_threshold,
+            threshold_source="fixed_default",
         )
 
-    selected_metric_raw = raw.get("selected_metric")
-    selected_threshold_raw = raw.get("selected_threshold")
-    selected_score_raw = raw.get("selected_score")
-    raw_applied = raw.get("applied")
-    if selected_threshold_raw is None:
-        selected_threshold = None
-    else:
-        try:
-            selected_threshold = float(selected_threshold_raw)
-        except (TypeError, ValueError):
-            selected_threshold = None
-    if (
-        selected_metric_raw == metric
-        and selected_threshold is not None
-        and np.isfinite(selected_threshold)
-        and raw_applied is not False
-    ):
-        try:
-            selected_score = (
-                None if selected_score_raw is None else float(selected_score_raw)
-            )
-        except (TypeError, ValueError):
-            selected_score = None
-        if selected_score is not None and not np.isfinite(selected_score):
-            selected_score = None
-        return ThresholdOptimizationResult(
-            enabled=True,
-            applied=True,
-            selected_metric=metric,
-            selected_threshold=selected_threshold,
-            selected_score=selected_score,
-            reason=None,
-            threshold_source="checkpoint_validation",
-            f1=metric_results["f1"],
-            balanced_accuracy=metric_results["balanced_accuracy"],
-            youden_j=metric_results["youden_j"],
-        )
-
-    raw_reason = raw.get("reason")
-    if isinstance(raw_reason, str) and raw_reason:
-        reason = f"checkpoint validation threshold unavailable: {raw_reason}"
-    else:
-        reason = f"checkpoint threshold metadata missing requested metric '{metric}'"
     return ThresholdOptimizationResult(
-        enabled=True,
-        applied=False,
+        enabled=bool(raw.get("enabled", True)),
+        applied=True,
         selected_metric=metric,
-        selected_threshold=default_threshold,
-        selected_score=None,
-        reason=reason,
-        threshold_source="fixed_default",
+        selected_threshold=selected_result.threshold,
+        selected_score=selected_result.score,
+        reason=None,
+        threshold_source="checkpoint_validation",
         f1=metric_results["f1"],
         balanced_accuracy=metric_results["balanced_accuracy"],
         youden_j=metric_results["youden_j"],
