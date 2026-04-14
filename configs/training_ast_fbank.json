@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "wheeze_mil_sliding_topk",
+    "name": "wheeze_mil_sliding_topk_ast_fbank",
     "task": "normal_vs_wheeze",
     "mode": "mil",
     "seed": 42,
@@ -28,7 +28,7 @@
       "clip_duration_sec": 30.0
     },
     "preprocessing": {
-      "feature_type": "log_mel",
+      "feature_type": "ast_fbank",
       "source_type": "original",
       "bandpass": {
         "enabled": false,
@@ -62,7 +62,7 @@
     "segment_encoder": {
       "type": "whisper",
       "backbone": "tiny",
-      "pretrained_name_or_path": "tiny",
+      "pretrained_name_or_path": null,
       "strict": true,
       "download_root": null,
       "dims": {

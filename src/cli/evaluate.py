@@ -32,6 +32,29 @@ class PredictionRow:
     predicted_label: int
 
 
+def _validate_eval_frontend_dims(
+    *,
+    checkpoint_path: str | Path,
+    checkpoint_n_mels: int,
+    checkpoint_audio_ctx: int,
+    dataset_n_mels: int,
+    dataset_audio_ctx: int,
+) -> None:
+    if (
+        checkpoint_n_mels == dataset_n_mels
+        and checkpoint_audio_ctx == dataset_audio_ctx
+    ):
+        return
+    raise ValueError(
+        "Evaluation frontend dims do not match the checkpoint encoder dims.\n"
+        f"- checkpoint: n_mels={checkpoint_n_mels}, n_audio_ctx={checkpoint_audio_ctx}\n"
+        f"- dataset:    n_mels={dataset_n_mels}, n_audio_ctx={dataset_audio_ctx}\n"
+        f"- checkpoint_path: {checkpoint_path}\n\n"
+        "Use an evaluation config with the same data.preprocessing feature settings "
+        "that were used for training this checkpoint."
+    )
+
+
 def evaluate_checkpoint(
     cfg: EvalConfig,
     checkpoint_path: str | Path,
@@ -55,6 +78,13 @@ def evaluate_checkpoint(
     model.eval()
 
     dataset = build_dataset(cfg.data, split="eval")
+    _validate_eval_frontend_dims(
+        checkpoint_path=checkpoint_path,
+        checkpoint_n_mels=model_cfg.segment_encoder.dims.n_mels,
+        checkpoint_audio_ctx=model_cfg.segment_encoder.dims.n_audio_ctx,
+        dataset_n_mels=dataset.segment_n_mels,
+        dataset_audio_ctx=dataset.segment_audio_ctx,
+    )
     loader = build_bag_loader(
         dataset,
         batch_size=cfg.data.batch_size,

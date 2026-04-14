@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "wheeze_mil_sliding_attention_cv",
+    "name": "wheeze_cv",
     "task": "normal_vs_wheeze",
     "mode": "mil",
     "seed": 42,
@@ -37,17 +37,17 @@
         "n_mels": 80
       },
       "ast_fbank": {
-        "num_mel_bins": 128,
-        "max_length": 1024,
+        "num_mel_bins": 80,
+        "max_length": 200,
         "do_normalize": true,
         "mean": -4.2677393,
         "std": 4.5689974
       }
     },
     "segment": {
-      "mode": "sliding_window",
-      "length_sec": 5.0,
-      "stride_sec": 2.5,
+      "mode": "full_clip",
+      "length_sec": 30.0,
+      "stride_sec": 0.0,
       "pad_last": true,
       "drop_last": false
     }
@@ -72,7 +72,7 @@
       },
       "adaptation": {
         "mode": "partial",
-        "num_layers": 1
+        "num_layers": 2
       }
     },
     "instance_head": {
@@ -81,10 +81,10 @@
       "dropout": 0.1
     },
     "mil": {
-      "aggregator": "attention",
+      "aggregator": "topk",
       "attention": {
         "hidden_dim": 128,
-        "dropout": 0.1,
+        "dropout": 0.2,
         "gated": true
       },
       "topk": {
@@ -95,18 +95,19 @@
   "train": {
     "epochs": 100,
     "top_k": 3,
-    "max_grad_norm": 1.0,
+    "max_grad_norm": 0.5,
     "optimizer": {
-      "encoder_lr": 2e-05,
-      "head_lr": 0.0001,
+      "encoder_lr": 5e-05,
+      "head_lr": 5e-05,
       "weight_decay": 0.01
     },
     "scheduler": {
-      "warmup_ratio": 0.05
+      "warmup_ratio": 0.15
     },
     "loss": {
-      "type": "bce",
-      "auto_pos_weight": true,
+      "type": "focal",
+      "gamma": 2.0,
+      "auto_pos_weight": false,
       "pos_weight": null
     },
     "sampler": {
@@ -124,8 +125,8 @@
       "save_segment_scores": true,
       "save_instance_logits": true,
       "save_intra_attention_weights": true,
-      "save_inter_attention_weights": true,
-      "save_topk_indices": false,
+      "save_inter_attention_weights": false,
+      "save_topk_indices": true,
       "save_bag_metadata": true
     }
   },
@@ -133,61 +134,61 @@
     {
       "name": "fold_0",
       "train_dirs": [
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_2/",
-        "datasets/folds/fold_3/",
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_1/",
+        "datasets/clean_wheeze/folds/fold_2/",
+        "datasets/clean_wheeze/folds/fold_3/",
+        "datasets/clean_wheeze/folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_0/"
+        "datasets/clean_wheeze/folds/fold_0/"
       ]
     },
     {
       "name": "fold_1",
       "train_dirs": [
-        "datasets/folds/fold_0/",
-        "datasets/folds/fold_2/",
-        "datasets/folds/fold_3/",
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_0/",
+        "datasets/clean_wheeze/folds/fold_2/",
+        "datasets/clean_wheeze/folds/fold_3/",
+        "datasets/clean_wheeze/folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_1/"
+        "datasets/clean_wheeze/folds/fold_1/"
       ]
     },
     {
       "name": "fold_2",
       "train_dirs": [
-        "datasets/folds/fold_0/",
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_3/",
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_0/",
+        "datasets/clean_wheeze/folds/fold_1/",
+        "datasets/clean_wheeze/folds/fold_3/",
+        "datasets/clean_wheeze/folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_2/"
+        "datasets/clean_wheeze/folds/fold_2/"
       ]
     },
     {
       "name": "fold_3",
       "train_dirs": [
-        "datasets/folds/fold_0/",
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_2/",
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_0/",
+        "datasets/clean_wheeze/folds/fold_1/",
+        "datasets/clean_wheeze/folds/fold_2/",
+        "datasets/clean_wheeze/folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_3/"
+        "datasets/clean_wheeze/folds/fold_3/"
       ]
     },
     {
       "name": "fold_4",
       "train_dirs": [
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_2/",
-        "datasets/folds/fold_3/"
+        "datasets/clean_wheeze/folds/fold_0/",
+        "datasets/clean_wheeze/folds/fold_1/",
+        "datasets/clean_wheeze/folds/fold_2/",
+        "datasets/clean_wheeze/folds/fold_3/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_4/"
       ]
     }
   ]

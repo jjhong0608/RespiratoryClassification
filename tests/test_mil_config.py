@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from src.utils.config import JsonConfigLoader
 
 
@@ -37,9 +36,21 @@ def _training_payload() -> dict:
             "preprocessing": {
                 "feature_type": "log_mel",
                 "source_type": "original",
-                "n_mels": 80,
                 "bandpass": {
                     "enabled": False,
+                },
+                "log_mel": {
+                    "n_fft": 400,
+                    "hop_length": 160,
+                    "win_length": 400,
+                    "n_mels": 80,
+                },
+                "ast_fbank": {
+                    "num_mel_bins": 128,
+                    "max_length": 1024,
+                    "do_normalize": True,
+                    "mean": -4.2677393,
+                    "std": 4.5689974,
                 },
             },
             "segment": {
@@ -159,6 +170,8 @@ def test_load_training_config_uses_nested_final_model_schema(tmp_path: Path) -> 
 
     assert cfg.experiment.name == "wheeze_mil_topk"
     assert cfg.data.segment.mode == "sliding_window"
+    assert cfg.data.preprocessing.log_mel.n_mels == 80
+    assert cfg.data.preprocessing.ast_fbank.max_length == 1024
     assert cfg.model.segment_encoder.pooling.type == "attention"
     assert cfg.model.segment_encoder.adaptation.mode == "partial"
     assert cfg.model.mil.aggregator == "topk"
@@ -287,3 +300,83 @@ def test_eval_config_rejects_invalid_threshold_metric(tmp_path: Path) -> None:
         match="threshold_optimization.metric must be one of",
     ):
         JsonConfigLoader.load_eval(config_path)
+
+
+def test_load_training_config_supports_ast_fbank_frontend(tmp_path: Path) -> None:
+    payload = _training_payload()
+    payload["data"]["preprocessing"]["feature_type"] = "ast_fbank"
+    payload["data"]["preprocessing"]["ast_fbank"]["num_mel_bins"] = 96
+    payload["data"]["preprocessing"]["ast_fbank"]["max_length"] = 512
+    config_path = _write_json(tmp_path / "ast_train.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.data.preprocessing.feature_type == "ast_fbank"
+    assert cfg.data.preprocessing.ast_fbank.num_mel_bins == 96
+    assert cfg.data.preprocessing.ast_fbank.max_length == 512
+
+
+def test_log_mel_config_requires_nested_log_mel_block(tmp_path: Path) -> None:
+    payload = _training_payload()
+    payload["data"]["preprocessing"].pop("log_mel")
+    config_path = _write_json(tmp_path / "missing_log_mel.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="data.preprocessing.log_mel is required when feature_type='log_mel'",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_ast_fbank_config_requires_nested_ast_block(tmp_path: Path) -> None:
+    payload = _training_payload()
+    payload["data"]["preprocessing"]["feature_type"] = "ast_fbank"
+    payload["data"]["preprocessing"].pop("ast_fbank")
+    config_path = _write_json(tmp_path / "missing_ast_fbank.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="data.preprocessing.ast_fbank is required when feature_type='ast_fbank'",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_ast_fbank_config_requires_16khz_sample_rate(tmp_path: Path) -> None:
+    payload = _training_payload()
+    payload["data"]["audio"]["sample_rate"] = 8000
+    payload["data"]["preprocessing"]["feature_type"] = "ast_fbank"
+    config_path = _write_json(tmp_path / "invalid_ast_sr.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="data.audio.sample_rate must be 16000 when data.preprocessing.feature_type='ast_fbank'",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_ast_fbank_config_rejects_non_positive_max_length(tmp_path: Path) -> None:
+    payload = _training_payload()
+    payload["data"]["preprocessing"]["feature_type"] = "ast_fbank"
+    payload["data"]["preprocessing"]["ast_fbank"]["max_length"] = 0
+    config_path = _write_json(tmp_path / "invalid_ast_length.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="data.preprocessing.ast_fbank.max_length must be greater than zero",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_ast_fbank_config_rejects_non_positive_std_when_normalized(
+    tmp_path: Path,
+) -> None:
+    payload = _training_payload()
+    payload["data"]["preprocessing"]["feature_type"] = "ast_fbank"
+    payload["data"]["preprocessing"]["ast_fbank"]["std"] = 0.0
+    config_path = _write_json(tmp_path / "invalid_ast_std.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="data.preprocessing.ast_fbank.std must be greater than zero when normalization is enabled",
+    ):
+        JsonConfigLoader.load_training(config_path)

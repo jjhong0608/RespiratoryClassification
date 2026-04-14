@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from torch.optim import AdamW
 
 from src.models.model import (
-    InterAttentionConfig,
     InstanceHeadConfig,
+    InterAttentionConfig,
     MILConfig,
     MILModelConfig,
     RespiratoryMILModel,
@@ -15,7 +15,7 @@ from src.models.model import (
     TopKConfig,
 )
 from src.models.segment_encoder import SegmentEncoderPoolingConfig
-from src.models.whisper_encoder import WhisperEncoderDims
+from src.models.whisper_encoder import AudioEncoder, WhisperEncoderDims
 from src.pretrained.whisper import LoadedPretrainedInfo, OpenAIWhisperCheckpointLoader
 from src.utils.config import ModelConfig as RunModelConfig
 
@@ -89,11 +89,22 @@ def build_mil_model(
 def maybe_initialize_encoder(
     model: RespiratoryMILModel,
     cfg: RunModelConfig,
+    *,
+    feature_type: str,
 ) -> LoadedPretrainedInfo | None:
     pretrained_name_or_path = cfg.segment_encoder.pretrained_name_or_path
     if pretrained_name_or_path is None:
         return None
     loader = OpenAIWhisperCheckpointLoader()
+    if (
+        feature_type == "ast_fbank"
+        and pretrained_name_or_path in loader.available_models()
+    ):
+        raise ValueError(
+            "OpenAI Whisper encoder checkpoints are only supported with "
+            "data.preprocessing.feature_type='log_mel'. "
+            "Use scratch training or a compatible local checkpoint for ast_fbank."
+        )
     return loader.load_encoder_into(
         model,
         cfg.segment_encoder,
@@ -105,27 +116,31 @@ def apply_encoder_adaptation(
     model: RespiratoryMILModel,
     cfg: SegmentEncoderAdaptationConfig,
 ) -> EncoderAdaptationSummary:
-    for parameter in model.encoder.parameters():
+    encoder = model.encoder
+    if not isinstance(encoder, AudioEncoder):
+        raise TypeError("model.encoder must be an AudioEncoder instance")
+
+    for parameter in encoder.parameters():
         parameter.requires_grad = False
 
     if cfg.mode == "full":
-        for parameter in model.encoder.parameters():
+        for parameter in encoder.parameters():
             parameter.requires_grad = True
     elif cfg.mode == "partial":
-        for block in model.encoder.blocks[-cfg.num_layers :]:
+        for block in encoder.blocks[-cfg.num_layers :]:
             for parameter in block.parameters():
                 parameter.requires_grad = True
-        for parameter in model.encoder.ln_post.parameters():
+        for parameter in encoder.ln_post.parameters():
             parameter.requires_grad = True
     elif cfg.mode != "frozen":
         raise ValueError(f"Unsupported adaptation mode: {cfg.mode}")
 
     trainable_parameters = sum(
         parameter.numel()
-        for parameter in model.encoder.parameters()
+        for parameter in encoder.parameters()
         if parameter.requires_grad
     )
-    total_parameters = sum(parameter.numel() for parameter in model.encoder.parameters())
+    total_parameters = sum(parameter.numel() for parameter in encoder.parameters())
     return EncoderAdaptationSummary(
         mode=cfg.mode,
         num_layers=cfg.num_layers,

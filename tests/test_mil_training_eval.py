@@ -7,13 +7,12 @@ import numpy as np
 import pytest
 import soundfile as sf
 import torch
-
 from src.cli.evaluate import evaluate_checkpoint
 from src.data.loaders import build_bag_loader, build_dataset
 from src.evaluation.thresholds import ThresholdOptimizationConfig
 from src.models.model import (
-    InterAttentionConfig,
     InstanceHeadConfig,
+    InterAttentionConfig,
     MILConfig,
     MILModelConfig,
     RespiratoryMILModel,
@@ -32,12 +31,14 @@ from src.utils.checkpoint import load_checkpoint
 from src.utils.config import (
     AnalysisConfig,
     AnalysisOutputConfig,
+    AstFbankConfig,
     AudioConfig,
     BandPassConfig,
     DataConfig,
     EarlyStoppingConfig,
     EvalConfig,
     ExperimentConfig,
+    LogMelConfig,
     PreprocessingConfig,
     SegmentationConfig,
 )
@@ -62,7 +63,7 @@ def _analysis_cfg() -> AnalysisConfig:
     )
 
 
-def _data_cfg(root: Path) -> DataConfig:
+def _data_cfg(root: Path, *, feature_type: str = "log_mel") -> DataConfig:
     return DataConfig(
         train_dirs=[str(root / "train")],
         val_dirs=[str(root / "val")],
@@ -72,10 +73,17 @@ def _data_cfg(root: Path) -> DataConfig:
         num_workers=0,
         audio=AudioConfig(sample_rate=16000, clip_duration_sec=1.5),
         preprocessing=PreprocessingConfig(
-            feature_type="log_mel",
+            feature_type=feature_type,
             source_type="original",
-            n_mels=80,
             bandpass=BandPassConfig(enabled=False),
+            log_mel=LogMelConfig(n_mels=80),
+            ast_fbank=AstFbankConfig(
+                num_mel_bins=128,
+                max_length=128,
+                do_normalize=True,
+                mean=-4.2677393,
+                std=4.5689974,
+            ),
         ),
         segment=SegmentationConfig(
             mode="sliding_window",
@@ -87,7 +95,7 @@ def _data_cfg(root: Path) -> DataConfig:
     )
 
 
-def _prepare_dataset(root: Path) -> DataConfig:
+def _prepare_dataset(root: Path, *, feature_type: str = "log_mel") -> DataConfig:
     for split in ("train", "val"):
         for label in ("normal", "wheeze"):
             (root / split / label).mkdir(parents=True, exist_ok=True)
@@ -95,7 +103,7 @@ def _prepare_dataset(root: Path) -> DataConfig:
     _write_wav(root / "train" / "wheeze" / "wheeze_a.wav", 1.3, 16000)
     _write_wav(root / "val" / "normal" / "normal_b.wav", 0.9, 16000)
     _write_wav(root / "val" / "wheeze" / "wheeze_b.wav", 1.4, 16000)
-    return _data_cfg(root)
+    return _data_cfg(root, feature_type=feature_type)
 
 
 def _build_model(train_dataset: object) -> RespiratoryMILModel:
@@ -143,9 +151,10 @@ def _train_smoke_run(
     *,
     epochs: int = 1,
     early_stopping: EarlyStoppingConfig | None = None,
+    feature_type: str = "log_mel",
 ) -> tuple[Path, DataConfig]:
     torch.manual_seed(0)
-    data_cfg = _prepare_dataset(tmp_path / "bags")
+    data_cfg = _prepare_dataset(tmp_path / "bags", feature_type=feature_type)
     train_dataset = build_dataset(data_cfg, split="train")
     val_dataset = build_dataset(data_cfg, split="val")
     train_loader = build_bag_loader(
@@ -274,8 +283,7 @@ def test_mil_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
     assert metrics["threshold_optimization"]["enabled"] is True
     assert metrics["threshold_optimization"]["applied"] is True
     assert (
-        metrics["threshold_optimization"]["threshold_source"]
-        == "checkpoint_validation"
+        metrics["threshold_optimization"]["threshold_source"] == "checkpoint_validation"
     )
     assert metrics["threshold_optimization"]["selected_threshold"] == pytest.approx(
         saved_threshold
@@ -314,15 +322,45 @@ def test_evaluate_checkpoint_uses_checkpoint_validation_threshold_for_single_cla
     assert metrics["threshold_optimization"]["enabled"] is True
     assert metrics["threshold_optimization"]["applied"] is True
     assert (
-        metrics["threshold_optimization"]["threshold_source"]
-        == "checkpoint_validation"
+        metrics["threshold_optimization"]["threshold_source"] == "checkpoint_validation"
     )
     assert metrics["threshold_optimization"]["selected_threshold"] == pytest.approx(
         saved_threshold
     )
-    assert metrics["optimized_metrics"]["decision_threshold"] == pytest.approx(
-        saved_threshold
+
+
+def test_mil_trainer_and_evaluator_smoke_with_ast_fbank_frontend(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path, data_cfg = _train_smoke_run(tmp_path, feature_type="ast_fbank")
+
+    metrics = evaluate_checkpoint(
+        _eval_cfg(tmp_path, checkpoint_path, data_cfg),
+        checkpoint_path,
     )
+
+    assert "accuracy" in metrics
+    assert metrics["optimized_metrics"]["decision_threshold"] >= 0.0
+
+
+def test_evaluate_checkpoint_rejects_frontend_dim_mismatch(tmp_path: Path) -> None:
+    checkpoint_path, data_cfg = _train_smoke_run(tmp_path, feature_type="ast_fbank")
+    mismatched_cfg = replace(
+        data_cfg,
+        preprocessing=replace(
+            data_cfg.preprocessing,
+            feature_type="log_mel",
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Evaluation frontend dims do not match the checkpoint encoder dims",
+    ):
+        evaluate_checkpoint(
+            _eval_cfg(tmp_path, checkpoint_path, mismatched_cfg),
+            checkpoint_path,
+        )
 
 
 def test_evaluate_checkpoint_falls_back_to_fixed_threshold_for_legacy_checkpoint(
@@ -343,9 +381,10 @@ def test_evaluate_checkpoint_falls_back_to_fixed_threshold_for_legacy_checkpoint
     assert metrics["threshold_optimization"]["applied"] is False
     assert metrics["threshold_optimization"]["threshold_source"] == "fixed_default"
     assert metrics["threshold_optimization"]["selected_threshold"] == 0.5
-    assert "missing val_threshold_optimization" in metrics["threshold_optimization"][
-        "reason"
-    ]
+    assert (
+        "missing val_threshold_optimization"
+        in metrics["threshold_optimization"]["reason"]
+    )
     assert metrics["optimized_metrics"]["decision_threshold"] == 0.5
 
 

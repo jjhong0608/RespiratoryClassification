@@ -1,13 +1,13 @@
 {
   "experiment": {
-    "name": "wheeze_mil_sliding_topk_eval",
+    "name": "wheeze_mil_sliding_max_eval",
     "task": "normal_vs_wheeze",
     "mode": "mil",
     "seed": 42,
     "device": "mps",
     "output_dir": "checkpoints"
   },
-  "checkpoint_path": "checkpoints/wheeze_mil_sliding_topk_cv/fold_0/last.pt",
+  "checkpoint_path": "checkpoints/wheeze_mil_sliding_max_cv/fold_0/last.pt",
   "threshold_optimization": {
     "enabled": true,
     "metric": "f1"
@@ -16,7 +16,7 @@
     "train_dirs": [],
     "val_dirs": [],
     "eval_dirs": [
-      "datasets/test/"
+      "datasets/clean_wheeze/test/"
     ],
     "label_to_index": {
       "normal": 0,
@@ -32,7 +32,7 @@
       "feature_type": "log_mel",
       "source_type": "original",
       "bandpass": {
-        "enabled": false,
+        "enabled": true,
         "low_hz": 250.0,
         "high_hz": 1000.0,
         "q": 0.707
@@ -44,8 +44,8 @@
         "n_mels": 80
       },
       "ast_fbank": {
-        "num_mel_bins": 128,
-        "max_length": 1024,
+        "num_mel_bins": 80,
+        "max_length": 200,
         "do_normalize": true,
         "mean": -4.2677393,
         "std": 4.5689974
@@ -53,8 +53,8 @@
     },
     "segment": {
       "mode": "sliding_window",
-      "length_sec": 5.0,
-      "stride_sec": 2.5,
+      "length_sec": 2.0,
+      "stride_sec": 1.0,
       "pad_last": true,
       "drop_last": false
     }
@@ -65,7 +65,7 @@
       "save_instance_logits": true,
       "save_intra_attention_weights": true,
       "save_inter_attention_weights": false,
-      "save_topk_indices": true,
+      "save_topk_indices": false,
       "save_bag_metadata": true
     }
   }

@@ -7,6 +7,8 @@ from torch import Tensor, nn
 
 from src.models.instance_head import (
     InstanceHeadConfig as RuntimeInstanceHeadConfig,
+)
+from src.models.instance_head import (
     build_instance_head,
 )
 from src.models.mil_aggregators import build_mil_aggregator

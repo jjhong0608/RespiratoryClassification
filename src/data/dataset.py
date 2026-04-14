@@ -10,9 +10,11 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from src.data.audio import (
+    AstFbankFeatureConfig,
     AudioPreprocessConfig,
+    SegmentFeatureExtractor,
     WaveformPreprocessor,
-    WhisperLikeLogMel,
+    build_segment_feature_extractor,
 )
 from src.data.io import WaveformLoader
 from src.data.segment import BagSegmenter, SegmentMetadata
@@ -54,10 +56,10 @@ class RespiratoryBagDataset(LoggingMixin, Dataset[BagSample]):
 
         bag_preprocess = AudioPreprocessConfig(
             sample_rate=cfg.audio.sample_rate,
-            n_fft=cfg.preprocessing.n_fft,
-            hop_length=cfg.preprocessing.hop_length,
-            win_length=cfg.preprocessing.win_length,
-            n_mels=cfg.preprocessing.n_mels,
+            n_fft=cfg.preprocessing.log_mel.n_fft,
+            hop_length=cfg.preprocessing.log_mel.hop_length,
+            win_length=cfg.preprocessing.log_mel.win_length,
+            n_mels=cfg.preprocessing.log_mel.n_mels,
             clip_seconds=cfg.audio.clip_duration_sec,
             source_type=cfg.preprocessing.source_type,
             bandpass_enabled=cfg.preprocessing.bandpass.enabled,
@@ -65,19 +67,34 @@ class RespiratoryBagDataset(LoggingMixin, Dataset[BagSample]):
             bandpass_high_hz=cfg.preprocessing.bandpass.high_hz,
             bandpass_q=cfg.preprocessing.bandpass.q,
         )
-        segment_preprocess = AudioPreprocessConfig(
+        log_mel_preprocess = AudioPreprocessConfig(
             sample_rate=cfg.audio.sample_rate,
-            n_fft=cfg.preprocessing.n_fft,
-            hop_length=cfg.preprocessing.hop_length,
-            win_length=cfg.preprocessing.win_length,
-            n_mels=cfg.preprocessing.n_mels,
+            n_fft=cfg.preprocessing.log_mel.n_fft,
+            hop_length=cfg.preprocessing.log_mel.hop_length,
+            win_length=cfg.preprocessing.log_mel.win_length,
+            n_mels=cfg.preprocessing.log_mel.n_mels,
             clip_seconds=cfg.segment.effective_length_sec(cfg.audio.clip_duration_sec),
             source_type="original",
             bandpass_enabled=False,
         )
+        ast_fbank_preprocess = AstFbankFeatureConfig(
+            sample_rate=cfg.audio.sample_rate,
+            clip_seconds=cfg.segment.effective_length_sec(cfg.audio.clip_duration_sec),
+            num_mel_bins=cfg.preprocessing.ast_fbank.num_mel_bins,
+            max_length=cfg.preprocessing.ast_fbank.max_length,
+            do_normalize=cfg.preprocessing.ast_fbank.do_normalize,
+            mean=cfg.preprocessing.ast_fbank.mean,
+            std=cfg.preprocessing.ast_fbank.std,
+        )
         self._waveform_loader = WaveformLoader(cfg.audio.sample_rate)
         self._bag_preprocessor = WaveformPreprocessor(bag_preprocess)
-        self._feature_extractor = WhisperLikeLogMel(segment_preprocess)
+        self._feature_extractor: SegmentFeatureExtractor = (
+            build_segment_feature_extractor(
+                feature_type=cfg.preprocessing.feature_type,
+                log_mel_cfg=log_mel_preprocess,
+                ast_fbank_cfg=ast_fbank_preprocess,
+            )
+        )
         self._segmenter = BagSegmenter(audio=cfg.audio, segment=cfg.segment)
 
     def __len__(self) -> int:
@@ -93,11 +110,11 @@ class RespiratoryBagDataset(LoggingMixin, Dataset[BagSample]):
 
     @property
     def segment_audio_ctx(self) -> int:
-        return self._feature_extractor.cfg.n_audio_ctx
+        return self._feature_extractor.n_audio_ctx
 
     @property
     def segment_n_mels(self) -> int:
-        return self._feature_extractor.cfg.n_mels
+        return self._feature_extractor.n_mels
 
     def _log_unknown_labels(
         self, unknown_by_label: Mapping[str, Sequence[Path]]

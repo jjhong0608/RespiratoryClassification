@@ -50,7 +50,11 @@ def main() -> None:
             segment_n_mels=train_dataset.segment_n_mels,
             segment_audio_ctx=train_dataset.segment_audio_ctx,
         )
-        pretrained_info = maybe_initialize_encoder(model, cfg.model)
+        pretrained_info = maybe_initialize_encoder(
+            model,
+            cfg.model,
+            feature_type=fold_data.preprocessing.feature_type,
+        )
         adaptation_summary = apply_encoder_adaptation(
             model,
             model.cfg.segment_encoder.adaptation,

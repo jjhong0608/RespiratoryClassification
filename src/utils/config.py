@@ -38,14 +38,29 @@ class AudioConfig:
 
 
 @dataclass(frozen=True)
-class PreprocessingConfig:
-    feature_type: Literal["log_mel"] = "log_mel"
-    source_type: Literal["original", "harmonic", "percussive"] = "original"
+class LogMelConfig:
     n_fft: int = 400
     hop_length: int = 160
     win_length: int = 400
     n_mels: int = 80
+
+
+@dataclass(frozen=True)
+class AstFbankConfig:
+    num_mel_bins: int = 128
+    max_length: int = 1024
+    do_normalize: bool = True
+    mean: float = -4.2677393
+    std: float = 4.5689974
+
+
+@dataclass(frozen=True)
+class PreprocessingConfig:
+    feature_type: Literal["log_mel", "ast_fbank"] = "log_mel"
+    source_type: Literal["original", "harmonic", "percussive"] = "original"
     bandpass: BandPassConfig = field(default_factory=BandPassConfig)
+    log_mel: LogMelConfig = field(default_factory=LogMelConfig)
+    ast_fbank: AstFbankConfig = field(default_factory=AstFbankConfig)
 
 
 @dataclass(frozen=True)
@@ -118,9 +133,7 @@ class SegmentEncoderConfig:
     pooling: SegmentEncoderPoolingConfig = field(
         default_factory=SegmentEncoderPoolingConfig
     )
-    adaptation: EncoderAdaptationConfig = field(
-        default_factory=EncoderAdaptationConfig
-    )
+    adaptation: EncoderAdaptationConfig = field(default_factory=EncoderAdaptationConfig)
 
 
 @dataclass(frozen=True)
@@ -316,14 +329,34 @@ class JsonConfigLoader:
 
     @staticmethod
     def _validate_preprocessing(cfg: PreprocessingConfig, sample_rate: int) -> None:
-        if cfg.feature_type != "log_mel":
+        if cfg.feature_type not in {"log_mel", "ast_fbank"}:
             raise ValueError(
-                "Only data.preprocessing.feature_type='log_mel' is supported"
+                "data.preprocessing.feature_type must be one of ['log_mel', 'ast_fbank']"
             )
-        if cfg.n_fft <= 0 or cfg.hop_length <= 0 or cfg.win_length <= 0:
-            raise ValueError("STFT parameters must be greater than zero")
-        if cfg.n_mels <= 0:
-            raise ValueError("data.preprocessing.n_mels must be greater than zero")
+        if cfg.log_mel.n_fft <= 0 or cfg.log_mel.hop_length <= 0:
+            raise ValueError(
+                "data.preprocessing.log_mel FFT parameters must be greater than zero"
+            )
+        if cfg.log_mel.win_length <= 0 or cfg.log_mel.n_mels <= 0:
+            raise ValueError(
+                "data.preprocessing.log_mel.win_length and n_mels must be greater than zero"
+            )
+        if cfg.ast_fbank.num_mel_bins <= 0:
+            raise ValueError(
+                "data.preprocessing.ast_fbank.num_mel_bins must be greater than zero"
+            )
+        if cfg.ast_fbank.max_length <= 0:
+            raise ValueError(
+                "data.preprocessing.ast_fbank.max_length must be greater than zero"
+            )
+        if cfg.ast_fbank.do_normalize and cfg.ast_fbank.std <= 0:
+            raise ValueError(
+                "data.preprocessing.ast_fbank.std must be greater than zero when normalization is enabled"
+            )
+        if cfg.feature_type == "ast_fbank" and sample_rate != 16000:
+            raise ValueError(
+                "data.audio.sample_rate must be 16000 when data.preprocessing.feature_type='ast_fbank'"
+            )
         JsonConfigLoader._validate_bandpass(cfg.bandpass, sample_rate)
 
     @staticmethod
@@ -406,7 +439,9 @@ class JsonConfigLoader:
     @staticmethod
     def _validate_mil(cfg: MILConfig) -> None:
         if cfg.aggregator not in {"attention", "max", "topk"}:
-            raise ValueError("model.mil.aggregator must be one of ['attention', 'max', 'topk']")
+            raise ValueError(
+                "model.mil.aggregator must be one of ['attention', 'max', 'topk']"
+            )
         if cfg.topk.k <= 0:
             raise ValueError("model.mil.topk.k must be greater than zero")
         if cfg.attention.hidden_dim <= 0:
@@ -450,13 +485,9 @@ class JsonConfigLoader:
                 f"{sorted(JsonConfigLoader._EARLY_STOPPING_MONITORS)}"
             )
         if cfg.early_stopping.patience <= 0:
-            raise ValueError(
-                "train.early_stopping.patience must be greater than zero"
-            )
+            raise ValueError("train.early_stopping.patience must be greater than zero")
         if cfg.early_stopping.min_delta < 0:
-            raise ValueError(
-                "train.early_stopping.min_delta must be non-negative"
-            )
+            raise ValueError("train.early_stopping.min_delta must be non-negative")
 
     @staticmethod
     def _parse_experiment(raw: Mapping[str, Any]) -> ExperimentConfig:
@@ -472,7 +503,20 @@ class JsonConfigLoader:
         kwargs.setdefault("eval_dirs", [])
         kwargs["audio"] = AudioConfig(**dict(raw["audio"]))
         preprocessing = dict(raw["preprocessing"])
+        feature_type = preprocessing.get("feature_type", "log_mel")
+        if feature_type == "log_mel" and "log_mel" not in preprocessing:
+            raise ValueError(
+                "data.preprocessing.log_mel is required when feature_type='log_mel'"
+            )
+        if feature_type == "ast_fbank" and "ast_fbank" not in preprocessing:
+            raise ValueError(
+                "data.preprocessing.ast_fbank is required when feature_type='ast_fbank'"
+            )
         preprocessing["bandpass"] = BandPassConfig(**preprocessing.get("bandpass", {}))
+        preprocessing["log_mel"] = LogMelConfig(**preprocessing.get("log_mel", {}))
+        preprocessing["ast_fbank"] = AstFbankConfig(
+            **preprocessing.get("ast_fbank", {})
+        )
         kwargs["preprocessing"] = PreprocessingConfig(**preprocessing)
         kwargs["segment"] = SegmentationConfig(**dict(raw["segment"]))
         cfg = DataConfig(**kwargs)

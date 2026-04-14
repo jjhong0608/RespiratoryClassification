@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "wheeze_mil_sliding_topk_eval",
+    "name": "wheeze_cv_eval",
     "task": "normal_vs_wheeze",
     "mode": "mil",
     "seed": 42,
@@ -16,7 +16,7 @@
     "train_dirs": [],
     "val_dirs": [],
     "eval_dirs": [
-      "datasets/test/"
+      "datasets/clean_wheeze/test/"
     ],
     "label_to_index": {
       "normal": 0,
@@ -32,7 +32,7 @@
       "feature_type": "log_mel",
       "source_type": "original",
       "bandpass": {
-        "enabled": false,
+        "enabled": true,
         "low_hz": 250.0,
         "high_hz": 1000.0,
         "q": 0.707
@@ -44,17 +44,17 @@
         "n_mels": 80
       },
       "ast_fbank": {
-        "num_mel_bins": 128,
-        "max_length": 1024,
+        "num_mel_bins": 80,
+        "max_length": 200,
         "do_normalize": true,
         "mean": -4.2677393,
         "std": 4.5689974
       }
     },
     "segment": {
-      "mode": "sliding_window",
-      "length_sec": 5.0,
-      "stride_sec": 2.5,
+      "mode": "full_clip",
+      "length_sec": 30.0,
+      "stride_sec": 0.0,
       "pad_last": true,
       "drop_last": false
     }

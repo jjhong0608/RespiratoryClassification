@@ -18,3 +18,5 @@ AGENTS.md
 *.egg-info/
 .codex-local/
 scripts/
+reports/
+mel_plots/

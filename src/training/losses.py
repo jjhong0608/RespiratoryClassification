@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -37,7 +39,10 @@ class FocalLoss(nn.Module):
         loss = torch.pow(1.0 - p_t, self.gamma) * bce_loss
 
         if self._pos_weight is not None:
-            pos_weight = self._pos_weight.to(device=logits.device, dtype=logits.dtype)
+            pos_weight = cast(torch.Tensor, self._pos_weight).to(
+                device=logits.device,
+                dtype=logits.dtype,
+            )
             sample_weight = torch.where(targets > 0.5, pos_weight, 1.0)
             loss = loss * sample_weight
 

@@ -229,6 +229,8 @@ def _parse_metric_result(
         return None
     threshold_raw = raw.get("threshold")
     score_raw = raw.get("score")
+    if threshold_raw is None or score_raw is None:
+        return None
     try:
         threshold = float(threshold_raw)
         score = float(score_raw)
@@ -280,10 +282,13 @@ def load_checkpoint_threshold_optimization(
     selected_threshold_raw = raw.get("selected_threshold")
     selected_score_raw = raw.get("selected_score")
     raw_applied = raw.get("applied")
-    try:
-        selected_threshold = float(selected_threshold_raw)
-    except (TypeError, ValueError):
+    if selected_threshold_raw is None:
         selected_threshold = None
+    else:
+        try:
+            selected_threshold = float(selected_threshold_raw)
+        except (TypeError, ValueError):
+            selected_threshold = None
     if (
         selected_metric_raw == metric
         and selected_threshold is not None
@@ -315,10 +320,7 @@ def load_checkpoint_threshold_optimization(
     if isinstance(raw_reason, str) and raw_reason:
         reason = f"checkpoint validation threshold unavailable: {raw_reason}"
     else:
-        reason = (
-            "checkpoint threshold metadata missing requested metric "
-            f"'{metric}'"
-        )
+        reason = f"checkpoint threshold metadata missing requested metric '{metric}'"
     return ThresholdOptimizationResult(
         enabled=True,
         applied=False,

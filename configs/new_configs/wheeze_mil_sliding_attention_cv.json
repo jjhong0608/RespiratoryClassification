@@ -24,12 +24,24 @@
     "preprocessing": {
       "feature_type": "log_mel",
       "source_type": "original",
-      "n_mels": 80,
       "bandpass": {
         "enabled": false,
         "low_hz": 250.0,
         "high_hz": 1000.0,
         "q": 0.707
+      },
+      "log_mel": {
+        "n_fft": 400,
+        "hop_length": 160,
+        "win_length": 400,
+        "n_mels": 80
+      },
+      "ast_fbank": {
+        "num_mel_bins": 80,
+        "max_length": 200,
+        "do_normalize": true,
+        "mean": -4.2677393,
+        "std": 4.5689974
       }
     },
     "segment": {
@@ -55,18 +67,18 @@
       "pooling": {
         "type": "attention",
         "hidden_dim": 128,
-        "dropout": 0.2,
+        "dropout": 0.1,
         "gated": true
       },
       "adaptation": {
         "mode": "partial",
-        "num_layers": 1
+        "num_layers": 2
       }
     },
     "instance_head": {
       "type": "mlp",
       "hidden_dim": 256,
-      "dropout": 0.2
+      "dropout": 0.1
     },
     "mil": {
       "aggregator": "attention",
@@ -85,7 +97,7 @@
     "top_k": 3,
     "max_grad_norm": 0.5,
     "optimizer": {
-      "encoder_lr": 1e-05,
+      "encoder_lr": 5e-05,
       "head_lr": 5e-05,
       "weight_decay": 0.01
     },
@@ -122,61 +134,61 @@
     {
       "name": "fold_0",
       "train_dirs": [
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_2/",
-        "datasets/folds/fold_3/",
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_1/",
+        "datasets/clean_wheeze/folds/fold_2/",
+        "datasets/clean_wheeze/folds/fold_3/",
+        "datasets/clean_wheeze/folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_0/"
+        "datasets/clean_wheeze/folds/fold_0/"
       ]
     },
     {
       "name": "fold_1",
       "train_dirs": [
-        "datasets/folds/fold_0/",
-        "datasets/folds/fold_2/",
-        "datasets/folds/fold_3/",
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_0/",
+        "datasets/clean_wheeze/folds/fold_2/",
+        "datasets/clean_wheeze/folds/fold_3/",
+        "datasets/clean_wheeze/folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_1/"
+        "datasets/clean_wheeze/folds/fold_1/"
       ]
     },
     {
       "name": "fold_2",
       "train_dirs": [
-        "datasets/folds/fold_0/",
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_3/",
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_0/",
+        "datasets/clean_wheeze/folds/fold_1/",
+        "datasets/clean_wheeze/folds/fold_3/",
+        "datasets/clean_wheeze/folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_2/"
+        "datasets/clean_wheeze/folds/fold_2/"
       ]
     },
     {
       "name": "fold_3",
       "train_dirs": [
-        "datasets/folds/fold_0/",
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_2/",
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_0/",
+        "datasets/clean_wheeze/folds/fold_1/",
+        "datasets/clean_wheeze/folds/fold_2/",
+        "datasets/clean_wheeze/folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_3/"
+        "datasets/clean_wheeze/folds/fold_3/"
       ]
     },
     {
       "name": "fold_4",
       "train_dirs": [
-        "datasets/folds/fold_0/",
-        "datasets/folds/fold_1/",
-        "datasets/folds/fold_2/",
-        "datasets/folds/fold_3/"
+        "datasets/clean_wheeze/folds/fold_0/",
+        "datasets/clean_wheeze/folds/fold_1/",
+        "datasets/clean_wheeze/folds/fold_2/",
+        "datasets/clean_wheeze/folds/fold_3/"
       ],
       "val_dirs": [
-        "datasets/folds/fold_4/"
+        "datasets/clean_wheeze/folds/fold_4/"
       ]
     }
   ]

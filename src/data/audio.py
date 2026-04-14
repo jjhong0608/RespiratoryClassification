@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 import torch
 import torchaudio
 from torch import Tensor
 from torch.nn import functional as F
+from torchaudio.compliance import kaldi
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,42 @@ class AudioPreprocessConfig:
     @property
     def n_audio_ctx(self) -> int:
         return (self.n_frames + 1) // 2
+
+
+@dataclass(frozen=True)
+class AstFbankFeatureConfig:
+    sample_rate: int = 16000
+    clip_seconds: float = 30.0
+    num_mel_bins: int = 128
+    max_length: int = 1024
+    do_normalize: bool = True
+    mean: float = -4.2677393
+    std: float = 4.5689974
+
+    @property
+    def n_mels(self) -> int:
+        return self.num_mel_bins
+
+    @property
+    def n_frames(self) -> int:
+        return self.max_length
+
+    @property
+    def n_audio_ctx(self) -> int:
+        return (self.max_length + 1) // 2
+
+
+class SegmentFeatureExtractor(Protocol):
+    @property
+    def n_mels(self) -> int: ...
+
+    @property
+    def n_frames(self) -> int: ...
+
+    @property
+    def n_audio_ctx(self) -> int: ...
+
+    def __call__(self, audio: Tensor) -> Tensor: ...
 
 
 class WaveformPreprocessor:
@@ -234,3 +271,64 @@ class WhisperLikeLogMel:
         log_spec = torch.clamp(mel, min=1e-10).log10()
         log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
         return (log_spec + 4.0) / 4.0
+
+    @property
+    def n_mels(self) -> int:
+        return self.cfg.n_mels
+
+    @property
+    def n_frames(self) -> int:
+        return self.cfg.n_frames
+
+    @property
+    def n_audio_ctx(self) -> int:
+        return self.cfg.n_audio_ctx
+
+
+class AstLikeFbank:
+    def __init__(self, cfg: AstFbankFeatureConfig):
+        self.cfg = cfg
+
+    def __call__(self, audio: Tensor) -> Tensor:
+        if audio.ndim != 1:
+            raise ValueError(f"Expected mono waveform (T,), got {tuple(audio.shape)}")
+        waveform = audio.to(dtype=torch.float32).unsqueeze(0)
+        fbank = kaldi.fbank(
+            waveform,
+            sample_frequency=float(self.cfg.sample_rate),
+            window_type="hanning",
+            num_mel_bins=self.cfg.num_mel_bins,
+        )
+        if int(fbank.shape[0]) > self.cfg.max_length:
+            fbank = fbank[: self.cfg.max_length, :]
+        if self.cfg.do_normalize:
+            fbank = (fbank - self.cfg.mean) / (self.cfg.std * 2.0)
+        difference = self.cfg.max_length - int(fbank.shape[0])
+        if difference > 0:
+            fbank = F.pad(fbank, (0, 0, 0, difference))
+        return fbank.transpose(0, 1)
+
+    @property
+    def n_mels(self) -> int:
+        return self.cfg.n_mels
+
+    @property
+    def n_frames(self) -> int:
+        return self.cfg.n_frames
+
+    @property
+    def n_audio_ctx(self) -> int:
+        return self.cfg.n_audio_ctx
+
+
+def build_segment_feature_extractor(
+    *,
+    feature_type: Literal["log_mel", "ast_fbank"],
+    log_mel_cfg: AudioPreprocessConfig,
+    ast_fbank_cfg: AstFbankFeatureConfig,
+) -> SegmentFeatureExtractor:
+    if feature_type == "log_mel":
+        return WhisperLikeLogMel(log_mel_cfg)
+    if feature_type == "ast_fbank":
+        return AstLikeFbank(ast_fbank_cfg)
+    raise ValueError(f"Unsupported feature_type: {feature_type}")

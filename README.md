@@ -76,6 +76,51 @@ python -m src.cli.cv --config configs/cv_run.json
 
 Each fold is trained independently under `experiment.output_dir/experiment.name/fold_x/`.
 
+## Plot Features
+
+Plot a single full-file feature map with the same frontend math used by the MIL data pipeline:
+
+```bash
+python -m src.cli.plot_mels --input path/to/audio.wav --out plots/audio_feature --formats html,png
+```
+
+Select the frontend with `--feature-type`:
+
+- `log_mel`
+  - uses the repo's Whisper-style log-mel frontend
+- `ast_fbank`
+  - uses local Kaldi `fbank` extraction plus AST normalization constants
+  - normalizes real `fbank` frames before padding, then zero-fills any padded tail
+
+AST plotting remains full-file plotting, not MIL segment-bag plotting.
+
+Waveform preprocessing still runs before feature extraction for both frontends:
+
+- `--source-type original|harmonic|percussive`
+- `--bandpass-enabled`
+- `--bandpass-low-freq`
+- `--bandpass-high-freq`
+- `--bandpass-q`
+
+Example AST-style plot:
+
+```bash
+python -m src.cli.plot_mels \
+  --input path/to/audio.wav \
+  --out plots/audio_ast \
+  --feature-type ast_fbank \
+  --ast-num-mel-bins 128 \
+  --ast-max-length 1024 \
+  --source-type harmonic \
+  --bandpass-enabled \
+  --formats html
+```
+
+For `ast_fbank`, choose `--ast-max-length` close to the natural frame count for your segment duration to avoid extra compute:
+
+- about `198` for `2 s`
+- about `498-500` for `5 s`
+
 ## Model Structure
 
 The MIL model is explicitly hierarchical:
@@ -246,12 +291,24 @@ Example training shape:
     "preprocessing": {
       "feature_type": "log_mel",
       "source_type": "original",
-      "n_mels": 80,
       "bandpass": {
         "enabled": false,
         "low_hz": 250.0,
         "high_hz": 1000.0,
         "q": 0.707
+      },
+      "log_mel": {
+        "n_fft": 400,
+        "hop_length": 160,
+        "win_length": 400,
+        "n_mels": 80
+      },
+      "ast_fbank": {
+        "num_mel_bins": 128,
+        "max_length": 1024,
+        "do_normalize": true,
+        "mean": -4.2677393,
+        "std": 4.5689974
       }
     },
     "segment": {
@@ -345,5 +402,9 @@ Example training shape:
 ## Notes
 
 - `model.segment_encoder.pretrained_name_or_path` can point to an official OpenAI Whisper checkpoint name such as `tiny`, `base`, or `small`, or to a local MIL checkpoint.
+- `data.preprocessing.feature_type` selects the segment feature frontend. `log_mel` uses the repo's Whisper-style log-mel frontend, and `ast_fbank` uses a local Kaldi fbank frontend with AST normalization constants.
+- `data.preprocessing.source_type` and `data.preprocessing.bandpass` remain waveform-level preprocessing and are applied before MIL segmentation for both frontends.
+- `ast_fbank` is intended for scratch training or matching local checkpoints. Official OpenAI Whisper checkpoint names are only supported with `feature_type="log_mel"`.
 - MIL segment length controls the encoder context length automatically; it no longer has to match Whisper’s original 30-second context.
 - `python -m src.cli.pretrained_info --name_or_path tiny` prints the encoder dimensions for a given Whisper checkpoint.
+- `configs/training_ast_fbank.json` is included as an AST-style scratch-training example.

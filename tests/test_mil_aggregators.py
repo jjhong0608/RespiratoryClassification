@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-
 from src.models.mil_aggregators import (
     AttentionMILAggregator,
     AttentionMILConfig,

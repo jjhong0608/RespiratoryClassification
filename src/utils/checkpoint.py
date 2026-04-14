@@ -3,8 +3,8 @@ from __future__ import annotations
 import torch
 
 from src.models.model import (
-    InterAttentionConfig,
     InstanceHeadConfig,
+    InterAttentionConfig,
     MILConfig,
     MILModelConfig,
     SegmentEncoderAdaptationConfig,
@@ -60,9 +60,7 @@ def parse_model_cfg(raw: object) -> MILModelConfig:
             dims=WhisperEncoderDims(**dims_raw),
             type=segment_encoder_raw.get("type", "whisper"),
             backbone=segment_encoder_raw.get("backbone", "custom"),
-            pretrained_name_or_path=segment_encoder_raw.get(
-                "pretrained_name_or_path"
-            ),
+            pretrained_name_or_path=segment_encoder_raw.get("pretrained_name_or_path"),
             strict=bool(segment_encoder_raw.get("strict", True)),
             download_root=segment_encoder_raw.get("download_root"),
             pooling=SegmentEncoderPoolingConfig(**dict(pooling_raw)),

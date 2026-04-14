@@ -57,9 +57,7 @@ class WhisperSegmentEncoder(nn.Module):
     def __init__(self, cfg: WhisperSegmentEncoderConfig):
         super().__init__()
         if cfg.pooling.type != "attention":
-            raise ValueError(
-                f"Unsupported segment pooling type: {cfg.pooling.type!r}"
-            )
+            raise ValueError(f"Unsupported segment pooling type: {cfg.pooling.type!r}")
         self.cfg = cfg
         self.encoder = AudioEncoder(cfg.dims)
         self.pooling = TokenAttentionPooling(cfg.dims.n_audio_state, cfg.pooling)

@@ -31,12 +31,24 @@
     "preprocessing": {
       "feature_type": "log_mel",
       "source_type": "original",
-      "n_mels": 80,
       "bandpass": {
         "enabled": false,
         "low_hz": 250.0,
         "high_hz": 1000.0,
         "q": 0.707
+      },
+      "log_mel": {
+        "n_fft": 400,
+        "hop_length": 160,
+        "win_length": 400,
+        "n_mels": 80
+      },
+      "ast_fbank": {
+        "num_mel_bins": 128,
+        "max_length": 1024,
+        "do_normalize": true,
+        "mean": -4.2677393,
+        "std": 4.5689974
       }
     },
     "segment": {

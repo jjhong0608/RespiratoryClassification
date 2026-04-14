@@ -38,9 +38,7 @@ class TrainerConfig:
     gamma: float = 2.0
     pos_weight: float | None = None
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
-    early_stopping: EarlyStoppingConfig = field(
-        default_factory=EarlyStoppingConfig
-    )
+    early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
 
 
 @dataclass(frozen=True)
@@ -301,10 +299,7 @@ class Trainer(LoggingMixin):
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
-                    if (
-                        epochs_without_improvement
-                        >= self.cfg.early_stopping.patience
-                    ):
+                    if epochs_without_improvement >= self.cfg.early_stopping.patience:
                         stopped_early = True
                         stop_reason = (
                             "Early stopping triggered on val_loss after "

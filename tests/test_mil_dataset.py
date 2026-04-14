@@ -7,9 +7,11 @@ import soundfile as sf
 import torch
 from src.data.loaders import build_bag_loader, build_dataset
 from src.utils.config import (
+    AstFbankConfig,
     AudioConfig,
     BandPassConfig,
     DataConfig,
+    LogMelConfig,
     PreprocessingConfig,
     SegmentationConfig,
 )
@@ -21,7 +23,7 @@ def _write_wav(path: Path, duration_sec: float, sample_rate: int) -> None:
     sf.write(path, audio.astype(np.float32), sample_rate)
 
 
-def _data_config(root: Path) -> DataConfig:
+def _data_config(root: Path, *, feature_type: str = "log_mel") -> DataConfig:
     return DataConfig(
         train_dirs=[str(root)],
         val_dirs=[],
@@ -31,10 +33,17 @@ def _data_config(root: Path) -> DataConfig:
         num_workers=0,
         audio=AudioConfig(sample_rate=16000, clip_duration_sec=2.0),
         preprocessing=PreprocessingConfig(
-            feature_type="log_mel",
+            feature_type=feature_type,
             source_type="original",
-            n_mels=80,
             bandpass=BandPassConfig(enabled=False),
+            log_mel=LogMelConfig(n_mels=80),
+            ast_fbank=AstFbankConfig(
+                num_mel_bins=128,
+                max_length=128,
+                do_normalize=True,
+                mean=-4.2677393,
+                std=4.5689974,
+            ),
         ),
         segment=SegmentationConfig(
             mode="sliding_window",
@@ -83,3 +92,22 @@ def test_bag_loader_pads_variable_instance_counts(tmp_path: Path) -> None:
     assert batch.instance_mask.shape[0] == 2
     assert batch.instance_mask.dtype == torch.bool
     assert batch.instance_mask[0].sum().item() != batch.instance_mask[1].sum().item()
+
+
+def test_bag_dataset_supports_ast_fbank_segments(tmp_path: Path) -> None:
+    normal_dir = tmp_path / "normal"
+    wheeze_dir = tmp_path / "wheeze"
+    normal_dir.mkdir()
+    wheeze_dir.mkdir()
+    _write_wav(normal_dir / "normal.wav", duration_sec=1.2, sample_rate=16000)
+    _write_wav(wheeze_dir / "wheeze.wav", duration_sec=1.7, sample_rate=16000)
+
+    dataset = build_dataset(_data_config(tmp_path, feature_type="ast_fbank"))
+
+    sample = dataset[0]
+
+    assert sample.instances.ndim == 3
+    assert sample.instances.shape[1] == 128
+    assert sample.instances.shape[2] == 128
+    assert dataset.segment_n_mels == 128
+    assert dataset.segment_audio_ctx == 64
