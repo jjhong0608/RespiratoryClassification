@@ -97,10 +97,14 @@ class WaveformPreprocessor:
             return F.pad(audio, (0, n_samples - audio.numel()))
         return audio
 
-    def prepare(self, audio: Tensor) -> Tensor:
-        audio = self.trim(audio)
+    def transform(self, audio: Tensor) -> Tensor:
+        if audio.ndim != 1:
+            raise ValueError(f"Expected mono waveform (T,), got {tuple(audio.shape)}")
         audio = self._apply_bandpass(audio)
         return self._apply_source_type(audio)
+
+    def prepare(self, audio: Tensor) -> Tensor:
+        return self.transform(self.trim(audio))
 
     def prepare_fixed_length(self, audio: Tensor) -> Tensor:
         return self.pad(self.prepare(audio))

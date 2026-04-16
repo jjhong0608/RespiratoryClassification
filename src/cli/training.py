@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from src.data.loaders import build_clip_loader, build_dataset
+from src.data.loaders import build_bag_loader, build_dataset
 from src.training.ast_setup import (
     apply_encoder_adaptation,
     build_ast_model,
@@ -38,7 +38,7 @@ def main() -> None:
 
     train_dataset = build_dataset(cfg.data, split="train")
     val_dataset = build_dataset(cfg.data, split="val")
-    num_classes = len(cfg.data.label_to_index)
+    num_classes = cfg.data.num_classes
     model = build_ast_model(
         cfg.model,
         num_mel_bins=train_dataset.num_mel_bins,
@@ -81,7 +81,7 @@ def main() -> None:
     if imbalance.pos_weight is not None:
         if cfg.train.loss.auto_pos_weight:
             logger.info(
-                "Using auto-computed positive-class weight=%.6f from training clips (loss=%s)",
+                "Using auto-computed positive-class weight=%.6f from training recordings (loss=%s)",
                 imbalance.pos_weight,
                 cfg.train.loss.type,
             )
@@ -96,22 +96,26 @@ def main() -> None:
         build_weighted_sampler(train_targets) if imbalance.weighted_random else None
     )
     if sampler is not None:
-        logger.info("Using weighted random sampler for clip training")
+        logger.info("Using weighted random sampler for recording-level training")
 
-    train_loader = build_clip_loader(
+    train_loader = build_bag_loader(
         train_dataset,
-        batch_size=cfg.data.batch_size,
+        batch_size=cfg.train.batch_size,
         num_workers=cfg.data.num_workers,
         shuffle=sampler is None,
         sampler=sampler,
     )
-    val_loader = build_clip_loader(
+    val_loader = build_bag_loader(
         val_dataset,
-        batch_size=cfg.data.batch_size,
+        batch_size=cfg.eval.batch_size,
         num_workers=cfg.data.num_workers,
         shuffle=False,
     )
-    logger.info("Train clips: %d | Val clips: %d", len(train_dataset), len(val_dataset))
+    logger.info(
+        "Train recordings: %d | Val recordings: %d",
+        len(train_dataset),
+        len(val_dataset),
+    )
     optimizer, optimizer_summary = build_grouped_optimizer(
         model,
         encoder_lr=cfg.train.optimizer.encoder_lr,
@@ -142,7 +146,7 @@ def main() -> None:
             loss_type=cfg.train.loss.type,
             gamma=cfg.train.loss.gamma,
             pos_weight=imbalance.pos_weight,
-            analysis=cfg.analysis,
+            logging=cfg.logging,
             early_stopping=cfg.train.early_stopping,
         )
     )

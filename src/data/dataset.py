@@ -5,8 +5,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import torch
 from torch import Tensor
-from torch.utils.data import ConcatDataset, Dataset
+from torch.nn import functional as F
+from torch.utils.data import Dataset
 
 from src.data.audio import (
     AstFbankFeatureConfig,
@@ -15,29 +17,36 @@ from src.data.audio import (
     WaveformPreprocessor,
 )
 from src.data.io import WaveformLoader
+from src.data.segmentation import compute_sliding_window_segments
 from src.utils.config import DataConfig
 from src.utils.logging import LoggingMixin
 
 
 @dataclass(frozen=True)
-class ClipSample:
+class RecordingBagSample:
     input_values: Tensor
     label: int
     label_name: str
-    audio_path: str
+    recording_path: str
+    recording_id: str
+    instance_start_sec: Tensor
+    instance_end_sec: Tensor
+    instance_index: Tensor
 
 
-class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
-    def __init__(self, cfg: DataConfig, root: str):
+class RespiratoryRecordingBagDataset(LoggingMixin, Dataset[RecordingBagSample]):
+    def __init__(self, cfg: DataConfig, roots: Sequence[str]):
         self.cfg = cfg
-        self.root = root
+        self.roots = list(roots)
         self._paths: list[Path] = []
         self._targets: list[int] = []
         self._label_names: list[str] = []
 
         unknown_by_label: dict[str, list[Path]] = defaultdict(list)
-        root_path = Path(root)
-        if root_path.exists():
+        for root in self.roots:
+            root_path = Path(root)
+            if not root_path.exists():
+                continue
             for path in sorted(root_path.rglob("*.wav")):
                 label_name = path.parent.name
                 label = cfg.label_to_index.get(label_name)
@@ -50,33 +59,28 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
         self._log_unknown_labels(unknown_by_label)
 
         self._waveform_loader = WaveformLoader(cfg.audio.sample_rate)
+        self._window_samples = cfg.instance.window_samples(cfg.audio.sample_rate)
         self._preprocessor = WaveformPreprocessor(
-            self._build_audio_preprocess_config(cfg)
+            AudioPreprocessConfig(
+                sample_rate=cfg.audio.sample_rate,
+                clip_seconds=cfg.instance.window_sec,
+                source_type=cfg.features.source_type,
+                bandpass_enabled=cfg.features.bandpass.enabled,
+                bandpass_low_hz=cfg.features.bandpass.low_hz,
+                bandpass_high_hz=cfg.features.bandpass.high_hz,
+                bandpass_q=cfg.features.bandpass.q,
+            )
         )
         self._feature_extractor = AstLikeFbank(
             AstFbankFeatureConfig(
                 sample_rate=cfg.audio.sample_rate,
-                clip_seconds=cfg.audio.clip_duration_sec,
-                num_mel_bins=cfg.preprocessing.ast_fbank.num_mel_bins,
-                max_length=cfg.preprocessing.ast_fbank.max_length,
-                do_normalize=cfg.preprocessing.ast_fbank.do_normalize,
-                mean=cfg.preprocessing.ast_fbank.mean,
-                std=cfg.preprocessing.ast_fbank.std,
+                clip_seconds=cfg.instance.window_sec,
+                num_mel_bins=cfg.features.ast_fbank.num_mel_bins,
+                max_length=cfg.features.ast_fbank.max_length,
+                do_normalize=cfg.features.ast_fbank.do_normalize,
+                mean=cfg.features.ast_fbank.mean,
+                std=cfg.features.ast_fbank.std,
             )
-        )
-
-    @staticmethod
-    def _build_audio_preprocess_config(
-        cfg: DataConfig,
-    ) -> AudioPreprocessConfig:
-        return AudioPreprocessConfig(
-            sample_rate=cfg.audio.sample_rate,
-            clip_seconds=cfg.audio.clip_duration_sec,
-            source_type=cfg.preprocessing.source_type,
-            bandpass_enabled=cfg.preprocessing.bandpass.enabled,
-            bandpass_low_hz=cfg.preprocessing.bandpass.low_hz,
-            bandpass_high_hz=cfg.preprocessing.bandpass.high_hz,
-            bandpass_q=cfg.preprocessing.bandpass.q,
         )
 
     def _log_unknown_labels(
@@ -85,7 +89,7 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
         known = sorted(self.cfg.label_to_index.keys())
         for label_name, paths in sorted(unknown_by_label.items()):
             self.logger.warning(
-                "Skipping clips for unknown label=%s | count=%d | example=%s | known=%s",
+                "Skipping recordings for unknown label=%s | count=%d | example=%s | known=%s",
                 label_name,
                 len(paths),
                 paths[0],
@@ -100,64 +104,50 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
         return list(self._targets)
 
     @property
-    def file_paths(self) -> list[Path]:
+    def recording_paths(self) -> list[Path]:
         return list(self._paths)
-
-    def __getitem__(self, idx: int) -> ClipSample:
-        path = self._paths[idx]
-        waveform = self._waveform_loader.load(path)
-        clip_waveform = self._preprocessor.prepare(waveform)
-        feature_map = (
-            self._feature_extractor(clip_waveform).transpose(0, 1).contiguous()
-        )
-        return ClipSample(
-            input_values=feature_map,
-            label=self._targets[idx],
-            label_name=self._label_names[idx],
-            audio_path=str(path),
-        )
-
-
-class RespiratoryClipDataset(LoggingMixin, Dataset[ClipSample]):
-    def __init__(self, cfg: DataConfig, roots: Sequence[str]):
-        self.cfg = cfg
-        self.roots = list(roots)
-        self._datasets = [
-            _RespiratoryClipRootDataset(cfg, root)
-            for root in self.roots
-            if Path(root).exists()
-        ]
-        self._concat: ConcatDataset | None
-        self._concat = ConcatDataset(self._datasets) if self._datasets else None
-
-    def __len__(self) -> int:
-        if self._concat is None:
-            return 0
-        return len(self._concat)
-
-    def __getitem__(self, idx: int) -> ClipSample:
-        if self._concat is None:
-            raise IndexError("Dataset is empty")
-        return self._concat[idx]
-
-    @property
-    def targets(self) -> list[int]:
-        targets: list[int] = []
-        for dataset in self._datasets:
-            targets.extend(dataset.targets)
-        return targets
-
-    @property
-    def file_paths(self) -> list[Path]:
-        paths: list[Path] = []
-        for dataset in self._datasets:
-            paths.extend(dataset.file_paths)
-        return paths
 
     @property
     def num_mel_bins(self) -> int:
-        return self.cfg.preprocessing.ast_fbank.num_mel_bins
+        return self.cfg.features.ast_fbank.num_mel_bins
 
     @property
     def max_length(self) -> int:
-        return self.cfg.preprocessing.ast_fbank.max_length
+        return self.cfg.features.ast_fbank.max_length
+
+    def __getitem__(self, idx: int) -> RecordingBagSample:
+        path = self._paths[idx]
+        waveform = self._waveform_loader.load(path)
+        processed_waveform = self._preprocessor.transform(waveform)
+        segments = compute_sliding_window_segments(
+            num_samples=int(processed_waveform.numel()),
+            sample_rate=self.cfg.audio.sample_rate,
+            window_sec=self.cfg.instance.window_sec,
+            hop_sec=self.cfg.instance.hop_sec,
+            tail_policy=self.cfg.instance.tail_policy,
+        )
+
+        features: list[Tensor] = []
+        start_sec: list[float] = []
+        end_sec: list[float] = []
+        indices: list[int] = []
+        for segment in segments:
+            clip = processed_waveform[segment.start_sample : segment.end_sample]
+            if clip.numel() < self._window_samples:
+                clip = F.pad(clip, (0, self._window_samples - clip.numel()))
+            feature_map = self._feature_extractor(clip).transpose(0, 1).contiguous()
+            features.append(feature_map)
+            start_sec.append(segment.start_sec)
+            end_sec.append(segment.end_sec)
+            indices.append(segment.index)
+
+        return RecordingBagSample(
+            input_values=torch.stack(features, dim=0),
+            label=self._targets[idx],
+            label_name=self._label_names[idx],
+            recording_path=str(path),
+            recording_id=path.stem,
+            instance_start_sec=torch.tensor(start_sec, dtype=torch.float32),
+            instance_end_sec=torch.tensor(end_sec, dtype=torch.float32),
+            instance_index=torch.tensor(indices, dtype=torch.long),
+        )

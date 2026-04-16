@@ -13,6 +13,9 @@ from src.utils.config import (
     AstEncoderConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
+    GatedAttentionConfig,
+    InstanceHeadConfig,
+    MilConfig,
     ModelConfig,
 )
 from transformers import ASTConfig
@@ -23,6 +26,7 @@ def _run_model_config(*, pretrained_name_or_path: str | None = None) -> ModelCon
         encoder=AstEncoderConfig(
             pretrained_name_or_path=pretrained_name_or_path,
             cache_dir=None,
+            pooling="cls",
             adaptation=EncoderAdaptationConfig(mode="partial", num_layers=1),
             architecture=AstArchitectureConfig(
                 hidden_size=32,
@@ -31,11 +35,19 @@ def _run_model_config(*, pretrained_name_or_path: str | None = None) -> ModelCon
                 intermediate_size=64,
             ),
         ),
+        instance_head=InstanceHeadConfig(
+            projection_dim=24,
+            dropout=0.1,
+            normalize=True,
+        ),
+        mil=MilConfig(
+            type="gated_attention",
+            gated_attention=GatedAttentionConfig(attention_dim=16, dropout=0.1),
+        ),
         classifier=ClassifierConfig(
             type="mlp",
             hidden_dim=24,
             dropout=0.1,
-            pooling="cls",
         ),
     )
 

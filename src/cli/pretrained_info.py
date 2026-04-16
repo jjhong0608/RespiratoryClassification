@@ -59,7 +59,7 @@ def main() -> None:
         json.dumps(
             {
                 "data": {
-                    "preprocessing": {
+                    "features": {
                         "ast_fbank": {
                             "num_mel_bins": payload["num_mel_bins"],
                             "max_length": payload["max_length"],

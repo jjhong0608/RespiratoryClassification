@@ -1,34 +1,46 @@
 {
   "experiment": {
-    "name": "respiratory_ast_multiclass_clip",
-    "task": "normal_crackle_wheeze",
-    "mode": "clip",
+    "name": "respiratory_ast_mil_multiclass",
+    "task": "normal_wheeze_crackle",
+    "mode": "recording_mil",
     "seed": 42,
     "device": "cpu",
     "output_dir": "checkpoints"
   },
   "data": {
-    "train_dirs": [
-      "datasets/multiclass/train"
-    ],
-    "val_dirs": [
-      "datasets/multiclass/val"
-    ],
-    "eval_dirs": [
-      "datasets/multiclass/test"
-    ],
-    "label_to_index": {
-      "normal": 0,
-      "crackle": 1,
-      "wheeze": 2
+    "metadata": {
+      "label_to_index": {
+        "normal": 0,
+        "wheeze": 1,
+        "crackle": 2
+      },
+      "splits": {
+        "train": {
+          "roots": [
+            "datasets/multiclass/train"
+          ]
+        },
+        "val": {
+          "roots": [
+            "datasets/multiclass/val"
+          ]
+        },
+        "eval": {
+          "roots": [
+            "datasets/multiclass/test"
+          ]
+        }
+      }
     },
-    "batch_size": 4,
-    "num_workers": 0,
     "audio": {
-      "sample_rate": 16000,
-      "clip_duration_sec": 30.0
+      "sample_rate": 16000
     },
-    "preprocessing": {
+    "instance": {
+      "window_sec": 2.0,
+      "hop_sec": 1.0,
+      "tail_policy": "cover_end"
+    },
+    "features": {
       "source_type": "original",
       "bandpass": {
         "enabled": false,
@@ -43,6 +55,9 @@
         "mean": -4.2677393,
         "std": 4.5689974
       }
+    },
+    "loader": {
+      "num_workers": 0
     }
   },
   "model": {
@@ -50,19 +65,35 @@
       "type": "ast",
       "pretrained_name_or_path": "MIT/ast-finetuned-audioset-10-10-0.4593",
       "cache_dir": null,
+      "pooling": "cls",
       "adaptation": {
         "mode": "partial",
         "num_layers": 1
       }
     },
+    "instance_head": {
+      "projection_dim": 256,
+      "dropout": 0.1,
+      "normalize": true
+    },
+    "mil": {
+      "type": "linear_softmax",
+      "gated_attention": {
+        "attention_dim": 128,
+        "dropout": 0.1
+      },
+      "linear_softmax": {
+        "eps": 1e-6
+      }
+    },
     "classifier": {
       "type": "mlp",
       "hidden_dim": 256,
-      "dropout": 0.1,
-      "pooling": "cls"
+      "dropout": 0.1
     }
   },
   "train": {
+    "batch_size": 4,
     "epochs": 20,
     "top_k": 3,
     "max_grad_norm": 1.0,
@@ -90,12 +121,24 @@
       "min_delta": 0.0001
     }
   },
-  "analysis": {
-    "outputs": {
-      "save_logits": true,
-      "save_probabilities": true,
-      "save_embeddings": false,
-      "save_clip_metadata": true
+  "eval": {
+    "batch_size": 4,
+    "threshold_optimization": {
+      "enabled": true,
+      "metric": "f1"
+    }
+  },
+  "logging": {
+    "diagnostics": {
+      "save_bag_logits": true,
+      "save_bag_probabilities": true,
+      "save_bag_embedding": false,
+      "save_instance_logits": true,
+      "save_instance_probabilities": true,
+      "save_instance_embeddings": false,
+      "save_attention_weights": true,
+      "save_instance_metadata": true,
+      "top_k_instances": 5
     }
   }
 }

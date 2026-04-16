@@ -1,30 +1,41 @@
 {
   "experiment": {
-    "name": "respiratory_ast_clip_eval",
+    "name": "respiratory_ast_mil_eval",
     "task": "normal_vs_wheeze",
-    "mode": "clip",
+    "mode": "recording_mil",
     "seed": 42,
     "device": "cpu",
     "output_dir": "checkpoints"
   },
-  "checkpoint_path": "checkpoints/respiratory_ast_clip/last.pt",
   "data": {
-    "train_dirs": [],
-    "val_dirs": [],
-    "eval_dirs": [
-      "datasets/wheeze/test"
-    ],
-    "label_to_index": {
-      "normal": 0,
-      "wheeze": 1
+    "metadata": {
+      "label_to_index": {
+        "normal": 0,
+        "wheeze": 1
+      },
+      "splits": {
+        "train": {
+          "roots": []
+        },
+        "val": {
+          "roots": []
+        },
+        "eval": {
+          "roots": [
+            "datasets/wheeze/test"
+          ]
+        }
+      }
     },
-    "batch_size": 4,
-    "num_workers": 0,
     "audio": {
-      "sample_rate": 16000,
-      "clip_duration_sec": 30.0
+      "sample_rate": 16000
     },
-    "preprocessing": {
+    "instance": {
+      "window_sec": 2.0,
+      "hop_sec": 1.0,
+      "tail_policy": "cover_end"
+    },
+    "features": {
       "source_type": "original",
       "bandpass": {
         "enabled": false,
@@ -39,18 +50,30 @@
         "mean": -4.2677393,
         "std": 4.5689974
       }
+    },
+    "loader": {
+      "num_workers": 0
     }
   },
-  "analysis": {
-    "outputs": {
-      "save_logits": true,
-      "save_probabilities": true,
-      "save_embeddings": false,
-      "save_clip_metadata": true
+  "eval": {
+    "batch_size": 4,
+    "checkpoint_path": "checkpoints/respiratory_ast_mil/last.pt",
+    "threshold_optimization": {
+      "enabled": true,
+      "metric": "f1"
     }
   },
-  "threshold_optimization": {
-    "enabled": true,
-    "metric": "f1"
+  "logging": {
+    "diagnostics": {
+      "save_bag_logits": true,
+      "save_bag_probabilities": true,
+      "save_bag_embedding": false,
+      "save_instance_logits": true,
+      "save_instance_probabilities": true,
+      "save_instance_embeddings": false,
+      "save_attention_weights": true,
+      "save_instance_metadata": true,
+      "top_k_instances": 5
+    }
   }
 }

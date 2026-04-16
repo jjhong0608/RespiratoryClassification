@@ -9,6 +9,9 @@ datasets/
 evaluate_data/
 Figures/
 plots/
+!src/plots/
+!src/plots/__init__.py
+!src/plots/export.py
 results/
 whisper_origin/
 AGENTS.md
@@ -18,5 +21,7 @@ AGENTS.md
 *.egg-info/
 .codex-local/
 scripts/
+!scripts/
+!scripts/analyze_cv_results.py
 reports/
 mel_plots/

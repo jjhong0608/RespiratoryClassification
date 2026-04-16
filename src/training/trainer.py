@@ -11,17 +11,17 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.data.loaders import ClipBatch
+from src.data.loaders import BagBatch
 from src.evaluation.diagnostics import build_diagnostic_rows, write_diagnostics_jsonl
 from src.evaluation.metrics import EvalMetrics, MetricsComputer
 from src.evaluation.thresholds import (
     ThresholdOptimizationResult,
     compute_threshold_optimized_metrics,
 )
-from src.models.model import AstModelOutput
+from src.models.model import AstMilOutput
 from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
-from src.utils.config import AnalysisConfig, EarlyStoppingConfig
+from src.utils.config import EarlyStoppingConfig, LoggingConfig
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
 
@@ -41,7 +41,7 @@ class TrainerConfig:
     loss_type: str = "bce"
     gamma: float = 2.0
     pos_weight: float | None = None
-    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
 
 
@@ -149,19 +149,21 @@ class Trainer(LoggingMixin):
             )
         return criterion(logits, labels.to(device=logits.device, dtype=torch.long))
 
-    def _predict(self, logits: Tensor) -> tuple[Tensor, Tensor]:
+    def _predict(self, probabilities: Tensor) -> tuple[Tensor, Tensor]:
         if self.cfg.num_classes == 2:
-            probabilities = torch.sigmoid(logits.detach())
             predictions = (probabilities >= 0.5).to(torch.long)
             return probabilities, predictions
-        probabilities = torch.softmax(logits.detach(), dim=-1)
         predictions = probabilities.argmax(dim=-1)
         return probabilities, predictions
+
+    def _should_collect_diagnostics(self) -> bool:
+        diagnostics_cfg = self.cfg.logging.diagnostics
+        return any(asdict(diagnostics_cfg).values())
 
     def _epoch(
         self,
         model: nn.Module,
-        loader: DataLoader[ClipBatch],
+        loader: DataLoader[BagBatch],
         *,
         optimizer: torch.optim.Optimizer | None,
         scheduler: WarmupCosineScheduler | None,
@@ -177,12 +179,11 @@ class Trainer(LoggingMixin):
 
         for batch in tqdm(loader, leave=False):
             batch = batch.to(device)
-            output = model(batch.input_values)
-            if not isinstance(output, AstModelOutput):
-                raise TypeError("AST model must return AstModelOutput")
+            output = model(batch.input_values, batch.instance_mask)
+            if not isinstance(output, AstMilOutput):
+                raise TypeError("AST+MIL model must return AstMilOutput")
 
-            logits = output.logits
-            loss = self._compute_loss(criterion, logits, batch.labels)
+            loss = self._compute_loss(criterion, output.bag_logits, batch.labels)
 
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
@@ -192,7 +193,7 @@ class Trainer(LoggingMixin):
                 if scheduler is not None:
                     scheduler.step()
 
-            batch_probs, batch_preds = self._predict(logits)
+            batch_probs, batch_preds = self._predict(output.bag_probabilities.detach())
             targets.extend(batch.labels.detach().cpu().to(torch.long).tolist())
             predictions.extend(batch_preds.cpu().tolist())
             probabilities.extend(batch_probs.cpu().tolist())
@@ -200,14 +201,13 @@ class Trainer(LoggingMixin):
             total_examples += int(batch.labels.numel())
             total_loss += float(loss.item()) * float(batch.labels.numel())
 
-            if any(asdict(self.cfg.analysis.outputs).values()):
+            if self._should_collect_diagnostics():
                 diagnostics.extend(
                     build_diagnostic_rows(
                         batch,
                         output,
-                        probabilities=batch_probs.cpu(),
                         predicted_labels=batch_preds.cpu(),
-                        analysis=self.cfg.analysis.outputs,
+                        diagnostics=self.cfg.logging.diagnostics,
                     )
                 )
 
@@ -227,8 +227,8 @@ class Trainer(LoggingMixin):
     def fit(
         self,
         model: nn.Module,
-        train_loader: DataLoader[ClipBatch],
-        val_loader: DataLoader[ClipBatch],
+        train_loader: DataLoader[BagBatch],
+        val_loader: DataLoader[BagBatch],
         optimizer: torch.optim.Optimizer,
         *,
         extra_state: dict[str, Any] | None = None,
@@ -295,11 +295,17 @@ class Trainer(LoggingMixin):
                 if len(lrs) == 1
                 else "[" + ", ".join(f"{lr:.8f}" for lr in lrs) + "]"
             )
+            train_correct = int(
+                (train_result.predictions == train_result.targets).sum()
+            )
+            train_total = int(train_result.targets.size)
+            val_correct = int((val_result.predictions == val_result.targets).sum())
+            val_total = int(val_result.targets.size)
             if self.cfg.num_classes == 2:
                 self.logger.info(
-                    "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
+                    "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Accuracy: %.4f [%d/%d] | "
                     "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
-                    "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
+                    "Val Loss: %.4f | Val Accuracy: %.4f [%d/%d] | Val Recall: %.4f | "
                     "Val Precision: %.4f | Val F1@0.5: %.4f | Val Balanced Acc@0.5: %.4f | "
                     "Val F1@opt: %.4f | Val Balanced Acc@opt: %.4f | Val Opt Threshold: %.4f",
                     epoch,
@@ -307,11 +313,15 @@ class Trainer(LoggingMixin):
                     lr_str,
                     train_result.loss,
                     train_result.metrics.accuracy,
+                    train_correct,
+                    train_total,
                     train_result.metrics.recall,
                     train_result.metrics.precision,
                     train_result.metrics.f1_score,
                     val_result.loss,
                     val_result.metrics.accuracy,
+                    val_correct,
+                    val_total,
                     val_result.metrics.recall,
                     val_result.metrics.precision,
                     val_result.metrics.f1_score,
@@ -322,20 +332,24 @@ class Trainer(LoggingMixin):
                 )
             else:
                 self.logger.info(
-                    "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
+                    "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Accuracy: %.4f [%d/%d] | "
                     "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
-                    "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
+                    "Val Loss: %.4f | Val Accuracy: %.4f [%d/%d] | Val Recall: %.4f | "
                     "Val Precision: %.4f | Val F1: %.4f | Val Balanced Acc: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
                     train_result.loss,
                     train_result.metrics.accuracy,
+                    train_correct,
+                    train_total,
                     train_result.metrics.recall,
                     train_result.metrics.precision,
                     train_result.metrics.f1_score,
                     val_result.loss,
                     val_result.metrics.accuracy,
+                    val_correct,
+                    val_total,
                     val_result.metrics.recall,
                     val_result.metrics.precision,
                     val_result.metrics.f1_score,

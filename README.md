@@ -1,15 +1,14 @@
-# AST Respiratory Classification
+# AST+MIL Respiratory Classification
 
-This branch trains and evaluates **clip-level respiratory sound classifiers** with an
-**Audio Spectrogram Transformer (AST)** backbone.
+This branch trains and evaluates **recording-level weakly supervised respiratory sound classifiers** with an **Audio Spectrogram Transformer (AST)** instance encoder and a **Multiple Instance Learning (MIL)** aggregator.
 
-- One `.wav` file is one training example.
-- The active training/evaluation pipeline uses local AST-style `fbank` extraction.
-- The encoder is Hugging Face `ASTModel`.
-- The classification head stays in-repo so classifier type, optimizer grouping, and
-  logging follow the existing project style.
-- This is a **clean break** from the old Whisper + MIL path. Old MIL configs and
-  checkpoints are not supported.
+- One `.wav` file is one **recording bag**
+- One bag contains multiple overlapping instances
+- Default segmentation is **2.0 second windows** with **1.0 second hop**
+- Labels are recording-level only
+- Supported MIL aggregators are:
+  - `gated_attention` (default)
+  - `linear_softmax`
 
 ## Setup
 
@@ -18,18 +17,44 @@ mamba activate respiratory
 pip install -r requirements.txt
 ```
 
-## Train
-
-Binary example:
+Use the requested Python interpreter for project commands:
 
 ```bash
-python -m src.cli.training --config configs/training.json
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python
 ```
 
-Multi-class example:
+## Data layout
+
+The v1 pipeline keeps directory-based discovery. Each `.wav` under a split root is treated as one recording bag, and the parent directory name is used as the label.
+
+```text
+datasets/
+  wheeze/
+    train/
+      normal/*.wav
+      wheeze/*.wav
+    val/
+      normal/*.wav
+      wheeze/*.wav
+    test/
+      normal/*.wav
+      wheeze/*.wav
+```
+
+Configure these roots under `data.metadata.splits.train/val/eval.roots`.
+
+## Train
+
+Binary example with default `gated_attention`:
 
 ```bash
-python -m src.cli.training --config configs/training_multiclass.json
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m src.cli.training --config configs/training.json
+```
+
+Multi-class example with `linear_softmax`:
+
+```bash
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m src.cli.training --config configs/training_multiclass.json
 ```
 
 Artifacts are written under `experiment.output_dir/experiment.name/`.
@@ -43,7 +68,7 @@ Training keeps:
 ## Evaluate
 
 ```bash
-python -m src.cli.evaluate --config configs/eval.json
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m src.cli.evaluate --config configs/eval.json
 ```
 
 Evaluation writes:
@@ -52,41 +77,52 @@ Evaluation writes:
 - `eval_predictions.csv`
 - `eval_diagnostics.jsonl` when diagnostics are enabled
 
-Binary evaluation keeps fixed-threshold (`0.5`) metrics at the top level and also
-stores:
+Binary evaluation reports fixed-threshold (`0.5`) metrics and checkpoint-derived optimized-threshold metrics. Threshold optimization is only applied to binary classification.
 
-- `decision_threshold`
-- `threshold_optimization`
-- `optimized_metrics`
-
-Threshold optimization is checkpoint-driven and only applies to **binary**
-classification. For multi-class evaluation it is reported as disabled with an
-explicit reason.
-
-## Cross-Validation
+## Cross-validation
 
 ```bash
-python -m src.cli.cv --config configs/cv_run.json
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m src.cli.cv --config configs/cv_run.json
 ```
 
-Each fold is trained independently under
-`experiment.output_dir/experiment.name/fold_x/`.
+Each fold is trained independently under `experiment.output_dir/experiment.name/fold_x/`.
 
-## Config Shape
+## Config shape
 
-The main pipeline now uses an AST-only schema:
+The AST+MIL pipeline uses a nested recording-level schema:
 
 ```json
 {
   "experiment": {
-    "mode": "clip"
+    "mode": "recording_mil"
   },
   "data": {
-    "audio": {
-      "sample_rate": 16000,
-      "clip_duration_sec": 30.0
+    "metadata": {
+      "label_to_index": {
+        "normal": 0,
+        "wheeze": 1
+      },
+      "splits": {
+        "train": {
+          "roots": ["datasets/wheeze/train"]
+        },
+        "val": {
+          "roots": ["datasets/wheeze/val"]
+        },
+        "eval": {
+          "roots": ["datasets/wheeze/test"]
+        }
+      }
     },
-    "preprocessing": {
+    "audio": {
+      "sample_rate": 16000
+    },
+    "instance": {
+      "window_sec": 2.0,
+      "hop_sec": 1.0,
+      "tail_policy": "cover_end"
+    },
+    "features": {
       "source_type": "original",
       "bandpass": {
         "enabled": false
@@ -98,96 +134,128 @@ The main pipeline now uses an AST-only schema:
         "mean": -4.2677393,
         "std": 4.5689974
       }
+    },
+    "loader": {
+      "num_workers": 0
     }
   },
   "model": {
     "encoder": {
       "type": "ast",
       "pretrained_name_or_path": "MIT/ast-finetuned-audioset-10-10-0.4593",
+      "pooling": "cls",
       "adaptation": {
         "mode": "partial",
         "num_layers": 1
       }
     },
+    "instance_head": {
+      "projection_dim": 256,
+      "dropout": 0.1,
+      "normalize": true
+    },
+    "mil": {
+      "type": "gated_attention"
+    },
     "classifier": {
       "type": "linear",
       "hidden_dim": 256,
-      "dropout": 0.1,
-      "pooling": "cls"
+      "dropout": 0.1
+    }
+  },
+  "train": {
+    "batch_size": 4
+  },
+  "eval": {
+    "batch_size": 4
+  },
+  "logging": {
+    "diagnostics": {
+      "top_k_instances": 5
     }
   }
 }
 ```
 
-## Encoder Adaptation
+## Segmentation
 
-Encoder adaptation is configured under `model.encoder.adaptation`:
+All train/validation/evaluation/inference paths share the same segmentation logic:
 
-- `mode: "frozen" | "partial" | "full"`
-- `num_layers`
+- `window_sec = 2.0`
+- `hop_sec = 1.0`
+- short recordings are padded to produce at least one instance
+- tails are covered by appending a final end-aligned window when needed
 
-Partial unfreezing keeps embeddings and early blocks frozen, and unfreezes:
+Per-instance metadata is retained in the bag pipeline:
 
-- the last `num_layers` transformer blocks
-- the final encoder layer norm
+- `instance_index`
+- `instance_start_sec`
+- `instance_end_sec`
 
-## Loss Rules
+## MIL aggregators
 
-Loss behavior depends on the number of classes:
+### `gated_attention`
+
+- Default aggregator
+- Uses AST instance embeddings
+- Applies mask-aware gated attention over valid instances
+- Produces attention weights for diagnostics
+
+### `linear_softmax`
+
+- Score-based mask-aware MIL pooling
+- Applies the classifier to each instance first
+- Pools instance probabilities with linear-softmax pooling
+- Supports both binary and multi-class classification
+
+## Loss rules
 
 - Binary (`len(label_to_index) == 2`)
   - supported losses: `bce`, `focal`
   - optional `auto_pos_weight` / `pos_weight`
 - Multi-class (`len(label_to_index) > 2`)
   - required loss: `cross_entropy`
-  - binary-only weighting options are rejected
-
-## Optimizer Layout
-
-Training uses two AdamW parameter groups:
-
-- encoder trainable parameters -> `train.optimizer.encoder_lr`
-- classifier trainable parameters -> `train.optimizer.head_lr`
 
 ## Diagnostics
 
-Diagnostics are controlled by `analysis.outputs`:
+Diagnostics are controlled by `logging.diagnostics` and are saved for validation and evaluation.
 
-```json
-"analysis": {
-  "outputs": {
-    "save_logits": true,
-    "save_probabilities": true,
-    "save_embeddings": false,
-    "save_clip_metadata": true
-  }
-}
-```
+Each recording-level diagnostics row can include:
 
-Training saves validation diagnostics under:
+- `recording_id`
+- `recording_path`
+- `true_label`
+- `predicted_label`
+- `bag_logits`
+- `bag_probabilities`
+- `num_instances`
+- `instance_start_sec`
+- `instance_end_sec`
+- `instance_logits`
+- `instance_probabilities`
+- `attention_weights` for `gated_attention`
+- `top_k_instances`
+
+Validation diagnostics are written under:
 
 ```text
 <run_dir>/diagnostics/val_epoch_XXX.jsonl
 ```
 
-Evaluation writes:
+Evaluation diagnostics are written under:
 
 ```text
 <checkpoint_dir>/eval_diagnostics.jsonl
 ```
 
-These files are intended for false positive / false negative clip inspection.
-
-## AST Info
+## AST info
 
 Inspect a pretrained AST config:
 
 ```bash
-python -m src.cli.pretrained_info --name_or_path MIT/ast-finetuned-audioset-10-10-0.4593
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m src.cli.pretrained_info --name_or_path MIT/ast-finetuned-audioset-10-10-0.4593
 ```
 
-## Plot Features
+## Plot features
 
-`src.cli.plot_mels` remains available as a utility. It still supports both
-`log_mel` and `ast_fbank` feature plotting, but the main train/eval/CV pipeline is
-AST-only.
+`src.cli.plot_mels` remains available as a utility for `log_mel` and `ast_fbank` feature plotting. The main training/evaluation/CV pipeline is AST+MIL recording-level only.

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from src.data.loaders import build_clip_loader, build_dataset
+from src.data.loaders import build_bag_loader, build_dataset
 from src.training.ast_setup import (
     apply_encoder_adaptation,
     build_ast_model,
@@ -19,9 +19,30 @@ from src.training.imbalance import (
     resolve_imbalance,
 )
 from src.training.trainer import Trainer, TrainerConfig
-from src.utils.config import JsonConfigLoader
+from src.utils.config import (
+    DataConfig,
+    JsonConfigLoader,
+    SplitConfig,
+)
 from src.utils.fs import Fs
 from src.utils.logging import enable_file_logging, logger
+
+
+def _replace_split_roots(
+    data_cfg: DataConfig,
+    *,
+    train_roots: list[str],
+    val_roots: list[str],
+    eval_roots: list[str],
+) -> DataConfig:
+    splits = replace(
+        data_cfg.metadata.splits,
+        train=SplitConfig(roots=train_roots),
+        val=SplitConfig(roots=val_roots),
+        eval=SplitConfig(roots=eval_roots),
+    )
+    metadata = replace(data_cfg.metadata, splits=splits)
+    return replace(data_cfg, metadata=metadata)
 
 
 def main() -> None:
@@ -34,15 +55,16 @@ def main() -> None:
 
     base_dir = Fs.ensure_dir(Path(cfg.experiment.output_dir) / cfg.experiment.name)
     Fs.copy_file(args.config, base_dir)
-    num_classes = len(cfg.data.label_to_index)
+    num_classes = cfg.data.num_classes
 
-    for fold in cfg.folds:
+    for fold in cfg.cv.folds:
         fold_dir = Fs.ensure_dir(base_dir / fold.name)
         enable_file_logging(fold_dir / "run.log", mode="w")
-        fold_data = replace(
+        fold_data = _replace_split_roots(
             cfg.data,
-            train_dirs=list(fold.train_dirs),
-            val_dirs=list(fold.val_dirs),
+            train_roots=list(fold.train.roots),
+            val_roots=list(fold.val.roots),
+            eval_roots=list(fold.eval.roots or cfg.data.metadata.splits.eval.roots),
         )
         train_dataset = build_dataset(fold_data, split="train")
         val_dataset = build_dataset(fold_data, split="val")
@@ -94,7 +116,7 @@ def main() -> None:
         if imbalance.pos_weight is not None:
             if cfg.train.loss.auto_pos_weight:
                 logger.info(
-                    "[%s] Using auto-computed positive-class weight=%.6f from training clips (loss=%s)",
+                    "[%s] Using auto-computed positive-class weight=%.6f from training recordings (loss=%s)",
                     fold.name,
                     imbalance.pos_weight,
                     cfg.train.loss.type,
@@ -112,21 +134,21 @@ def main() -> None:
         if sampler is not None:
             logger.info("[%s] Using weighted random sampler", fold.name)
 
-        train_loader = build_clip_loader(
+        train_loader = build_bag_loader(
             train_dataset,
-            batch_size=fold_data.batch_size,
+            batch_size=cfg.train.batch_size,
             num_workers=fold_data.num_workers,
             shuffle=sampler is None,
             sampler=sampler,
         )
-        val_loader = build_clip_loader(
+        val_loader = build_bag_loader(
             val_dataset,
-            batch_size=fold_data.batch_size,
+            batch_size=cfg.eval.batch_size,
             num_workers=fold_data.num_workers,
             shuffle=False,
         )
         logger.info(
-            "[%s] Train clips: %d | Val clips: %d",
+            "[%s] Train recordings: %d | Val recordings: %d",
             fold.name,
             len(train_dataset),
             len(val_dataset),
@@ -162,7 +184,7 @@ def main() -> None:
                 loss_type=cfg.train.loss.type,
                 gamma=cfg.train.loss.gamma,
                 pos_weight=imbalance.pos_weight,
-                analysis=cfg.analysis,
+                logging=cfg.logging,
                 early_stopping=cfg.train.early_stopping,
             )
         )

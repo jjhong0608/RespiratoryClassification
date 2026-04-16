@@ -9,10 +9,14 @@ from src.models.model import (
     AstArchitectureConfig,
     AstEncoderConfig,
     AstFeatureDims,
-    AstModelConfig,
+    AstMilModelConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
-    RespiratoryAstModel,
+    GatedAttentionMilConfig,
+    InstanceHeadConfig,
+    LinearSoftmaxMilConfig,
+    MilConfig,
+    RespiratoryAstMilModel,
 )
 from src.utils.config import ModelConfig as RunModelConfig
 
@@ -51,8 +55,8 @@ def build_ast_model(
     num_mel_bins: int,
     max_length: int,
     num_classes: int,
-) -> RespiratoryAstModel:
-    model_cfg = AstModelConfig(
+) -> RespiratoryAstMilModel:
+    model_cfg = AstMilModelConfig(
         encoder=AstEncoderConfig(
             type=cfg.encoder.type,
             pretrained_name_or_path=cfg.encoder.pretrained_name_or_path,
@@ -61,6 +65,7 @@ def build_ast_model(
                 num_mel_bins=num_mel_bins,
                 max_length=max_length,
             ),
+            pooling=cfg.encoder.pooling,
             adaptation=EncoderAdaptationConfig(
                 mode=cfg.encoder.adaptation.mode,
                 num_layers=cfg.encoder.adaptation.num_layers,
@@ -82,15 +87,29 @@ def build_ast_model(
                 initializer_range=cfg.encoder.architecture.initializer_range,
             ),
         ),
+        instance_head=InstanceHeadConfig(
+            projection_dim=cfg.instance_head.projection_dim,
+            dropout=cfg.instance_head.dropout,
+            normalize=cfg.instance_head.normalize,
+        ),
+        mil=MilConfig(
+            type=cfg.mil.type,
+            gated_attention=GatedAttentionMilConfig(
+                attention_dim=cfg.mil.gated_attention.attention_dim,
+                dropout=cfg.mil.gated_attention.dropout,
+            ),
+            linear_softmax=LinearSoftmaxMilConfig(
+                eps=cfg.mil.linear_softmax.eps,
+            ),
+        ),
         classifier=ClassifierConfig(
             type=cfg.classifier.type,
             hidden_dim=cfg.classifier.hidden_dim,
             dropout=cfg.classifier.dropout,
-            pooling=cfg.classifier.pooling,
         ),
         num_classes=num_classes,
     )
-    return RespiratoryAstModel(model_cfg)
+    return RespiratoryAstMilModel(model_cfg)
 
 
 def inspect_pretrained_encoder(cfg: RunModelConfig) -> AstPretrainedInfo | None:
@@ -113,7 +132,7 @@ def inspect_pretrained_encoder(cfg: RunModelConfig) -> AstPretrainedInfo | None:
 
 
 def apply_encoder_adaptation(
-    model: RespiratoryAstModel,
+    model: RespiratoryAstMilModel,
     cfg: EncoderAdaptationConfig,
 ) -> EncoderAdaptationSummary:
     encoder = model.encoder
@@ -148,7 +167,7 @@ def apply_encoder_adaptation(
 
 
 def build_grouped_optimizer(
-    model: RespiratoryAstModel,
+    model: RespiratoryAstMilModel,
     *,
     encoder_lr: float,
     head_lr: float,

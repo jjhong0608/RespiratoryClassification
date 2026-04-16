@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from torch.utils.data import WeightedRandomSampler
 
-from src.data.dataset import RespiratoryClipDataset
+from src.data.dataset import RespiratoryRecordingBagDataset
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,7 @@ class ResolvedImbalance:
     class_counts: Mapping[int, int]
 
 
-def collect_targets(dataset: RespiratoryClipDataset) -> list[int]:
+def collect_targets(dataset: RespiratoryRecordingBagDataset) -> list[int]:
     return dataset.targets
 
 

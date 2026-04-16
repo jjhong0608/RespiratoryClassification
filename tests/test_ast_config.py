@@ -16,25 +16,31 @@ def _write_json(path: Path, payload: dict) -> Path:
 def _base_payload() -> dict:
     return {
         "experiment": {
-            "name": "respiratory_ast_clip",
+            "name": "respiratory_ast_mil",
             "task": "normal_vs_wheeze",
-            "mode": "clip",
+            "mode": "recording_mil",
             "seed": 7,
             "device": "cpu",
             "output_dir": "checkpoints",
         },
         "data": {
-            "train_dirs": ["datasets/train"],
-            "val_dirs": ["datasets/val"],
-            "eval_dirs": ["datasets/eval"],
-            "label_to_index": {"normal": 0, "wheeze": 1},
-            "batch_size": 2,
-            "num_workers": 0,
+            "metadata": {
+                "label_to_index": {"normal": 0, "wheeze": 1},
+                "splits": {
+                    "train": {"roots": ["datasets/train"]},
+                    "val": {"roots": ["datasets/val"]},
+                    "eval": {"roots": ["datasets/eval"]},
+                },
+            },
             "audio": {
                 "sample_rate": 16000,
-                "clip_duration_sec": 10.0,
             },
-            "preprocessing": {
+            "instance": {
+                "window_sec": 2.0,
+                "hop_sec": 1.0,
+                "tail_policy": "cover_end",
+            },
+            "features": {
                 "source_type": "original",
                 "bandpass": {
                     "enabled": False,
@@ -47,12 +53,16 @@ def _base_payload() -> dict:
                     "std": 4.5689974,
                 },
             },
+            "loader": {
+                "num_workers": 0,
+            },
         },
         "model": {
             "encoder": {
                 "type": "ast",
                 "pretrained_name_or_path": None,
                 "cache_dir": None,
+                "pooling": "cls",
                 "adaptation": {
                     "mode": "partial",
                     "num_layers": 1,
@@ -72,14 +82,29 @@ def _base_payload() -> dict:
                     "initializer_range": 0.02,
                 },
             },
+            "instance_head": {
+                "projection_dim": None,
+                "dropout": 0.1,
+                "normalize": False,
+            },
+            "mil": {
+                "type": "gated_attention",
+                "gated_attention": {
+                    "attention_dim": 16,
+                    "dropout": 0.1,
+                },
+                "linear_softmax": {
+                    "eps": 1e-6,
+                },
+            },
             "classifier": {
                 "type": "linear",
                 "hidden_dim": 32,
                 "dropout": 0.1,
-                "pooling": "cls",
             },
         },
         "train": {
+            "batch_size": 2,
             "epochs": 3,
             "top_k": 2,
             "max_grad_norm": 1.0,
@@ -107,12 +132,24 @@ def _base_payload() -> dict:
                 "min_delta": 1e-4,
             },
         },
-        "analysis": {
-            "outputs": {
-                "save_logits": True,
-                "save_probabilities": True,
-                "save_embeddings": False,
-                "save_clip_metadata": True,
+        "eval": {
+            "batch_size": 2,
+            "threshold_optimization": {
+                "enabled": True,
+                "metric": "f1",
+            },
+        },
+        "logging": {
+            "diagnostics": {
+                "save_bag_logits": True,
+                "save_bag_probabilities": True,
+                "save_bag_embedding": False,
+                "save_instance_logits": True,
+                "save_instance_probabilities": True,
+                "save_instance_embeddings": False,
+                "save_attention_weights": True,
+                "save_instance_metadata": True,
+                "top_k_instances": 3,
             },
         },
     }
@@ -120,43 +157,45 @@ def _base_payload() -> dict:
 
 def _cv_payload() -> dict:
     payload = _base_payload()
-    payload["folds"] = [
-        {
-            "name": "fold_0",
-            "train_dirs": ["datasets/folds/fold_1"],
-            "val_dirs": ["datasets/folds/fold_0"],
-        }
-    ]
+    payload["cv"] = {
+        "folds": [
+            {
+                "name": "fold_0",
+                "train": {"roots": ["datasets/folds/fold_1"]},
+                "val": {"roots": ["datasets/folds/fold_0"]},
+            }
+        ]
+    }
     return payload
 
 
 def _eval_payload() -> dict:
     payload = _base_payload()
+    payload.pop("model")
     payload.pop("train")
-    payload["checkpoint_path"] = "checkpoints/respiratory_ast_clip/last.pt"
-    payload["threshold_optimization"] = {
-        "enabled": True,
-        "metric": "f1",
-    }
+    payload["eval"]["checkpoint_path"] = "checkpoints/respiratory_ast_mil/last.pt"
     return payload
 
 
-def test_load_training_config_uses_ast_clip_schema(tmp_path: Path) -> None:
+def test_load_training_config_uses_recording_mil_schema(tmp_path: Path) -> None:
     config_path = _write_json(tmp_path / "train.json", _base_payload())
 
     cfg = JsonConfigLoader.load_training(config_path)
 
-    assert cfg.experiment.mode == "clip"
-    assert cfg.data.preprocessing.ast_fbank.max_length == 64
-    assert cfg.model.encoder.type == "ast"
-    assert cfg.model.encoder.adaptation.mode == "partial"
-    assert cfg.model.classifier.pooling == "cls"
-    assert cfg.train.loss.type == "bce"
+    assert cfg.experiment.mode == "recording_mil"
+    assert cfg.data.instance.window_sec == 2.0
+    assert cfg.model.encoder.pooling == "cls"
+    assert cfg.model.mil.type == "gated_attention"
+    assert cfg.eval.batch_size == 2
 
 
 def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) -> None:
     payload = _base_payload()
-    payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
+    payload["data"]["metadata"]["label_to_index"] = {
+        "normal": 0,
+        "wheeze": 1,
+        "crackle": 2,
+    }
     payload["train"]["loss"]["type"] = "cross_entropy"
     config_path = _write_json(tmp_path / "multiclass.json", payload)
 
@@ -166,26 +205,28 @@ def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) 
     assert cfg.train.loss.type == "cross_entropy"
 
 
-def test_legacy_mil_fields_are_rejected(tmp_path: Path) -> None:
+def test_legacy_clip_fields_are_rejected(tmp_path: Path) -> None:
     payload = _base_payload()
-    payload["data"]["segment"] = {
-        "mode": "sliding_window",
-    }
+    payload["data"]["audio"]["clip_duration_sec"] = 10.0
     config_path = _write_json(tmp_path / "legacy.json", payload)
 
-    with pytest.raises(TypeError, match="segment"):
+    with pytest.raises(TypeError, match="clip_duration_sec"):
         JsonConfigLoader.load_training(config_path)
 
 
 def test_multiclass_training_rejects_binary_loss(tmp_path: Path) -> None:
     payload = _base_payload()
-    payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
+    payload["data"]["metadata"]["label_to_index"] = {
+        "normal": 0,
+        "wheeze": 1,
+        "crackle": 2,
+    }
     payload["train"]["loss"]["type"] = "bce"
     config_path = _write_json(tmp_path / "invalid_multiclass.json", payload)
 
     with pytest.raises(
         ValueError,
-        match="Multi-class AST runs require train.loss.type='cross_entropy'",
+        match="Multi-class AST\\+MIL runs require train.loss.type='cross_entropy'",
     ):
         JsonConfigLoader.load_training(config_path)
 
@@ -212,12 +253,12 @@ def test_pretrained_input_dim_mismatch_is_rejected(tmp_path: Path) -> None:
         JsonConfigLoader.load_training(config_path)
 
 
-def test_load_cv_and_eval_configs_use_clip_schema(tmp_path: Path) -> None:
+def test_load_cv_and_eval_configs_use_recording_mil_schema(tmp_path: Path) -> None:
     cv_path = _write_json(tmp_path / "cv.json", _cv_payload())
     eval_path = _write_json(tmp_path / "eval.json", _eval_payload())
 
     cv_cfg = JsonConfigLoader.load_cv(cv_path)
     eval_cfg = JsonConfigLoader.load_eval(eval_path)
 
-    assert cv_cfg.folds[0].name == "fold_0"
-    assert eval_cfg.threshold_optimization.metric == "f1"
+    assert cv_cfg.cv.folds[0].train.roots == ["datasets/folds/fold_1"]
+    assert eval_cfg.eval.checkpoint_path == "checkpoints/respiratory_ast_mil/last.pt"
