@@ -1,13 +1,13 @@
 {
   "experiment": {
-    "name": "respiratory_ast_clip_eval",
+    "name": "respiratory_multiscale_rdt_ast_eval",
     "task": "normal_vs_wheeze",
     "mode": "clip",
     "seed": 42,
     "device": "cpu",
     "output_dir": "checkpoints"
   },
-  "checkpoint_path": "checkpoints/respiratory_ast_clip/last.pt",
+  "checkpoint_path": "checkpoints/respiratory_multiscale_rdt_ast_binary/last.pt",
   "data": {
     "train_dirs": [],
     "val_dirs": [],

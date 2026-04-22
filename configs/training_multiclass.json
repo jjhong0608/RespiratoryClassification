@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "respiratory_ast_multiclass_clip",
+    "name": "respiratory_multiscale_rdt_ast_multiclass",
     "task": "normal_crackle_wheeze",
     "mode": "clip",
     "seed": 42,
@@ -47,19 +47,47 @@
   },
   "model": {
     "encoder": {
-      "type": "ast",
-      "pretrained_name_or_path": "MIT/ast-finetuned-audioset-10-10-0.4593",
-      "cache_dir": null,
+      "type": "multiscale_rdt_ast",
       "adaptation": {
-        "mode": "partial",
-        "num_layers": 1
+        "mode": "full",
+        "num_layers": 0
+      },
+      "architecture": {
+        "hidden_size": 384,
+        "num_attention_heads": 6,
+        "mlp_ratio": 4.0,
+        "hidden_dropout_prob": 0.1,
+        "attention_probs_dropout_prob": 0.1,
+        "layer_norm_eps": 1e-6,
+        "shared_stem_depth": 2,
+        "adapter_depth": 1,
+        "latent_query_count": 8,
+        "rdt_steps": 3,
+        "patch_branches": [
+          {
+            "patch_size": [16, 16],
+            "stride": [8, 16]
+          },
+          {
+            "patch_size": [8, 32],
+            "stride": [4, 32]
+          },
+          {
+            "patch_size": [4, 64],
+            "stride": [2, 64]
+          },
+          {
+            "patch_size": [2, 128],
+            "stride": [1, 128]
+          }
+        ]
       }
     },
     "classifier": {
       "type": "mlp",
       "hidden_dim": 256,
       "dropout": 0.1,
-      "pooling": "cls"
+      "pooling": "latent_mean"
     }
   },
   "train": {

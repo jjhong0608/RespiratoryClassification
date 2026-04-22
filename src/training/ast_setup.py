@@ -3,16 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from torch.optim import AdamW
-from transformers import ASTConfig
 
 from src.models.model import (
-    AstArchitectureConfig,
-    AstEncoderConfig,
     AstFeatureDims,
-    AstModelConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
-    RespiratoryAstModel,
+    MultiScaleRdtArchitectureConfig,
+    MultiScaleRdtAstModel,
+    MultiScaleRdtAstModelConfig,
+    MultiScaleRdtEncoderConfig,
 )
 from src.utils.config import ModelConfig as RunModelConfig
 
@@ -35,14 +34,14 @@ class OptimizerGroupSummary:
 
 
 @dataclass(frozen=True)
-class AstPretrainedInfo:
-    source: str
-    name_or_path: str
-    num_mel_bins: int
-    max_length: int
+class ModelArchitectureSummary:
+    encoder_type: str
     hidden_size: int
-    num_hidden_layers: int
     num_attention_heads: int
+    branch_token_counts: tuple[int, ...]
+    total_token_count: int
+    latent_query_count: int
+    rdt_steps: int
 
 
 def build_ast_model(
@@ -51,12 +50,10 @@ def build_ast_model(
     num_mel_bins: int,
     max_length: int,
     num_classes: int,
-) -> RespiratoryAstModel:
-    model_cfg = AstModelConfig(
-        encoder=AstEncoderConfig(
+) -> MultiScaleRdtAstModel:
+    model_cfg = MultiScaleRdtAstModelConfig(
+        encoder=MultiScaleRdtEncoderConfig(
             type=cfg.encoder.type,
-            pretrained_name_or_path=cfg.encoder.pretrained_name_or_path,
-            cache_dir=cfg.encoder.cache_dir,
             feature_dims=AstFeatureDims(
                 num_mel_bins=num_mel_bins,
                 max_length=max_length,
@@ -65,21 +62,20 @@ def build_ast_model(
                 mode=cfg.encoder.adaptation.mode,
                 num_layers=cfg.encoder.adaptation.num_layers,
             ),
-            architecture=AstArchitectureConfig(
+            architecture=MultiScaleRdtArchitectureConfig(
                 hidden_size=cfg.encoder.architecture.hidden_size,
-                num_hidden_layers=cfg.encoder.architecture.num_hidden_layers,
                 num_attention_heads=cfg.encoder.architecture.num_attention_heads,
-                intermediate_size=cfg.encoder.architecture.intermediate_size,
+                mlp_ratio=cfg.encoder.architecture.mlp_ratio,
                 hidden_dropout_prob=cfg.encoder.architecture.hidden_dropout_prob,
                 attention_probs_dropout_prob=(
                     cfg.encoder.architecture.attention_probs_dropout_prob
                 ),
-                frequency_stride=cfg.encoder.architecture.frequency_stride,
-                time_stride=cfg.encoder.architecture.time_stride,
-                patch_size=cfg.encoder.architecture.patch_size,
-                qkv_bias=cfg.encoder.architecture.qkv_bias,
                 layer_norm_eps=cfg.encoder.architecture.layer_norm_eps,
-                initializer_range=cfg.encoder.architecture.initializer_range,
+                shared_stem_depth=cfg.encoder.architecture.shared_stem_depth,
+                adapter_depth=cfg.encoder.architecture.adapter_depth,
+                latent_query_count=cfg.encoder.architecture.latent_query_count,
+                rdt_steps=cfg.encoder.architecture.rdt_steps,
+                patch_branches=cfg.encoder.architecture.patch_branches,
             ),
         ),
         classifier=ClassifierConfig(
@@ -90,55 +86,57 @@ def build_ast_model(
         ),
         num_classes=num_classes,
     )
-    return RespiratoryAstModel(model_cfg)
+    return MultiScaleRdtAstModel(model_cfg)
 
 
-def inspect_pretrained_encoder(cfg: RunModelConfig) -> AstPretrainedInfo | None:
-    pretrained_name_or_path = cfg.encoder.pretrained_name_or_path
-    if pretrained_name_or_path is None:
-        return None
-    pretrained_cfg = ASTConfig.from_pretrained(
-        pretrained_name_or_path,
-        cache_dir=cfg.encoder.cache_dir,
-    )
-    return AstPretrainedInfo(
-        source="huggingface_pretrained",
-        name_or_path=pretrained_name_or_path,
-        num_mel_bins=int(pretrained_cfg.num_mel_bins),
-        max_length=int(pretrained_cfg.max_length),
-        hidden_size=int(pretrained_cfg.hidden_size),
-        num_hidden_layers=int(pretrained_cfg.num_hidden_layers),
-        num_attention_heads=int(pretrained_cfg.num_attention_heads),
+def inspect_pretrained_encoder(cfg: RunModelConfig) -> object | None:
+    del cfg
+    return None
+
+
+def summarize_model_architecture(
+    model: MultiScaleRdtAstModel,
+) -> ModelArchitectureSummary:
+    architecture = model.cfg.encoder.architecture
+    return ModelArchitectureSummary(
+        encoder_type=model.cfg.encoder.type,
+        hidden_size=architecture.hidden_size,
+        num_attention_heads=architecture.num_attention_heads,
+        branch_token_counts=model.encoder.branch_token_counts,
+        total_token_count=model.encoder.total_token_count,
+        latent_query_count=architecture.latent_query_count,
+        rdt_steps=architecture.rdt_steps,
     )
 
 
 def apply_encoder_adaptation(
-    model: RespiratoryAstModel,
+    model: MultiScaleRdtAstModel,
     cfg: EncoderAdaptationConfig,
 ) -> EncoderAdaptationSummary:
-    encoder = model.encoder
-
-    for parameter in encoder.parameters():
+    for parameter in model.parameters():
         parameter.requires_grad = False
 
     if cfg.mode == "full":
-        for parameter in encoder.parameters():
+        for parameter in model.parameters():
             parameter.requires_grad = True
-    elif cfg.mode == "partial":
-        for layer in encoder.encoder.layer[-cfg.num_layers :]:
-            for parameter in layer.parameters():
+    elif cfg.mode == "frozen":
+        for module in (model.latent_pooler, model.rdt_block, model.classifier):
+            for parameter in module.parameters():
                 parameter.requires_grad = True
-        for parameter in encoder.layernorm.parameters():
-            parameter.requires_grad = True
-    elif cfg.mode != "frozen":
-        raise ValueError(f"Unsupported adaptation mode: {cfg.mode}")
+    else:
+        raise ValueError(
+            "Unsupported adaptation mode for multiscale_rdt_ast: "
+            f"{cfg.mode}. Use 'full' or 'frozen'."
+        )
 
     trainable_parameters = sum(
         parameter.numel()
-        for parameter in encoder.parameters()
+        for parameter in model.encoder.parameters()
         if parameter.requires_grad
     )
-    total_parameters = sum(parameter.numel() for parameter in encoder.parameters())
+    total_parameters = sum(
+        parameter.numel() for parameter in model.encoder.parameters()
+    )
     return EncoderAdaptationSummary(
         mode=cfg.mode,
         num_layers=cfg.num_layers,
@@ -148,7 +146,7 @@ def apply_encoder_adaptation(
 
 
 def build_grouped_optimizer(
-    model: RespiratoryAstModel,
+    model: MultiScaleRdtAstModel,
     *,
     encoder_lr: float,
     head_lr: float,
@@ -157,12 +155,14 @@ def build_grouped_optimizer(
     encoder_params = [
         parameter for parameter in model.encoder.parameters() if parameter.requires_grad
     ]
-    encoder_param_ids = {id(parameter) for parameter in model.encoder.parameters()}
+    head_modules = (model.latent_pooler, model.rdt_block, model.classifier)
     head_params = [
         parameter
-        for parameter in model.parameters()
-        if parameter.requires_grad and id(parameter) not in encoder_param_ids
+        for module in head_modules
+        for parameter in module.parameters()
+        if parameter.requires_grad
     ]
+
     param_groups = []
     if encoder_params:
         param_groups.append(
@@ -184,6 +184,7 @@ def build_grouped_optimizer(
         )
     if not param_groups:
         raise ValueError("No trainable parameters available for optimizer creation")
+
     optimizer = AdamW(param_groups)
     summary = OptimizerGroupSummary(
         encoder_lr=encoder_lr,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Literal
 
 import plotly.graph_objects as go
 import pytest
@@ -37,7 +38,7 @@ def _build_plotter(
     input_path: Path,
     out_path: Path,
     preprocess: AudioPreprocessConfig | None = None,
-    feature_type: str = "log_mel",
+    feature_type: Literal["log_mel", "ast_fbank"] = "log_mel",
     ast_fbank_cfg: AstFbankFeatureConfig | None = None,
     formats: set[str] | None = None,
 ) -> FeatureMapPlotter:

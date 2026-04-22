@@ -4,9 +4,10 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 
-def _load_analyze_module() -> object:
+def _load_analyze_module() -> Any:
     module_path = (
         Path(__file__).resolve().parents[1] / "scripts" / "analyze_cv_results.py"
     )

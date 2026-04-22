@@ -11,7 +11,7 @@ from src.training.ast_setup import (
     apply_encoder_adaptation,
     build_ast_model,
     build_grouped_optimizer,
-    inspect_pretrained_encoder,
+    summarize_model_architecture,
 )
 from src.training.imbalance import (
     build_weighted_sampler,
@@ -52,25 +52,22 @@ def main() -> None:
             max_length=train_dataset.max_length,
             num_classes=num_classes,
         )
-        pretrained_info = inspect_pretrained_encoder(cfg.model)
+        architecture_summary = summarize_model_architecture(model)
         adaptation_summary = apply_encoder_adaptation(
             model, model.cfg.encoder.adaptation
         )
-        if pretrained_info is not None:
-            logger.info(
-                "[%s] Loaded pretrained AST encoder | source=%s | name_or_path=%s | "
-                "num_mel_bins=%d | max_length=%d | hidden_size=%d | num_layers=%d | "
-                "num_heads=%d | adaptation_mode=%s",
-                fold.name,
-                pretrained_info.source,
-                pretrained_info.name_or_path,
-                pretrained_info.num_mel_bins,
-                pretrained_info.max_length,
-                pretrained_info.hidden_size,
-                pretrained_info.num_hidden_layers,
-                pretrained_info.num_attention_heads,
-                model.cfg.encoder.adaptation.mode,
-            )
+        logger.info(
+            "[%s] Model architecture | encoder_type=%s | hidden_size=%d | num_heads=%d | "
+            "branch_token_counts=%s | total_tokens=%d | latent_queries=%d | rdt_steps=%d",
+            fold.name,
+            architecture_summary.encoder_type,
+            architecture_summary.hidden_size,
+            architecture_summary.num_attention_heads,
+            list(architecture_summary.branch_token_counts),
+            architecture_summary.total_token_count,
+            architecture_summary.latent_query_count,
+            architecture_summary.rdt_steps,
+        )
         logger.info(
             "[%s] Encoder adaptation | mode=%s | num_layers=%d | trainable_params=%d | frozen_params=%d",
             fold.name,
@@ -176,9 +173,7 @@ def main() -> None:
                 "fold_name": fold.name,
                 "model_cfg": asdict(model.cfg),
                 "label_to_index": dict(cfg.data.label_to_index),
-                "pretrained_info": (
-                    asdict(pretrained_info) if pretrained_info is not None else None
-                ),
+                "architecture_summary": asdict(architecture_summary),
                 "adaptation_summary": asdict(adaptation_summary),
                 "optimizer_summary": asdict(optimizer_summary),
             },

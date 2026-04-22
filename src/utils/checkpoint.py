@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import torch
 
 from src.models.model import (
-    AstArchitectureConfig,
-    AstEncoderConfig,
     AstFeatureDims,
-    AstModelConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
+    MultiScaleRdtArchitectureConfig,
+    MultiScaleRdtAstModelConfig,
+    MultiScaleRdtEncoderConfig,
+    PatchBranchConfig,
 )
 
 
@@ -31,35 +34,70 @@ def load_checkpoint(path: str, *, device: torch.device, unsafe: bool = False) ->
         return torch_load_compat(path, device=device, weights_only=False)
 
 
-def parse_model_cfg(raw: object) -> AstModelConfig:
-    if isinstance(raw, AstModelConfig):
+def _parse_pair(values: object, *, field_name: str) -> tuple[int, int]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise TypeError(f"{field_name} must be a 2-item list")
+    if len(values) != 2:
+        raise ValueError(f"{field_name} must contain exactly two integers")
+    first, second = values
+    if not isinstance(first, int) or not isinstance(second, int):
+        raise TypeError(f"{field_name} must contain integers")
+    return first, second
+
+
+def _parse_patch_branch(raw: object) -> PatchBranchConfig:
+    if not isinstance(raw, Mapping):
+        raise TypeError("patch branch entries must be objects")
+    patch_size = _parse_pair(raw.get("patch_size"), field_name="patch_size")
+    stride = _parse_pair(raw.get("stride"), field_name="stride")
+    return PatchBranchConfig(patch_size=patch_size, stride=stride)
+
+
+def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
+    if isinstance(raw, MultiScaleRdtAstModelConfig):
         return raw
-    if not isinstance(raw, dict):
-        raise TypeError("model_cfg must be a dict or AstModelConfig")
+    if not isinstance(raw, Mapping):
+        raise TypeError("model_cfg must be a dict or MultiScaleRdtAstModelConfig")
 
     encoder_raw = raw.get("encoder")
-    if not isinstance(encoder_raw, dict):
+    if not isinstance(encoder_raw, Mapping):
         raise TypeError("model_cfg.encoder must be a dict")
     feature_dims_raw = encoder_raw.get("feature_dims")
-    if not isinstance(feature_dims_raw, dict):
+    if not isinstance(feature_dims_raw, Mapping):
         raise TypeError("model_cfg.encoder.feature_dims must be a dict")
-    adaptation_raw = encoder_raw.get("adaptation", {})
-    architecture_raw = encoder_raw.get("architecture", {})
     classifier_raw = raw.get("classifier")
-    if not isinstance(classifier_raw, dict):
+    if not isinstance(classifier_raw, Mapping):
         raise TypeError("model_cfg.classifier must be a dict")
     num_classes_raw = raw.get("num_classes")
     if not isinstance(num_classes_raw, int):
         raise TypeError("model_cfg.num_classes must be an int")
 
-    return AstModelConfig(
-        encoder=AstEncoderConfig(
-            feature_dims=AstFeatureDims(**feature_dims_raw),
-            type=encoder_raw.get("type", "ast"),
-            pretrained_name_or_path=encoder_raw.get("pretrained_name_or_path"),
-            cache_dir=encoder_raw.get("cache_dir"),
+    adaptation_raw = encoder_raw.get("adaptation", {})
+    if not isinstance(adaptation_raw, Mapping):
+        raise TypeError("model_cfg.encoder.adaptation must be a dict")
+    architecture_raw = encoder_raw.get("architecture", {})
+    if not isinstance(architecture_raw, Mapping):
+        raise TypeError("model_cfg.encoder.architecture must be a dict")
+
+    architecture_kwargs = dict(architecture_raw)
+    patch_branches_raw = architecture_kwargs.get("patch_branches")
+    if patch_branches_raw is not None:
+        if not isinstance(patch_branches_raw, Sequence) or isinstance(
+            patch_branches_raw, (str, bytes)
+        ):
+            raise TypeError(
+                "model_cfg.encoder.architecture.patch_branches must be a list"
+            )
+        architecture_kwargs["patch_branches"] = tuple(
+            _parse_patch_branch(branch_raw) for branch_raw in patch_branches_raw
+        )
+
+    return MultiScaleRdtAstModelConfig(
+        encoder=MultiScaleRdtEncoderConfig(
+            feature_dims=AstFeatureDims(**dict(feature_dims_raw)),
+            type=encoder_raw.get("type", "multiscale_rdt_ast"),
             adaptation=EncoderAdaptationConfig(**dict(adaptation_raw)),
-            architecture=AstArchitectureConfig(**dict(architecture_raw)),
+            architecture=MultiScaleRdtArchitectureConfig(**architecture_kwargs),
         ),
         classifier=ClassifierConfig(**dict(classifier_raw)),
         num_classes=num_classes_raw,

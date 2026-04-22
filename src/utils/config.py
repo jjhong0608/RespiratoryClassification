@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 from src.evaluation.thresholds import ThresholdOptimizationConfig
-
-DEFAULT_AST_PRETRAINED_NAME = "MIT/ast-finetuned-audioset-10-10-0.4593"
+from src.models.model import (
+    AstFeatureDims,
+    ClassifierConfig,
+    EncoderAdaptationConfig,
+    MultiScaleRdtArchitectureConfig,
+    PatchBranchConfig,
+    compute_token_count,
+)
 
 
 @dataclass(frozen=True)
@@ -68,47 +74,17 @@ class DataConfig:
 
 
 @dataclass(frozen=True)
-class EncoderAdaptationConfig:
-    mode: Literal["frozen", "partial", "full"] = "partial"
-    num_layers: int = 1
-
-
-@dataclass(frozen=True)
-class AstArchitectureConfig:
-    hidden_size: int = 768
-    num_hidden_layers: int = 12
-    num_attention_heads: int = 12
-    intermediate_size: int = 3072
-    hidden_dropout_prob: float = 0.0
-    attention_probs_dropout_prob: float = 0.0
-    frequency_stride: int = 10
-    time_stride: int = 10
-    patch_size: int = 16
-    qkv_bias: bool = True
-    layer_norm_eps: float = 1e-12
-    initializer_range: float = 0.02
-
-
-@dataclass(frozen=True)
-class AstEncoderConfig:
-    type: Literal["ast"] = "ast"
-    pretrained_name_or_path: str | None = DEFAULT_AST_PRETRAINED_NAME
-    cache_dir: str | None = None
+class ModelEncoderConfig:
+    type: Literal["multiscale_rdt_ast"] = "multiscale_rdt_ast"
     adaptation: EncoderAdaptationConfig = field(default_factory=EncoderAdaptationConfig)
-    architecture: AstArchitectureConfig = field(default_factory=AstArchitectureConfig)
-
-
-@dataclass(frozen=True)
-class ClassifierConfig:
-    type: Literal["linear", "mlp"] = "linear"
-    hidden_dim: int = 256
-    dropout: float = 0.0
-    pooling: Literal["cls", "mean"] = "cls"
+    architecture: MultiScaleRdtArchitectureConfig = field(
+        default_factory=MultiScaleRdtArchitectureConfig
+    )
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    encoder: AstEncoderConfig
+    encoder: ModelEncoderConfig
     classifier: ClassifierConfig
 
 
@@ -295,85 +271,102 @@ class JsonConfigLoader:
             raise ValueError("data.num_workers must be non-negative")
 
     @staticmethod
-    def _validate_encoder(cfg: AstEncoderConfig) -> None:
-        if cfg.type != "ast":
-            raise ValueError("Only model.encoder.type='ast' is supported")
-        if cfg.adaptation.mode not in {"frozen", "partial", "full"}:
+    def _validate_encoder(cfg: ModelEncoderConfig, data_cfg: DataConfig) -> None:
+        if cfg.type != "multiscale_rdt_ast":
             raise ValueError(
-                "model.encoder.adaptation.mode must be one of ['frozen', 'full', 'partial']"
+                "Only model.encoder.type='multiscale_rdt_ast' is supported"
             )
-        if cfg.architecture.hidden_size <= 0:
+        if cfg.adaptation.mode == "partial":
+            raise ValueError(
+                "model.encoder.adaptation.mode='partial' is not supported; "
+                "use 'full' or 'frozen'"
+            )
+        if cfg.adaptation.mode not in {"frozen", "full", "partial"}:
+            raise ValueError(
+                "model.encoder.adaptation.mode must be one of "
+                "['frozen', 'full', 'partial']"
+            )
+        if cfg.adaptation.num_layers != 0:
+            raise ValueError("model.encoder.adaptation.num_layers must be 0")
+
+        architecture = cfg.architecture
+        if architecture.hidden_size <= 0:
             raise ValueError(
                 "model.encoder.architecture.hidden_size must be greater than zero"
             )
-        if cfg.architecture.num_hidden_layers <= 0:
-            raise ValueError(
-                "model.encoder.architecture.num_hidden_layers must be greater than zero"
-            )
-        if cfg.architecture.num_attention_heads <= 0:
+        if architecture.num_attention_heads <= 0:
             raise ValueError(
                 "model.encoder.architecture.num_attention_heads must be greater than zero"
             )
-        if cfg.architecture.intermediate_size <= 0:
+        if architecture.hidden_size % architecture.num_attention_heads != 0:
             raise ValueError(
-                "model.encoder.architecture.intermediate_size must be greater than zero"
+                "model.encoder.architecture.hidden_size must be divisible by "
+                "model.encoder.architecture.num_attention_heads"
             )
-        if not (0.0 <= cfg.architecture.hidden_dropout_prob < 1.0):
+        if architecture.mlp_ratio <= 0:
+            raise ValueError(
+                "model.encoder.architecture.mlp_ratio must be greater than zero"
+            )
+        if not (0.0 <= architecture.hidden_dropout_prob < 1.0):
             raise ValueError(
                 "model.encoder.architecture.hidden_dropout_prob must be within [0, 1)"
             )
-        if not (0.0 <= cfg.architecture.attention_probs_dropout_prob < 1.0):
+        if not (0.0 <= architecture.attention_probs_dropout_prob < 1.0):
             raise ValueError(
                 "model.encoder.architecture.attention_probs_dropout_prob must be within [0, 1)"
             )
-        if cfg.architecture.frequency_stride <= 0:
+        if architecture.shared_stem_depth <= 0:
             raise ValueError(
-                "model.encoder.architecture.frequency_stride must be greater than zero"
+                "model.encoder.architecture.shared_stem_depth must be greater than zero"
             )
-        if cfg.architecture.time_stride <= 0:
+        if architecture.adapter_depth <= 0:
             raise ValueError(
-                "model.encoder.architecture.time_stride must be greater than zero"
+                "model.encoder.architecture.adapter_depth must be greater than zero"
             )
-        if cfg.architecture.patch_size <= 0:
+        if architecture.latent_query_count <= 0:
             raise ValueError(
-                "model.encoder.architecture.patch_size must be greater than zero"
+                "model.encoder.architecture.latent_query_count must be greater than zero"
             )
-        if cfg.adaptation.mode == "partial":
-            if cfg.adaptation.num_layers <= 0:
-                raise ValueError(
-                    "model.encoder.adaptation.num_layers must be greater than zero"
-                )
-            if cfg.adaptation.num_layers > cfg.architecture.num_hidden_layers:
-                raise ValueError(
-                    "model.encoder.adaptation.num_layers must not exceed "
-                    "model.encoder.architecture.num_hidden_layers"
-                )
+        if architecture.rdt_steps <= 0:
+            raise ValueError(
+                "model.encoder.architecture.rdt_steps must be greater than zero"
+            )
+        if not architecture.patch_branches:
+            raise ValueError(
+                "model.encoder.architecture.patch_branches must not be empty"
+            )
 
-    @staticmethod
-    def _validate_encoder_against_data(
-        data_cfg: DataConfig,
-        encoder_cfg: AstEncoderConfig,
-    ) -> None:
-        if encoder_cfg.pretrained_name_or_path is None:
-            return
-        from transformers import ASTConfig
-
-        pretrained_cfg = ASTConfig.from_pretrained(
-            encoder_cfg.pretrained_name_or_path,
-            cache_dir=encoder_cfg.cache_dir,
+        feature_dims = AstFeatureDims(
+            num_mel_bins=data_cfg.preprocessing.ast_fbank.num_mel_bins,
+            max_length=data_cfg.preprocessing.ast_fbank.max_length,
         )
-        expected_bins = int(data_cfg.preprocessing.ast_fbank.num_mel_bins)
-        expected_length = int(data_cfg.preprocessing.ast_fbank.max_length)
-        actual_bins = int(pretrained_cfg.num_mel_bins)
-        actual_length = int(pretrained_cfg.max_length)
-        if actual_bins != expected_bins or actual_length != expected_length:
-            raise ValueError(
-                "Pretrained AST encoder input dims do not match "
-                "data.preprocessing.ast_fbank.\n"
-                f"- encoder: num_mel_bins={actual_bins}, max_length={actual_length}\n"
-                f"- data:    num_mel_bins={expected_bins}, max_length={expected_length}\n"
-                f"- name_or_path: {encoder_cfg.pretrained_name_or_path}"
+        for branch_index, branch in enumerate(architecture.patch_branches):
+            patch_t, patch_f = branch.patch_size
+            stride_t, stride_f = branch.stride
+            if patch_t <= 0 or patch_f <= 0:
+                raise ValueError(
+                    "model.encoder.architecture.patch_branches.patch_size values "
+                    "must be greater than zero"
+                )
+            if stride_t <= 0 or stride_f <= 0:
+                raise ValueError(
+                    "model.encoder.architecture.patch_branches.stride values must "
+                    "be greater than zero"
+                )
+            if patch_t > feature_dims.max_length or patch_f > feature_dims.num_mel_bins:
+                raise ValueError(
+                    "model.encoder.architecture.patch_branches contains a patch "
+                    "that does not fit within data.preprocessing.ast_fbank"
+                )
+            token_count = compute_token_count(
+                feature_dims=feature_dims,
+                patch_branch=branch,
             )
+            if token_count <= 0:
+                raise ValueError(
+                    "model.encoder.architecture.patch_branches must yield a positive "
+                    f"token count; branch_index={branch_index}"
+                )
 
     @staticmethod
     def _validate_classifier(cfg: ClassifierConfig) -> None:
@@ -381,12 +374,14 @@ class JsonConfigLoader:
             raise ValueError("model.classifier.hidden_dim must be greater than zero")
         if not (0.0 <= cfg.dropout < 1.0):
             raise ValueError("model.classifier.dropout must be within [0, 1)")
-        if cfg.pooling not in {"cls", "mean"}:
-            raise ValueError("model.classifier.pooling must be one of ['cls', 'mean']")
+        if cfg.pooling != "latent_mean":
+            raise ValueError(
+                "model.classifier.pooling must be 'latent_mean' for this branch"
+            )
 
     @staticmethod
-    def _validate_model(cfg: ModelConfig) -> None:
-        JsonConfigLoader._validate_encoder(cfg.encoder)
+    def _validate_model(cfg: ModelConfig, data_cfg: DataConfig) -> None:
+        JsonConfigLoader._validate_encoder(cfg.encoder, data_cfg)
         JsonConfigLoader._validate_classifier(cfg.classifier)
 
     @staticmethod
@@ -463,19 +458,64 @@ class JsonConfigLoader:
         return cfg
 
     @staticmethod
-    def _parse_model(raw: Mapping[str, Any]) -> ModelConfig:
+    def _coerce_pair(
+        values: Sequence[object],
+        *,
+        field_name: str,
+    ) -> tuple[int, int]:
+        if len(values) != 2:
+            raise ValueError(f"{field_name} must contain exactly two integers")
+        first, second = values
+        if not isinstance(first, int) or not isinstance(second, int):
+            raise TypeError(f"{field_name} must contain integers")
+        return first, second
+
+    @staticmethod
+    def _parse_patch_branch(raw: Mapping[str, Any]) -> PatchBranchConfig:
+        patch_size_raw = raw.get("patch_size")
+        stride_raw = raw.get("stride")
+        if not isinstance(patch_size_raw, Sequence) or isinstance(
+            patch_size_raw, (str, bytes)
+        ):
+            raise TypeError("patch_size must be a 2-item list")
+        if not isinstance(stride_raw, Sequence) or isinstance(stride_raw, (str, bytes)):
+            raise TypeError("stride must be a 2-item list")
+        return PatchBranchConfig(
+            patch_size=JsonConfigLoader._coerce_pair(
+                patch_size_raw,
+                field_name="patch_size",
+            ),
+            stride=JsonConfigLoader._coerce_pair(
+                stride_raw,
+                field_name="stride",
+            ),
+        )
+
+    @staticmethod
+    def _parse_model(raw: Mapping[str, Any], data_cfg: DataConfig) -> ModelConfig:
         kwargs = dict(raw)
         encoder = dict(raw["encoder"])
+        architecture = dict(encoder.get("architecture", {}))
+        patch_branches_raw = architecture.get("patch_branches")
+        if patch_branches_raw is not None:
+            if not isinstance(patch_branches_raw, Sequence) or isinstance(
+                patch_branches_raw, (str, bytes)
+            ):
+                raise TypeError(
+                    "model.encoder.architecture.patch_branches must be a list"
+                )
+            architecture["patch_branches"] = tuple(
+                JsonConfigLoader._parse_patch_branch(dict(branch_raw))
+                for branch_raw in patch_branches_raw
+            )
         encoder["adaptation"] = EncoderAdaptationConfig(
             **dict(encoder.get("adaptation", {}))
         )
-        encoder["architecture"] = AstArchitectureConfig(
-            **dict(encoder.get("architecture", {}))
-        )
-        kwargs["encoder"] = AstEncoderConfig(**encoder)
+        encoder["architecture"] = MultiScaleRdtArchitectureConfig(**architecture)
+        kwargs["encoder"] = ModelEncoderConfig(**encoder)
         kwargs["classifier"] = ClassifierConfig(**dict(raw["classifier"]))
         cfg = ModelConfig(**kwargs)
-        JsonConfigLoader._validate_model(cfg)
+        JsonConfigLoader._validate_model(cfg, data_cfg)
         return cfg
 
     @staticmethod
@@ -513,14 +553,15 @@ class JsonConfigLoader:
     @staticmethod
     def load_training(path: str | Path) -> TrainingRunConfig:
         raw = JsonConfigLoader.load_json(path)
+        data_cfg = JsonConfigLoader._parse_data(raw["data"])
+        model_cfg = JsonConfigLoader._parse_model(raw["model"], data_cfg)
         cfg = TrainingRunConfig(
             experiment=JsonConfigLoader._parse_experiment(raw["experiment"]),
-            data=JsonConfigLoader._parse_data(raw["data"]),
-            model=JsonConfigLoader._parse_model(raw["model"]),
+            data=data_cfg,
+            model=model_cfg,
             train=JsonConfigLoader._parse_train(raw["train"]),
             analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
         )
-        JsonConfigLoader._validate_encoder_against_data(cfg.data, cfg.model.encoder)
         JsonConfigLoader._validate_train(
             cfg.train,
             num_classes=len(cfg.data.label_to_index),
@@ -530,30 +571,37 @@ class JsonConfigLoader:
     @staticmethod
     def load_eval(path: str | Path) -> EvalConfig:
         raw = JsonConfigLoader.load_json(path)
-        cfg = EvalConfig(
+        data_cfg = JsonConfigLoader._parse_data(raw["data"])
+        return EvalConfig(
             experiment=JsonConfigLoader._parse_experiment(raw["experiment"]),
             checkpoint_path=str(raw["checkpoint_path"]),
-            data=JsonConfigLoader._parse_data(raw["data"]),
+            data=data_cfg,
             analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
             threshold_optimization=JsonConfigLoader._parse_threshold_optimization(
                 raw.get("threshold_optimization")
             ),
         )
+
+    @staticmethod
+    def _parse_fold(raw: Mapping[str, Any]) -> CvFoldConfig:
+        cfg = CvFoldConfig(**dict(raw))
+        if not cfg.name:
+            raise ValueError("fold.name must not be empty")
         return cfg
 
     @staticmethod
     def load_cv(path: str | Path) -> CvRunConfig:
         raw = JsonConfigLoader.load_json(path)
-        folds = [CvFoldConfig(**dict(item)) for item in raw["folds"]]
+        data_cfg = JsonConfigLoader._parse_data(raw["data"])
+        model_cfg = JsonConfigLoader._parse_model(raw["model"], data_cfg)
         cfg = CvRunConfig(
             experiment=JsonConfigLoader._parse_experiment(raw["experiment"]),
-            data=JsonConfigLoader._parse_data(raw["data"]),
-            model=JsonConfigLoader._parse_model(raw["model"]),
+            data=data_cfg,
+            model=model_cfg,
             train=JsonConfigLoader._parse_train(raw["train"]),
             analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
-            folds=folds,
+            folds=[JsonConfigLoader._parse_fold(item) for item in raw["folds"]],
         )
-        JsonConfigLoader._validate_encoder_against_data(cfg.data, cfg.model.encoder)
         JsonConfigLoader._validate_train(
             cfg.train,
             num_classes=len(cfg.data.label_to_index),

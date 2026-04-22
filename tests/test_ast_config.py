@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 from src.utils.config import JsonConfigLoader
-from transformers import ASTConfig
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write_json(path: Path, payload: dict) -> Path:
@@ -13,10 +14,19 @@ def _write_json(path: Path, payload: dict) -> Path:
     return path
 
 
+def _small_patch_branches_payload() -> list[dict[str, list[int]]]:
+    return [
+        {"patch_size": [8, 8], "stride": [4, 8]},
+        {"patch_size": [4, 16], "stride": [2, 16]},
+        {"patch_size": [2, 32], "stride": [1, 32]},
+        {"patch_size": [16, 4], "stride": [8, 4]},
+    ]
+
+
 def _base_payload() -> dict:
     return {
         "experiment": {
-            "name": "respiratory_ast_clip",
+            "name": "respiratory_multiscale_rdt_ast",
             "task": "normal_vs_wheeze",
             "mode": "clip",
             "seed": 7,
@@ -41,7 +51,7 @@ def _base_payload() -> dict:
                 },
                 "ast_fbank": {
                     "num_mel_bins": 32,
-                    "max_length": 64,
+                    "max_length": 32,
                     "do_normalize": True,
                     "mean": -4.2677393,
                     "std": 4.5689974,
@@ -50,33 +60,30 @@ def _base_payload() -> dict:
         },
         "model": {
             "encoder": {
-                "type": "ast",
-                "pretrained_name_or_path": None,
-                "cache_dir": None,
+                "type": "multiscale_rdt_ast",
                 "adaptation": {
-                    "mode": "partial",
-                    "num_layers": 1,
+                    "mode": "full",
+                    "num_layers": 0,
                 },
                 "architecture": {
                     "hidden_size": 32,
-                    "num_hidden_layers": 2,
                     "num_attention_heads": 4,
-                    "intermediate_size": 64,
+                    "mlp_ratio": 2.0,
                     "hidden_dropout_prob": 0.1,
                     "attention_probs_dropout_prob": 0.1,
-                    "frequency_stride": 10,
-                    "time_stride": 10,
-                    "patch_size": 16,
-                    "qkv_bias": True,
-                    "layer_norm_eps": 1e-12,
-                    "initializer_range": 0.02,
+                    "layer_norm_eps": 1e-6,
+                    "shared_stem_depth": 1,
+                    "adapter_depth": 1,
+                    "latent_query_count": 4,
+                    "rdt_steps": 2,
+                    "patch_branches": _small_patch_branches_payload(),
                 },
             },
             "classifier": {
                 "type": "linear",
                 "hidden_dim": 32,
                 "dropout": 0.1,
-                "pooling": "cls",
+                "pooling": "latent_mean",
             },
         },
         "train": {
@@ -133,7 +140,8 @@ def _cv_payload() -> dict:
 def _eval_payload() -> dict:
     payload = _base_payload()
     payload.pop("train")
-    payload["checkpoint_path"] = "checkpoints/respiratory_ast_clip/last.pt"
+    payload.pop("model")
+    payload["checkpoint_path"] = "checkpoints/respiratory_multiscale_rdt_ast/last.pt"
     payload["threshold_optimization"] = {
         "enabled": True,
         "metric": "f1",
@@ -141,16 +149,31 @@ def _eval_payload() -> dict:
     return payload
 
 
-def test_load_training_config_uses_ast_clip_schema(tmp_path: Path) -> None:
+def test_repo_example_configs_load() -> None:
+    training_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_multiscale_rdt.json"
+    )
+    multiclass_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_multiclass.json"
+    )
+    cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
+    eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
+
+    assert training_cfg.model.encoder.type == "multiscale_rdt_ast"
+    assert multiclass_cfg.train.loss.type == "cross_entropy"
+    assert cv_cfg.folds[0].name == "fold_0"
+    assert eval_cfg.threshold_optimization.metric == "f1"
+
+
+def test_load_training_config_uses_multiscale_rdt_schema(tmp_path: Path) -> None:
     config_path = _write_json(tmp_path / "train.json", _base_payload())
 
     cfg = JsonConfigLoader.load_training(config_path)
 
     assert cfg.experiment.mode == "clip"
-    assert cfg.data.preprocessing.ast_fbank.max_length == 64
-    assert cfg.model.encoder.type == "ast"
-    assert cfg.model.encoder.adaptation.mode == "partial"
-    assert cfg.model.classifier.pooling == "cls"
+    assert cfg.data.preprocessing.ast_fbank.max_length == 32
+    assert cfg.model.encoder.type == "multiscale_rdt_ast"
+    assert cfg.model.classifier.pooling == "latent_mean"
     assert cfg.train.loss.type == "bce"
 
 
@@ -177,38 +200,51 @@ def test_legacy_mil_fields_are_rejected(tmp_path: Path) -> None:
         JsonConfigLoader.load_training(config_path)
 
 
-def test_multiclass_training_rejects_binary_loss(tmp_path: Path) -> None:
+def test_invalid_encoder_type_is_rejected(tmp_path: Path) -> None:
     payload = _base_payload()
-    payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
-    payload["train"]["loss"]["type"] = "bce"
-    config_path = _write_json(tmp_path / "invalid_multiclass.json", payload)
+    payload["model"]["encoder"]["type"] = "ast"
+    config_path = _write_json(tmp_path / "bad_type.json", payload)
 
-    with pytest.raises(
-        ValueError,
-        match="Multi-class AST runs require train.loss.type='cross_entropy'",
-    ):
+    with pytest.raises(ValueError, match="multiscale_rdt_ast"):
         JsonConfigLoader.load_training(config_path)
 
 
-def test_pretrained_input_dim_mismatch_is_rejected(tmp_path: Path) -> None:
-    pretrained_dir = tmp_path / "pretrained_ast"
-    ASTConfig(
-        hidden_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        intermediate_size=64,
-        num_mel_bins=64,
-        max_length=96,
-    ).save_pretrained(pretrained_dir)
-
+def test_invalid_pooling_is_rejected(tmp_path: Path) -> None:
     payload = _base_payload()
-    payload["model"]["encoder"]["pretrained_name_or_path"] = str(pretrained_dir)
-    config_path = _write_json(tmp_path / "mismatch.json", payload)
+    payload["model"]["classifier"]["pooling"] = "cls"
+    config_path = _write_json(tmp_path / "bad_pooling.json", payload)
 
-    with pytest.raises(
-        ValueError,
-        match="Pretrained AST encoder input dims do not match",
-    ):
+    with pytest.raises(ValueError, match="latent_mean"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_partial_adaptation_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["adaptation"] = {"mode": "partial", "num_layers": 0}
+    config_path = _write_json(tmp_path / "partial.json", payload)
+
+    with pytest.raises(ValueError, match="not supported"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_hidden_size_must_be_divisible_by_head_count(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["hidden_size"] = 30
+    config_path = _write_json(tmp_path / "bad_hidden.json", payload)
+
+    with pytest.raises(ValueError, match="divisible"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_patch_geometry_must_fit_frontend_dims(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["patch_branches"][0]["patch_size"] = [
+        40,
+        8,
+    ]
+    config_path = _write_json(tmp_path / "bad_patch.json", payload)
+
+    with pytest.raises(ValueError, match="does not fit"):
         JsonConfigLoader.load_training(config_path)
 
 

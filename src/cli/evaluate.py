@@ -17,7 +17,7 @@ from src.evaluation.thresholds import (
     compute_metrics_at_threshold,
     load_checkpoint_threshold_optimization,
 )
-from src.models.model import RespiratoryAstModel
+from src.models.model import MultiScaleRdtAstModel
 from src.utils.checkpoint import load_checkpoint, parse_model_cfg
 from src.utils.config import EvalConfig, JsonConfigLoader
 from src.utils.fs import Fs
@@ -85,7 +85,7 @@ def evaluate_checkpoint(
     if model_cfg_raw is None:
         raise RuntimeError("Checkpoint missing model_cfg")
     model_cfg = parse_model_cfg(model_cfg_raw)
-    model = RespiratoryAstModel(model_cfg)
+    model = MultiScaleRdtAstModel(model_cfg)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
     model.eval()

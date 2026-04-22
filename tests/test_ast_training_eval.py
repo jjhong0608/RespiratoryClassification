@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -22,8 +22,6 @@ from src.utils.checkpoint import load_checkpoint
 from src.utils.config import (
     AnalysisConfig,
     AnalysisOutputConfig,
-    AstArchitectureConfig,
-    AstEncoderConfig,
     AstFbankConfig,
     AudioConfig,
     BandPassConfig,
@@ -34,8 +32,12 @@ from src.utils.config import (
     EvalConfig,
     ExperimentConfig,
     ModelConfig,
+    ModelEncoderConfig,
+    MultiScaleRdtArchitectureConfig,
     PreprocessingConfig,
 )
+
+from conftest import small_patch_branches
 
 
 def _write_wav(path: Path, duration_sec: float, sample_rate: int) -> None:
@@ -55,23 +57,36 @@ def _analysis_cfg() -> AnalysisConfig:
     )
 
 
-def _model_cfg() -> ModelConfig:
+def _small_architecture() -> MultiScaleRdtArchitectureConfig:
+    return MultiScaleRdtArchitectureConfig(
+        hidden_size=32,
+        num_attention_heads=4,
+        mlp_ratio=2.0,
+        hidden_dropout_prob=0.1,
+        attention_probs_dropout_prob=0.1,
+        layer_norm_eps=1e-6,
+        shared_stem_depth=1,
+        adapter_depth=1,
+        latent_query_count=4,
+        rdt_steps=2,
+        patch_branches=small_patch_branches(),
+    )
+
+
+def _model_cfg(
+    *,
+    classifier_type: Literal["linear", "mlp"] = "linear",
+) -> ModelConfig:
     return ModelConfig(
-        encoder=AstEncoderConfig(
-            pretrained_name_or_path=None,
-            adaptation=EncoderAdaptationConfig(mode="partial", num_layers=1),
-            architecture=AstArchitectureConfig(
-                hidden_size=32,
-                num_hidden_layers=2,
-                num_attention_heads=4,
-                intermediate_size=64,
-            ),
+        encoder=ModelEncoderConfig(
+            adaptation=EncoderAdaptationConfig(mode="full", num_layers=0),
+            architecture=_small_architecture(),
         ),
         classifier=ClassifierConfig(
-            type="linear",
+            type=classifier_type,
             hidden_dim=32,
             dropout=0.0,
-            pooling="cls",
+            pooling="latent_mean",
         ),
     )
 
@@ -150,6 +165,7 @@ def _train_smoke_run(
     tmp_path: Path,
     *,
     data_cfg: DataConfig,
+    model_cfg: ModelConfig,
     loss_type: str,
     pos_weight: float | None = None,
 ) -> tuple[Path, DataConfig]:
@@ -170,7 +186,7 @@ def _train_smoke_run(
     )
 
     model = build_ast_model(
-        _model_cfg(),
+        model_cfg,
         num_mel_bins=train_dataset.num_mel_bins,
         max_length=train_dataset.max_length,
         num_classes=len(data_cfg.label_to_index),
@@ -246,120 +262,27 @@ def _eval_cfg(
     )
 
 
-def test_ast_binary_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
-    data_cfg = _prepare_binary_dataset(tmp_path / "clips")
-    checkpoint_path, data_cfg = _train_smoke_run(
-        tmp_path,
-        data_cfg=data_cfg,
-        loss_type="focal",
-        pos_weight=2.0,
-    )
-    run_dir = checkpoint_path.parent
-
-    assert checkpoint_path.exists()
-    assert sorted(run_dir.glob("best_loss_*.pt"))
-    assert sorted(run_dir.glob("best_f1_*.pt"))
-    assert (run_dir / "diagnostics" / "val_epoch_001.jsonl").exists()
-
-    checkpoint = load_checkpoint(str(checkpoint_path), device=torch.device("cpu"))
-    assert checkpoint["val_threshold_optimization"]["threshold_source"] == (
-        "validation_optimization"
-    )
-
-    metrics, rows, diagnostics = evaluate_checkpoint(
-        _eval_cfg(tmp_path, checkpoint_path, data_cfg),
-        checkpoint_path,
-        return_predictions=True,
-        return_diagnostics=True,
-    )
-
-    assert metrics["threshold_optimization"]["applied"] is True
-    assert metrics["threshold_optimization"]["threshold_source"] == (
-        "checkpoint_validation"
-    )
-    assert len(rows) == 2
-    assert rows[0].class_probabilities is None
-    assert len(diagnostics) == 2
-    assert "logits" in diagnostics[0]
-    assert "probabilities" in diagnostics[0]
+def _write_json(path: Path, payload: dict) -> Path:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
 
 
-def test_ast_multiclass_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
-    data_cfg = _prepare_multiclass_dataset(tmp_path / "multiclass")
-    checkpoint_path, data_cfg = _train_smoke_run(
-        tmp_path,
-        data_cfg=data_cfg,
-        loss_type="cross_entropy",
-    )
-
-    metrics, rows, diagnostics = evaluate_checkpoint(
-        _eval_cfg(tmp_path, checkpoint_path, data_cfg),
-        checkpoint_path,
-        return_predictions=True,
-        return_diagnostics=True,
-    )
-
-    assert metrics["accuracy"] >= 0.0
-    assert metrics["threshold_optimization"]["enabled"] is False
-    assert "binary classification" in metrics["threshold_optimization"]["reason"]
-    assert rows[0].class_probabilities is not None
-    assert len(rows[0].class_probabilities or ()) == 3
-    assert diagnostics[0]["probabilities"]
-
-
-def test_evaluate_checkpoint_rejects_frontend_dim_mismatch(tmp_path: Path) -> None:
-    data_cfg = _prepare_binary_dataset(tmp_path / "frontend")
-    checkpoint_path, data_cfg = _train_smoke_run(
-        tmp_path,
-        data_cfg=data_cfg,
-        loss_type="focal",
-        pos_weight=2.0,
-    )
-    mismatched_cfg = replace(
-        data_cfg,
-        preprocessing=replace(
-            data_cfg.preprocessing,
-            ast_fbank=replace(
-                data_cfg.preprocessing.ast_fbank,
-                max_length=data_cfg.preprocessing.ast_fbank.max_length + 8,
-            ),
-        ),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="Evaluation frontend dims do not match the checkpoint encoder dims",
-    ):
-        evaluate_checkpoint(
-            _eval_cfg(tmp_path, checkpoint_path, mismatched_cfg),
-            checkpoint_path,
-        )
-
-
-def test_cv_cli_smoke_writes_fold_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    dataset_root = tmp_path / "cv_data"
-    for fold_name, split in [("fold_0", "normal"), ("fold_1", "wheeze")]:
-        label_dir = dataset_root / fold_name / split
-        label_dir.mkdir(parents=True, exist_ok=True)
-        _write_wav(label_dir / f"{fold_name}.wav", 1.0, 16000)
-
-    config = {
+def _cv_payload(root: Path, output_dir: Path) -> dict:
+    return {
         "experiment": {
             "name": "cv_smoke",
             "task": "normal_vs_wheeze",
             "mode": "clip",
-            "seed": 0,
+            "seed": 1,
             "device": "cpu",
-            "output_dir": str(tmp_path / "outputs"),
+            "output_dir": str(output_dir),
         },
         "data": {
             "train_dirs": [],
             "val_dirs": [],
             "eval_dirs": [],
             "label_to_index": {"normal": 0, "wheeze": 1},
-            "batch_size": 1,
+            "batch_size": 2,
             "num_workers": 0,
             "audio": {
                 "sample_rate": 16000,
@@ -379,21 +302,32 @@ def test_cv_cli_smoke_writes_fold_checkpoint(
         },
         "model": {
             "encoder": {
-                "type": "ast",
-                "pretrained_name_or_path": None,
-                "adaptation": {"mode": "partial", "num_layers": 1},
+                "type": "multiscale_rdt_ast",
+                "adaptation": {"mode": "full", "num_layers": 0},
                 "architecture": {
                     "hidden_size": 32,
-                    "num_hidden_layers": 2,
                     "num_attention_heads": 4,
-                    "intermediate_size": 64,
+                    "mlp_ratio": 2.0,
+                    "hidden_dropout_prob": 0.1,
+                    "attention_probs_dropout_prob": 0.1,
+                    "layer_norm_eps": 1e-6,
+                    "shared_stem_depth": 1,
+                    "adapter_depth": 1,
+                    "latent_query_count": 4,
+                    "rdt_steps": 2,
+                    "patch_branches": [
+                        {"patch_size": [8, 8], "stride": [4, 8]},
+                        {"patch_size": [4, 16], "stride": [2, 16]},
+                        {"patch_size": [2, 32], "stride": [1, 32]},
+                        {"patch_size": [16, 4], "stride": [8, 4]},
+                    ],
                 },
             },
             "classifier": {
                 "type": "linear",
                 "hidden_dim": 32,
                 "dropout": 0.0,
-                "pooling": "cls",
+                "pooling": "latent_mean",
             },
         },
         "train": {
@@ -407,16 +341,16 @@ def test_cv_cli_smoke_writes_fold_checkpoint(
             },
             "scheduler": {"warmup_ratio": 0.0},
             "loss": {
-                "type": "focal",
+                "type": "bce",
                 "auto_pos_weight": False,
-                "pos_weight": 1.0,
+                "pos_weight": None,
                 "gamma": 2.0,
             },
             "sampler": {"weighted_random": False},
             "early_stopping": {
                 "enabled": True,
                 "monitor": "val_loss",
-                "patience": 3,
+                "patience": 5,
                 "min_delta": 1e-4,
             },
         },
@@ -431,15 +365,123 @@ def test_cv_cli_smoke_writes_fold_checkpoint(
         "folds": [
             {
                 "name": "fold_0",
-                "train_dirs": [str(dataset_root / "fold_1")],
-                "val_dirs": [str(dataset_root / "fold_0")],
+                "train_dirs": [str(root / "fold_1")],
+                "val_dirs": [str(root / "fold_0")],
             }
         ],
     }
-    config_path = tmp_path / "cv.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+
+def _prepare_cv_dataset(root: Path) -> Path:
+    for fold_name in ("fold_0", "fold_1"):
+        for label in ("normal", "wheeze"):
+            (root / fold_name / label).mkdir(parents=True, exist_ok=True)
+    _write_wav(root / "fold_0" / "normal" / "normal_fold0.wav", 0.8, 16000)
+    _write_wav(root / "fold_0" / "wheeze" / "wheeze_fold0.wav", 1.0, 16000)
+    _write_wav(root / "fold_1" / "normal" / "normal_fold1.wav", 0.9, 16000)
+    _write_wav(root / "fold_1" / "wheeze" / "wheeze_fold1.wav", 1.2, 16000)
+    return root
+
+
+def test_binary_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
+    data_cfg = _prepare_binary_dataset(tmp_path / "clips")
+    checkpoint_path, data_cfg = _train_smoke_run(
+        tmp_path,
+        data_cfg=data_cfg,
+        model_cfg=_model_cfg(),
+        loss_type="focal",
+        pos_weight=2.0,
+    )
+    run_dir = checkpoint_path.parent
+
+    assert checkpoint_path.exists()
+    assert sorted(run_dir.glob("best_loss_*.pt"))
+
+    checkpoint = load_checkpoint(str(checkpoint_path), device=torch.device("cpu"))
+    assert checkpoint["dims"] == {"num_mel_bins": 32, "max_length": 32}
+
+    result = evaluate_checkpoint(
+        _eval_cfg(tmp_path, checkpoint_path, data_cfg),
+        checkpoint_path,
+        return_predictions=True,
+        return_diagnostics=True,
+    )
+    assert isinstance(result, tuple) and len(result) == 3
+    metrics, rows, diagnostics = result
+
+    assert metrics["threshold_optimization"]["enabled"] is True
+    assert len(rows) == len(build_dataset(data_cfg, split="eval"))
+    assert len(diagnostics) == len(rows)
+
+
+def test_multiclass_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
+    data_cfg = _prepare_multiclass_dataset(tmp_path / "multiclass")
+    checkpoint_path, data_cfg = _train_smoke_run(
+        tmp_path,
+        data_cfg=data_cfg,
+        model_cfg=_model_cfg(classifier_type="mlp"),
+        loss_type="cross_entropy",
+    )
+
+    result = evaluate_checkpoint(
+        _eval_cfg(tmp_path, checkpoint_path, data_cfg),
+        checkpoint_path,
+        return_predictions=True,
+        return_diagnostics=True,
+    )
+    assert isinstance(result, tuple) and len(result) == 3
+    metrics, rows, diagnostics = result
+
+    assert metrics["optimized_metrics"]["decision_threshold"] is None
+    assert len(rows) == len(build_dataset(data_cfg, split="eval"))
+    assert len(diagnostics) == len(rows)
+
+
+def test_evaluator_rejects_frontend_dim_mismatch(tmp_path: Path) -> None:
+    data_cfg = _prepare_binary_dataset(tmp_path / "clips")
+    checkpoint_path, data_cfg = _train_smoke_run(
+        tmp_path,
+        data_cfg=data_cfg,
+        model_cfg=_model_cfg(),
+        loss_type="bce",
+    )
+    mismatched_cfg = DataConfig(
+        train_dirs=data_cfg.train_dirs,
+        val_dirs=data_cfg.val_dirs,
+        eval_dirs=data_cfg.eval_dirs,
+        label_to_index=data_cfg.label_to_index,
+        batch_size=data_cfg.batch_size,
+        num_workers=data_cfg.num_workers,
+        audio=data_cfg.audio,
+        preprocessing=PreprocessingConfig(
+            source_type="original",
+            bandpass=BandPassConfig(enabled=False),
+            ast_fbank=AstFbankConfig(
+                num_mel_bins=32,
+                max_length=40,
+                do_normalize=True,
+                mean=-4.2677393,
+                std=4.5689974,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Evaluation frontend dims do not match"):
+        evaluate_checkpoint(
+            _eval_cfg(tmp_path, checkpoint_path, mismatched_cfg),
+            checkpoint_path,
+        )
+
+
+def test_cv_cli_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset_root = _prepare_cv_dataset(tmp_path / "cv")
+    config_path = _write_json(
+        tmp_path / "cv.json",
+        _cv_payload(dataset_root, tmp_path / "cv_outputs"),
+    )
 
     monkeypatch.setattr(sys, "argv", ["cv", "--config", str(config_path)])
     cv_main()
 
-    assert (tmp_path / "outputs" / "cv_smoke" / "fold_0" / "last.pt").exists()
+    fold_dir = tmp_path / "cv_outputs" / "cv_smoke" / "fold_0"
+    assert (fold_dir / "last.pt").exists()

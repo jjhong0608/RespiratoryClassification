@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import soundfile as sf
@@ -21,7 +22,11 @@ def _write_wav(path: Path, duration_sec: float, sample_rate: int) -> None:
     sf.write(path, audio.astype(np.float32), sample_rate)
 
 
-def _data_config(roots: list[str], *, source_type: str = "original") -> DataConfig:
+def _data_config(
+    roots: list[str],
+    *,
+    source_type: Literal["original", "harmonic", "percussive"] = "original",
+) -> DataConfig:
     return DataConfig(
         train_dirs=roots,
         val_dirs=[],

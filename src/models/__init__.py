@@ -1,1 +1,1 @@
-"""Model components for AST-based respiratory sound classification."""
+"""Model components for multiscale RDT AST respiratory sound classification."""
