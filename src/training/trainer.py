@@ -21,7 +21,11 @@ from src.evaluation.thresholds import (
 from src.models.model import AstModelOutput
 from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
-from src.utils.config import AnalysisConfig, EarlyStoppingConfig
+from src.utils.config import (
+    AnalysisConfig,
+    BranchAuxiliaryLossConfig,
+    EarlyStoppingConfig,
+)
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
 
@@ -41,6 +45,9 @@ class TrainerConfig:
     loss_type: str = "bce"
     gamma: float = 2.0
     pos_weight: float | None = None
+    branch_auxiliary: BranchAuxiliaryLossConfig = field(
+        default_factory=BranchAuxiliaryLossConfig
+    )
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
 
@@ -137,7 +144,7 @@ class Trainer(LoggingMixin):
             return nn.CrossEntropyLoss().to(device)
         raise ValueError(f"Unknown loss type: {self.cfg.loss_type}")
 
-    def _compute_loss(
+    def _compute_main_loss(
         self,
         criterion: nn.Module,
         logits: Tensor,
@@ -157,6 +164,65 @@ class Trainer(LoggingMixin):
         probabilities = torch.softmax(logits.detach(), dim=-1)
         predictions = probabilities.argmax(dim=-1)
         return probabilities, predictions
+
+    def _compute_branch_auxiliary_loss(
+        self,
+        criterion: nn.Module,
+        branch_logits: Tensor,
+        labels: Tensor,
+    ) -> Tensor:
+        if self.cfg.branch_auxiliary.aggregation != "mean":
+            raise ValueError(
+                "Unsupported branch auxiliary aggregation: "
+                f"{self.cfg.branch_auxiliary.aggregation}"
+            )
+        if self.cfg.num_classes == 2:
+            if branch_logits.ndim != 2:
+                raise ValueError(
+                    "Binary branch logits must have shape (B, num_branches), "
+                    f"got {tuple(branch_logits.shape)}"
+                )
+            expanded_labels = labels.unsqueeze(1).expand_as(branch_logits)
+            return criterion(
+                branch_logits.reshape(-1),
+                expanded_labels.reshape(-1).to(
+                    device=branch_logits.device,
+                    dtype=branch_logits.dtype,
+                ),
+            )
+        if branch_logits.ndim != 3:
+            raise ValueError(
+                "Multiclass branch logits must have shape (B, num_branches, C), "
+                f"got {tuple(branch_logits.shape)}"
+            )
+        batch_size, num_branches, num_classes = branch_logits.shape
+        flat_logits = branch_logits.reshape(batch_size * num_branches, num_classes)
+        flat_labels = labels.unsqueeze(1).expand(batch_size, num_branches).reshape(-1)
+        return criterion(
+            flat_logits,
+            flat_labels.to(device=branch_logits.device, dtype=torch.long),
+        )
+
+    def _compute_total_loss(
+        self,
+        criterion: nn.Module,
+        output: AstModelOutput,
+        labels: Tensor,
+    ) -> tuple[Tensor, Tensor | None]:
+        final_loss = self._compute_main_loss(criterion, output.logits, labels)
+        if not self.cfg.branch_auxiliary.enabled:
+            return final_loss, None
+        if output.branch_logits is None:
+            raise ValueError(
+                "branch auxiliary loss enabled but model did not return branch_logits"
+            )
+        auxiliary_loss = self._compute_branch_auxiliary_loss(
+            criterion,
+            output.branch_logits,
+            labels,
+        )
+        total_loss = final_loss + (self.cfg.branch_auxiliary.weight * auxiliary_loss)
+        return total_loss, auxiliary_loss
 
     def _epoch(
         self,
@@ -182,7 +248,7 @@ class Trainer(LoggingMixin):
                 raise TypeError("AST model must return AstModelOutput")
 
             logits = output.logits
-            loss = self._compute_loss(criterion, logits, batch.labels)
+            loss, _ = self._compute_total_loss(criterion, output, batch.labels)
 
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)

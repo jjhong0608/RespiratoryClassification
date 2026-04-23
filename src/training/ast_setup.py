@@ -39,9 +39,12 @@ class ModelArchitectureSummary:
     hidden_size: int
     num_attention_heads: int
     branch_token_counts: tuple[int, ...]
-    total_token_count: int
-    latent_query_count: int
+    branch_time_lengths: tuple[int, ...]
+    total_patch_token_count: int
+    total_temporal_length: int
+    rdt_enabled: bool
     rdt_steps: int
+    rdt_top_tokens_per_branch: int
 
 
 def build_ast_model(
@@ -73,9 +76,8 @@ def build_ast_model(
                 layer_norm_eps=cfg.encoder.architecture.layer_norm_eps,
                 shared_stem_depth=cfg.encoder.architecture.shared_stem_depth,
                 adapter_depth=cfg.encoder.architecture.adapter_depth,
-                latent_query_count=cfg.encoder.architecture.latent_query_count,
-                rdt_steps=cfg.encoder.architecture.rdt_steps,
                 patch_branches=cfg.encoder.architecture.patch_branches,
+                rdt=cfg.encoder.architecture.rdt,
             ),
         ),
         classifier=ClassifierConfig(
@@ -103,9 +105,12 @@ def summarize_model_architecture(
         hidden_size=architecture.hidden_size,
         num_attention_heads=architecture.num_attention_heads,
         branch_token_counts=model.encoder.branch_token_counts,
-        total_token_count=model.encoder.total_token_count,
-        latent_query_count=architecture.latent_query_count,
-        rdt_steps=architecture.rdt_steps,
+        branch_time_lengths=model.encoder.branch_time_lengths,
+        total_patch_token_count=model.encoder.total_token_count,
+        total_temporal_length=model.encoder.total_temporal_length,
+        rdt_enabled=architecture.rdt.enabled,
+        rdt_steps=architecture.rdt.steps,
+        rdt_top_tokens_per_branch=architecture.rdt.top_tokens_per_branch,
     )
 
 
@@ -120,7 +125,7 @@ def apply_encoder_adaptation(
         for parameter in model.parameters():
             parameter.requires_grad = True
     elif cfg.mode == "frozen":
-        for module in (model.latent_pooler, model.rdt_block, model.classifier):
+        for module in model.head_side_modules():
             for parameter in module.parameters():
                 parameter.requires_grad = True
     else:
@@ -131,11 +136,14 @@ def apply_encoder_adaptation(
 
     trainable_parameters = sum(
         parameter.numel()
-        for parameter in model.encoder.parameters()
+        for module in model.encoder_side_modules()
+        for parameter in module.parameters()
         if parameter.requires_grad
     )
     total_parameters = sum(
-        parameter.numel() for parameter in model.encoder.parameters()
+        parameter.numel()
+        for module in model.encoder_side_modules()
+        for parameter in module.parameters()
     )
     return EncoderAdaptationSummary(
         mode=cfg.mode,
@@ -153,12 +161,14 @@ def build_grouped_optimizer(
     weight_decay: float,
 ) -> tuple[AdamW, OptimizerGroupSummary]:
     encoder_params = [
-        parameter for parameter in model.encoder.parameters() if parameter.requires_grad
+        parameter
+        for module in model.encoder_side_modules()
+        for parameter in module.parameters()
+        if parameter.requires_grad
     ]
-    head_modules = (model.latent_pooler, model.rdt_block, model.classifier)
     head_params = [
         parameter
-        for module in head_modules
+        for module in model.head_side_modules()
         for parameter in module.parameters()
         if parameter.requires_grad
     ]

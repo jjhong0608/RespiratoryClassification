@@ -53,16 +53,21 @@
         "num_layers": 0
       },
       "architecture": {
-        "hidden_size": 384,
-        "num_attention_heads": 6,
-        "mlp_ratio": 4.0,
+        "hidden_size": 192,
+        "num_attention_heads": 4,
+        "mlp_ratio": 2.0,
         "hidden_dropout_prob": 0.1,
         "attention_probs_dropout_prob": 0.1,
         "layer_norm_eps": 1e-6,
         "shared_stem_depth": 2,
         "adapter_depth": 1,
-        "latent_query_count": 8,
-        "rdt_steps": 3,
+        "rdt": {
+          "enabled": true,
+          "steps": 3,
+          "top_tokens_per_branch": 2,
+          "gated_residual": true,
+          "layerscale_init": 0.01
+        },
         "patch_branches": [
           {
             "patch_size": [16, 16],
@@ -106,7 +111,12 @@
       "type": "cross_entropy",
       "auto_pos_weight": false,
       "pos_weight": null,
-      "gamma": 2.0
+      "gamma": 2.0,
+      "branch_auxiliary": {
+        "enabled": true,
+        "weight": 0.3,
+        "aggregation": "mean"
+      }
     },
     "sampler": {
       "weighted_random": false

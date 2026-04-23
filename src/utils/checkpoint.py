@@ -12,6 +12,7 @@ from src.models.model import (
     MultiScaleRdtAstModelConfig,
     MultiScaleRdtEncoderConfig,
     PatchBranchConfig,
+    RdtConfig,
 )
 
 
@@ -80,6 +81,21 @@ def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
         raise TypeError("model_cfg.encoder.architecture must be a dict")
 
     architecture_kwargs = dict(architecture_raw)
+    if "latent_query_count" in architecture_kwargs:
+        raise ValueError(
+            "latent_query_count is deprecated in the event-MIL architecture. "
+            "Use model.encoder.architecture.rdt instead."
+        )
+    if "summary_tokens_per_scale" in architecture_kwargs:
+        raise ValueError(
+            "summary_tokens_per_scale is deprecated in the event-MIL architecture. "
+            "Use model.encoder.architecture.rdt.top_tokens_per_branch instead."
+        )
+    if "rdt_steps" in architecture_kwargs:
+        raise ValueError(
+            "Flat rdt_steps is deprecated in the event-MIL architecture. "
+            "Use model.encoder.architecture.rdt.steps instead."
+        )
     patch_branches_raw = architecture_kwargs.get("patch_branches")
     if patch_branches_raw is not None:
         if not isinstance(patch_branches_raw, Sequence) or isinstance(
@@ -91,6 +107,7 @@ def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
         architecture_kwargs["patch_branches"] = tuple(
             _parse_patch_branch(branch_raw) for branch_raw in patch_branches_raw
         )
+    architecture_kwargs["rdt"] = RdtConfig(**dict(architecture_kwargs.get("rdt", {})))
 
     return MultiScaleRdtAstModelConfig(
         encoder=MultiScaleRdtEncoderConfig(

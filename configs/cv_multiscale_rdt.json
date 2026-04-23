@@ -1,10 +1,10 @@
 {
   "experiment": {
-    "name": "respiratory_multiscale_rdt_ast_cv",
-    "task": "normal_vs_wheeze",
+    "name": "normal:abnormal_respiratory_multiscale_rdt_ast_cv",
+    "task": "normal_vs_abnormal",
     "mode": "clip",
     "seed": 42,
-    "device": "cpu",
+    "device": "mps",
     "output_dir": "checkpoints"
   },
   "data": {
@@ -13,7 +13,7 @@
     "eval_dirs": [],
     "label_to_index": {
       "normal": 0,
-      "wheeze": 1
+      "abnormal": 1
     },
     "batch_size": 4,
     "num_workers": 0,
@@ -46,16 +46,21 @@
         "num_layers": 0
       },
       "architecture": {
-        "hidden_size": 384,
-        "num_attention_heads": 6,
-        "mlp_ratio": 4.0,
+        "hidden_size": 192,
+        "num_attention_heads": 4,
+        "mlp_ratio": 2.0,
         "hidden_dropout_prob": 0.1,
         "attention_probs_dropout_prob": 0.1,
         "layer_norm_eps": 1e-6,
         "shared_stem_depth": 2,
         "adapter_depth": 1,
-        "latent_query_count": 8,
-        "rdt_steps": 3,
+        "rdt": {
+          "enabled": true,
+          "steps": 3,
+          "top_tokens_per_branch": 2,
+          "gated_residual": true,
+          "layerscale_init": 0.01
+        },
         "patch_branches": [
           {
             "patch_size": [16, 16],
@@ -88,8 +93,8 @@
     "top_k": 3,
     "max_grad_norm": 1.0,
     "optimizer": {
-      "encoder_lr": 2e-5,
-      "head_lr": 1e-4,
+      "encoder_lr": 1e-3,
+      "head_lr": 1e-3,
       "weight_decay": 0.01
     },
     "scheduler": {
@@ -99,7 +104,12 @@
       "type": "focal",
       "auto_pos_weight": true,
       "pos_weight": null,
-      "gamma": 2.0
+      "gamma": 2.0,
+      "branch_auxiliary": {
+        "enabled": true,
+        "weight": 0.3,
+        "aggregation": "mean"
+      }
     },
     "sampler": {
       "weighted_random": false
@@ -107,8 +117,8 @@
     "early_stopping": {
       "enabled": true,
       "monitor": "val_loss",
-      "patience": 15,
-      "min_delta": 0.0001
+      "patience": 30,
+      "min_delta": 0.00001
     }
   },
   "analysis": {
@@ -123,61 +133,61 @@
     {
       "name": "fold_0",
       "train_dirs": [
-        "datasets/clean_wheeze/folds/fold_1/",
-        "datasets/clean_wheeze/folds/fold_2/",
-        "datasets/clean_wheeze/folds/fold_3/",
-        "datasets/clean_wheeze/folds/fold_4/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_1/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_2/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_3/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/clean_wheeze/folds/fold_0/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_0/"
       ]
     },
     {
       "name": "fold_1",
       "train_dirs": [
-        "datasets/clean_wheeze/folds/fold_0/",
-        "datasets/clean_wheeze/folds/fold_2/",
-        "datasets/clean_wheeze/folds/fold_3/",
-        "datasets/clean_wheeze/folds/fold_4/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_0/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_2/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_3/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/clean_wheeze/folds/fold_1/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_1/"
       ]
     },
     {
       "name": "fold_2",
       "train_dirs": [
-        "datasets/clean_wheeze/folds/fold_0/",
-        "datasets/clean_wheeze/folds/fold_1/",
-        "datasets/clean_wheeze/folds/fold_3/",
-        "datasets/clean_wheeze/folds/fold_4/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_0/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_1/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_3/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/clean_wheeze/folds/fold_2/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_2/"
       ]
     },
     {
       "name": "fold_3",
       "train_dirs": [
-        "datasets/clean_wheeze/folds/fold_0/",
-        "datasets/clean_wheeze/folds/fold_1/",
-        "datasets/clean_wheeze/folds/fold_2/",
-        "datasets/clean_wheeze/folds/fold_4/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_0/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_1/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_2/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_4/"
       ],
       "val_dirs": [
-        "datasets/clean_wheeze/folds/fold_3/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_3/"
       ]
     },
     {
       "name": "fold_4",
       "train_dirs": [
-        "datasets/clean_wheeze/folds/fold_0/",
-        "datasets/clean_wheeze/folds/fold_1/",
-        "datasets/clean_wheeze/folds/fold_2/",
-        "datasets/clean_wheeze/folds/fold_3/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_0/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_1/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_2/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_3/"
       ],
       "val_dirs": [
-        "datasets/clean_wheeze/folds/fold_4/"
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/fold_4/"
       ]
     }
   ]

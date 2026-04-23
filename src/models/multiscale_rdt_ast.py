@@ -39,20 +39,28 @@ class EncoderAdaptationConfig:
 
 
 @dataclass(frozen=True)
+class RdtConfig:
+    enabled: bool = False
+    steps: int = 3
+    top_tokens_per_branch: int = 2
+    gated_residual: bool = True
+    layerscale_init: float = 0.01
+
+
+@dataclass(frozen=True)
 class MultiScaleRdtArchitectureConfig:
-    hidden_size: int = 384
-    num_attention_heads: int = 6
-    mlp_ratio: float = 4.0
+    hidden_size: int = 192
+    num_attention_heads: int = 4
+    mlp_ratio: float = 2.0
     hidden_dropout_prob: float = 0.1
     attention_probs_dropout_prob: float = 0.1
     layer_norm_eps: float = 1e-6
     shared_stem_depth: int = 2
     adapter_depth: int = 1
-    latent_query_count: int = 8
-    rdt_steps: int = 3
     patch_branches: tuple[PatchBranchConfig, ...] = field(
         default_factory=default_patch_branches
     )
+    rdt: RdtConfig = field(default_factory=RdtConfig)
 
 
 @dataclass(frozen=True)
@@ -84,6 +92,22 @@ class MultiScaleRdtAstModelConfig:
 class AstModelOutput:
     logits: Tensor
     pooled_embedding: Tensor
+    branch_logits: Tensor | None = None
+    branch_attention_weights: tuple[Tensor, ...] | None = None
+    selected_evidence_tokens: Tensor | None = None
+
+
+@dataclass(frozen=True)
+class MultiScaleEncoderOutput:
+    branch_event_tokens: tuple[Tensor, ...]
+    context_tokens: Tensor
+
+
+@dataclass(frozen=True)
+class BranchMilOutput:
+    logits: Tensor
+    attention_weights: Tensor
+    embedding: Tensor
 
 
 def compute_token_grid(
@@ -108,6 +132,27 @@ def compute_token_count(
         patch_branch=patch_branch,
     )
     return n_t * n_f
+
+
+def select_top_tokens(tokens: Tensor, scores: Tensor, *, top_k: int) -> Tensor:
+    if tokens.ndim != 3:
+        raise ValueError(f"tokens must have shape (B, T, D), got {tuple(tokens.shape)}")
+    if scores.ndim != 2:
+        raise ValueError(f"scores must have shape (B, T), got {tuple(scores.shape)}")
+    if tokens.shape[:2] != scores.shape:
+        raise ValueError(
+            "scores must align with tokens on batch/time dimensions; "
+            f"got tokens={tuple(tokens.shape)} scores={tuple(scores.shape)}"
+        )
+    if top_k <= 0:
+        raise ValueError("top_k must be greater than zero")
+    if top_k > int(tokens.shape[1]):
+        raise ValueError(f"top_k={top_k} exceeds token length {int(tokens.shape[1])}")
+    top_indices = scores.topk(top_k, dim=1).indices
+    return tokens.gather(
+        1,
+        top_indices.unsqueeze(-1).expand(-1, -1, tokens.shape[-1]),
+    )
 
 
 class TransformerBlock(nn.Module):
@@ -169,7 +214,7 @@ class FeedForwardBlock(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        return x + self.mlp(self.norm(x))
+        return self.mlp(self.norm(x))
 
 
 class PatchTokenizer(nn.Module):
@@ -189,21 +234,77 @@ class PatchTokenizer(nn.Module):
         return x
 
 
+class FrequencyAttentionPooler(nn.Module):
+    def __init__(self, *, hidden_size: int, layer_norm_eps: float) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        self.score = nn.Linear(hidden_size, 1)
+
+    def forward(self, branch_grid: Tensor) -> Tensor:
+        norm_grid = self.norm(branch_grid)
+        attention_logits = self.score(norm_grid).squeeze(-1)
+        attention_weights = torch.softmax(attention_logits, dim=2)
+        return torch.sum(branch_grid * attention_weights.unsqueeze(-1), dim=2)
+
+
+class BranchMilHead(nn.Module):
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        output_dim: int,
+        layer_norm_eps: float,
+    ) -> None:
+        super().__init__()
+        self.token_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        self.attention = nn.Linear(hidden_size, 1)
+        self.embedding_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        self.logit_proj = nn.Linear(hidden_size, output_dim)
+
+    def forward(self, event_tokens: Tensor) -> BranchMilOutput:
+        normalized_tokens = self.token_norm(event_tokens)
+        attention_logits = self.attention(normalized_tokens).squeeze(-1)
+        attention_weights = torch.softmax(attention_logits, dim=1)
+        embedding = torch.sum(
+            event_tokens * attention_weights.unsqueeze(-1),
+            dim=1,
+        )
+        logits = self.logit_proj(self.embedding_norm(embedding))
+        if logits.ndim == 2 and logits.shape[1] == 1:
+            logits = logits.squeeze(1)
+        return BranchMilOutput(
+            logits=logits,
+            attention_weights=attention_weights,
+            embedding=embedding,
+        )
+
+
 class MultiScalePatchStemAdapterEncoder(nn.Module):
     def __init__(self, cfg: MultiScaleRdtEncoderConfig) -> None:
         super().__init__()
         self.cfg = cfg
         architecture = cfg.architecture
         hidden_size = architecture.hidden_size
+        self.branch_token_grids = tuple(
+            compute_token_grid(feature_dims=cfg.feature_dims, patch_branch=branch)
+            for branch in architecture.patch_branches
+        )
+        self.branch_time_lengths = tuple(
+            time_steps for time_steps, _ in self.branch_token_grids
+        )
+        self.branch_frequency_lengths = tuple(
+            freq_steps for _, freq_steps in self.branch_token_grids
+        )
+        self.branch_token_counts = tuple(
+            time_steps * freq_steps
+            for time_steps, freq_steps in self.branch_token_grids
+        )
+        self.total_token_count = sum(self.branch_token_counts)
+        self.total_temporal_length = sum(self.branch_time_lengths)
         self.patch_tokenizers = nn.ModuleList(
             PatchTokenizer(hidden_size=hidden_size, branch=branch)
             for branch in architecture.patch_branches
         )
-        self.branch_token_counts = tuple(
-            compute_token_count(feature_dims=cfg.feature_dims, patch_branch=branch)
-            for branch in architecture.patch_branches
-        )
-        self.total_token_count = sum(self.branch_token_counts)
         self.position_embeddings = nn.ParameterList(
             nn.Parameter(torch.empty(1, token_count, hidden_size))
             for token_count in self.branch_token_counts
@@ -236,6 +337,13 @@ class MultiScalePatchStemAdapterEncoder(nn.Module):
             )
             for _ in architecture.patch_branches
         )
+        self.frequency_poolers = nn.ModuleList(
+            FrequencyAttentionPooler(
+                hidden_size=hidden_size,
+                layer_norm_eps=architecture.layer_norm_eps,
+            )
+            for _ in architecture.patch_branches
+        )
         self.output_norm = nn.LayerNorm(hidden_size, eps=architecture.layer_norm_eps)
         self._reset_parameters()
 
@@ -244,8 +352,9 @@ class MultiScalePatchStemAdapterEncoder(nn.Module):
             nn.init.normal_(position_embedding, std=PATCH_INIT_STD)
         nn.init.normal_(self.scale_embeddings, std=PATCH_INIT_STD)
 
-    def forward(self, x: Tensor) -> Tensor:
-        branch_outputs: list[Tensor] = []
+    def forward(self, x: Tensor) -> MultiScaleEncoderOutput:
+        branch_event_outputs: list[Tensor] = []
+        batch_size = x.shape[0]
         for branch_index, tokenizer in enumerate(self.patch_tokenizers):
             branch_tokens = tokenizer(x)
             branch_tokens = (
@@ -258,52 +367,32 @@ class MultiScalePatchStemAdapterEncoder(nn.Module):
             branch_adapter = cast(nn.ModuleList, self.adapters[branch_index])
             for block in branch_adapter:
                 branch_tokens = block(branch_tokens)
-            branch_outputs.append(branch_tokens)
-        h_all = torch.cat(branch_outputs, dim=1)
-        return self.output_norm(h_all)
 
+            time_steps, freq_steps = self.branch_token_grids[branch_index]
+            branch_grid = branch_tokens.reshape(
+                batch_size,
+                time_steps,
+                freq_steps,
+                branch_tokens.shape[-1],
+            )
+            frequency_pooler = cast(
+                FrequencyAttentionPooler,
+                self.frequency_poolers[branch_index],
+            )
+            branch_event_tokens = frequency_pooler(branch_grid)
+            branch_event_outputs.append(self.output_norm(branch_event_tokens))
 
-class LatentQueryPooler(nn.Module):
-    def __init__(self, cfg: MultiScaleRdtArchitectureConfig) -> None:
-        super().__init__()
-        self.latent_query_count = cfg.latent_query_count
-        self.latent_queries = nn.Parameter(
-            torch.empty(1, cfg.latent_query_count, cfg.hidden_size)
+        context_tokens = torch.cat(branch_event_outputs, dim=1)
+        return MultiScaleEncoderOutput(
+            branch_event_tokens=tuple(branch_event_outputs),
+            context_tokens=context_tokens,
         )
-        nn.init.normal_(self.latent_queries, std=PATCH_INIT_STD)
-        self.query_norm = nn.LayerNorm(cfg.hidden_size, eps=cfg.layer_norm_eps)
-        self.context_norm = nn.LayerNorm(cfg.hidden_size, eps=cfg.layer_norm_eps)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=cfg.hidden_size,
-            num_heads=cfg.num_attention_heads,
-            dropout=cfg.attention_probs_dropout_prob,
-            batch_first=True,
-        )
-        self.dropout = nn.Dropout(cfg.hidden_dropout_prob)
-        self.feed_forward = FeedForwardBlock(
-            hidden_size=cfg.hidden_size,
-            mlp_ratio=cfg.mlp_ratio,
-            dropout=cfg.hidden_dropout_prob,
-            layer_norm_eps=cfg.layer_norm_eps,
-        )
-
-    def forward(self, h_all: Tensor) -> Tensor:
-        queries = self.latent_queries.expand(h_all.shape[0], -1, -1)
-        norm_queries = self.query_norm(queries)
-        norm_context = self.context_norm(h_all)
-        pooled, _ = self.cross_attn(
-            norm_queries,
-            norm_context,
-            norm_context,
-            need_weights=False,
-        )
-        pooled = queries + self.dropout(pooled)
-        return self.feed_forward(pooled)
 
 
 class RdtRefinementBlock(nn.Module):
     def __init__(self, cfg: MultiScaleRdtArchitectureConfig) -> None:
         super().__init__()
+        self.gated_residual = cfg.rdt.gated_residual
         self.latent_norm = nn.LayerNorm(cfg.hidden_size, eps=cfg.layer_norm_eps)
         self.latent_self_attn = nn.MultiheadAttention(
             embed_dim=cfg.hidden_size,
@@ -326,17 +415,44 @@ class RdtRefinementBlock(nn.Module):
             dropout=cfg.hidden_dropout_prob,
             layer_norm_eps=cfg.layer_norm_eps,
         )
+        self.self_attn_scale: nn.Parameter | None
+        self.cross_attn_scale: nn.Parameter | None
+        self.ffn_scale: nn.Parameter | None
+        if self.gated_residual:
+            init = float(cfg.rdt.layerscale_init)
+            self.self_attn_scale = nn.Parameter(torch.full((cfg.hidden_size,), init))
+            self.cross_attn_scale = nn.Parameter(torch.full((cfg.hidden_size,), init))
+            self.ffn_scale = nn.Parameter(torch.full((cfg.hidden_size,), init))
+        else:
+            self.self_attn_scale = None
+            self.cross_attn_scale = None
+            self.ffn_scale = None
 
-    def forward(self, latent_summaries: Tensor, evidence_memory: Tensor) -> Tensor:
-        norm_latent = self.latent_norm(latent_summaries)
+    def _apply_residual(
+        self,
+        x: Tensor,
+        delta: Tensor,
+        scale: nn.Parameter | None,
+    ) -> Tensor:
+        if scale is None:
+            return x + delta
+        return x + scale.view(1, 1, -1) * delta
+
+    def forward(self, latent_states: Tensor, evidence_memory: Tensor) -> Tensor:
+        norm_latent = self.latent_norm(latent_states)
         self_attended, _ = self.latent_self_attn(
             norm_latent,
             norm_latent,
             norm_latent,
             need_weights=False,
         )
-        latent_summaries = latent_summaries + self.dropout(self_attended)
-        norm_queries = self.query_norm(latent_summaries)
+        latent_states = self._apply_residual(
+            latent_states,
+            self.dropout(self_attended),
+            self.self_attn_scale,
+        )
+
+        norm_queries = self.query_norm(latent_states)
         norm_memory = self.context_norm(evidence_memory)
         cross_attended, _ = self.cross_attn(
             norm_queries,
@@ -344,8 +460,14 @@ class RdtRefinementBlock(nn.Module):
             norm_memory,
             need_weights=False,
         )
-        latent_summaries = latent_summaries + self.dropout(cross_attended)
-        return self.feed_forward(latent_summaries)
+        latent_states = self._apply_residual(
+            latent_states,
+            self.dropout(cross_attended),
+            self.cross_attn_scale,
+        )
+
+        ff_delta = self.feed_forward(latent_states)
+        return self._apply_residual(latent_states, ff_delta, self.ffn_scale)
 
 
 class MultiScaleRdtAstModel(nn.Module):
@@ -354,9 +476,26 @@ class MultiScaleRdtAstModel(nn.Module):
         self.cfg = cfg
         architecture = cfg.encoder.architecture
         self.encoder = MultiScalePatchStemAdapterEncoder(cfg.encoder)
-        self.latent_pooler = LatentQueryPooler(architecture)
-        self.rdt_block = RdtRefinementBlock(architecture)
         output_dim = 1 if cfg.num_classes == 2 else cfg.num_classes
+        self.branch_mil_heads = nn.ModuleList(
+            BranchMilHead(
+                hidden_size=architecture.hidden_size,
+                output_dim=output_dim,
+                layer_norm_eps=architecture.layer_norm_eps,
+            )
+            for _ in architecture.patch_branches
+        )
+        self.rdt_block = (
+            RdtRefinementBlock(architecture) if architecture.rdt.enabled else None
+        )
+        fusion_input_dim = (2 * architecture.hidden_size) + (
+            len(architecture.patch_branches) * output_dim
+        )
+        self.fusion_projector = nn.Sequential(
+            nn.Linear(fusion_input_dim, architecture.hidden_size),
+            nn.GELU(),
+            nn.Dropout(cfg.classifier.dropout),
+        )
         classifier_dims = ClassifierDims(
             in_dim=architecture.hidden_size,
             num_classes=output_dim,
@@ -369,6 +508,23 @@ class MultiScaleRdtAstModel(nn.Module):
             self.classifier = MlpClassifier(classifier_dims)
         else:
             raise ValueError(f"Unsupported classifier type: {cfg.classifier.type}")
+
+    def encoder_side_modules(self) -> tuple[nn.Module, ...]:
+        return (self.encoder, self.branch_mil_heads)
+
+    def head_side_modules(self) -> tuple[nn.Module, ...]:
+        modules: list[nn.Module] = [self.fusion_projector, self.classifier]
+        if self.rdt_block is not None:
+            modules.insert(0, self.rdt_block)
+        return tuple(modules)
+
+    def _stack_branch_logits(
+        self,
+        branch_logits: list[Tensor],
+    ) -> Tensor:
+        if self.cfg.num_classes == 2:
+            return torch.stack(branch_logits, dim=1)
+        return torch.stack(branch_logits, dim=1)
 
     def forward(self, input_values: Tensor) -> AstModelOutput:
         if input_values.ndim != 3:
@@ -386,13 +542,58 @@ class MultiScaleRdtAstModel(nn.Module):
                 "input_values feature dims do not match model feature dims. "
                 f"expected {expected_shape}, got {actual_shape}"
             )
-        x = input_values.unsqueeze(1)
-        h_all = self.encoder(x)
-        latent_summaries = self.latent_pooler(h_all)
-        for _ in range(self.cfg.encoder.architecture.rdt_steps):
-            latent_summaries = self.rdt_block(latent_summaries, h_all)
-        pooled_embedding = latent_summaries.mean(dim=1)
+
+        encoder_output = self.encoder(input_values.unsqueeze(1))
+        branch_logits: list[Tensor] = []
+        branch_embeddings: list[Tensor] = []
+        branch_attention_weights: list[Tensor] = []
+        selected_tokens: list[Tensor] = []
+        top_k = self.cfg.encoder.architecture.rdt.top_tokens_per_branch
+        for branch_tokens, branch_head in zip(
+            encoder_output.branch_event_tokens,
+            self.branch_mil_heads,
+            strict=True,
+        ):
+            mil_output = cast(BranchMilOutput, branch_head(branch_tokens))
+            branch_logits.append(mil_output.logits)
+            branch_embeddings.append(mil_output.embedding)
+            branch_attention_weights.append(mil_output.attention_weights)
+            selected_tokens.append(
+                select_top_tokens(
+                    branch_tokens,
+                    mil_output.attention_weights,
+                    top_k=top_k,
+                )
+            )
+
+        stacked_branch_logits = self._stack_branch_logits(branch_logits)
+        selected_evidence_tokens = torch.cat(selected_tokens, dim=1)
+        evidence_tokens = selected_evidence_tokens
+        if self.rdt_block is not None:
+            for _ in range(self.cfg.encoder.architecture.rdt.steps):
+                evidence_tokens = self.rdt_block(
+                    evidence_tokens,
+                    encoder_output.context_tokens,
+                )
+
+        evidence_embedding = evidence_tokens.mean(dim=1)
+        branch_embedding_mean = torch.stack(branch_embeddings, dim=1).mean(dim=1)
+        branch_logit_features = stacked_branch_logits.reshape(
+            stacked_branch_logits.shape[0],
+            -1,
+        )
+        fusion_input = torch.cat(
+            [evidence_embedding, branch_embedding_mean, branch_logit_features],
+            dim=1,
+        )
+        pooled_embedding = self.fusion_projector(fusion_input)
         logits = self.classifier(pooled_embedding)
         if logits.ndim == 2 and logits.shape[1] == 1:
             logits = logits.squeeze(1)
-        return AstModelOutput(logits=logits, pooled_embedding=pooled_embedding)
+        return AstModelOutput(
+            logits=logits,
+            pooled_embedding=pooled_embedding,
+            branch_logits=stacked_branch_logits,
+            branch_attention_weights=tuple(branch_attention_weights),
+            selected_evidence_tokens=selected_evidence_tokens,
+        )

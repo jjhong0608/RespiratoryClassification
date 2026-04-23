@@ -23,6 +23,16 @@ def build_diagnostic_rows(
     logits = output.logits.detach().cpu()
     embeddings = output.pooled_embedding.detach().cpu()
     probs = probabilities.detach().cpu()
+    branch_logits = (
+        output.branch_logits.detach().cpu()
+        if output.branch_logits is not None
+        else None
+    )
+    selected_evidence_tokens = (
+        output.selected_evidence_tokens.detach().cpu()
+        if output.selected_evidence_tokens is not None
+        else None
+    )
 
     for index, audio_path in enumerate(batch.audio_paths):
         predicted_label = int(predicted_labels[index].item())
@@ -44,10 +54,16 @@ def build_diagnostic_rows(
                 row["logits"] = float(logits[index].item())
             else:
                 row["logits"] = logits[index].tolist()
+            if branch_logits is not None:
+                row["branch_logits"] = branch_logits[index].tolist()
         if analysis.save_probabilities:
             row["probabilities"] = probability_payload
         if analysis.save_embeddings:
             row["pooled_embedding"] = embeddings[index].tolist()
+            if selected_evidence_tokens is not None:
+                row["selected_evidence_tokens"] = selected_evidence_tokens[
+                    index
+                ].tolist()
         if analysis.save_clip_metadata:
             row["label_name"] = batch.label_names[index]
         rows.append(row)

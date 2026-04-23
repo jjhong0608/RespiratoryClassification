@@ -12,6 +12,7 @@ from src.models.model import (
     MultiScaleRdtAstModel,
     MultiScaleRdtAstModelConfig,
     MultiScaleRdtEncoderConfig,
+    RdtConfig,
 )
 
 from conftest import small_patch_branches
@@ -19,8 +20,9 @@ from conftest import small_patch_branches
 
 def _small_architecture(
     *,
-    latent_query_count: int = 4,
+    rdt_enabled: bool = True,
     rdt_steps: int = 3,
+    top_tokens_per_branch: int = 2,
 ) -> MultiScaleRdtArchitectureConfig:
     return MultiScaleRdtArchitectureConfig(
         hidden_size=32,
@@ -31,18 +33,31 @@ def _small_architecture(
         layer_norm_eps=1e-6,
         shared_stem_depth=1,
         adapter_depth=1,
-        latent_query_count=latent_query_count,
-        rdt_steps=rdt_steps,
         patch_branches=small_patch_branches(),
+        rdt=RdtConfig(
+            enabled=rdt_enabled,
+            steps=rdt_steps,
+            top_tokens_per_branch=top_tokens_per_branch,
+            gated_residual=True,
+            layerscale_init=0.01,
+        ),
     )
 
 
-def _small_model_config(*, num_classes: int) -> MultiScaleRdtAstModelConfig:
+def _small_model_config(
+    *,
+    num_classes: int,
+    rdt_enabled: bool = True,
+    rdt_steps: int = 3,
+) -> MultiScaleRdtAstModelConfig:
     return MultiScaleRdtAstModelConfig(
         encoder=MultiScaleRdtEncoderConfig(
             feature_dims=AstFeatureDims(num_mel_bins=32, max_length=32),
             adaptation=EncoderAdaptationConfig(mode="full", num_layers=0),
-            architecture=_small_architecture(),
+            architecture=_small_architecture(
+                rdt_enabled=rdt_enabled,
+                rdt_steps=rdt_steps,
+            ),
         ),
         classifier=ClassifierConfig(
             type="mlp",
@@ -54,7 +69,7 @@ def _small_model_config(*, num_classes: int) -> MultiScaleRdtAstModelConfig:
     )
 
 
-def test_binary_model_returns_single_logit_per_clip() -> None:
+def test_binary_model_returns_expected_event_mil_outputs() -> None:
     model = MultiScaleRdtAstModel(_small_model_config(num_classes=2))
     input_values = torch.randn(2, 32, 32)
 
@@ -62,9 +77,20 @@ def test_binary_model_returns_single_logit_per_clip() -> None:
 
     assert output.logits.shape == (2,)
     assert output.pooled_embedding.shape == (2, 32)
+    assert output.branch_logits is not None
+    assert output.branch_logits.shape == (2, 4)
+    assert output.selected_evidence_tokens is not None
+    assert output.selected_evidence_tokens.shape == (2, 8, 32)
+    assert output.branch_attention_weights is not None
+    assert tuple(attn.shape[1] for attn in output.branch_attention_weights) == (
+        7,
+        15,
+        31,
+        3,
+    )
 
 
-def test_multiclass_model_returns_class_logits_per_clip() -> None:
+def test_multiclass_model_returns_expected_event_mil_outputs() -> None:
     model = MultiScaleRdtAstModel(_small_model_config(num_classes=3))
     input_values = torch.randn(2, 32, 32)
 
@@ -72,6 +98,10 @@ def test_multiclass_model_returns_class_logits_per_clip() -> None:
 
     assert output.logits.shape == (2, 3)
     assert output.pooled_embedding.shape == (2, 32)
+    assert output.branch_logits is not None
+    assert output.branch_logits.shape == (2, 4, 3)
+    assert output.selected_evidence_tokens is not None
+    assert output.selected_evidence_tokens.shape == (2, 8, 32)
 
 
 def test_invalid_input_dims_raise_clear_value_error() -> None:
@@ -86,7 +116,7 @@ def test_invalid_input_dims_raise_clear_value_error() -> None:
         model(torch.randn(2, 31, 32))
 
 
-def test_default_branch_geometry_matches_expected_token_counts() -> None:
+def test_default_branch_geometry_matches_expected_token_and_time_counts() -> None:
     model = MultiScaleRdtAstModel(
         MultiScaleRdtAstModelConfig(
             encoder=MultiScaleRdtEncoderConfig(
@@ -94,7 +124,7 @@ def test_default_branch_geometry_matches_expected_token_counts() -> None:
                 adaptation=EncoderAdaptationConfig(mode="full", num_layers=0),
                 architecture=MultiScaleRdtArchitectureConfig(
                     hidden_size=48,
-                    num_attention_heads=6,
+                    num_attention_heads=4,
                 ),
             ),
             classifier=ClassifierConfig(pooling="latent_mean"),
@@ -103,22 +133,42 @@ def test_default_branch_geometry_matches_expected_token_counts() -> None:
     )
 
     assert model.encoder.branch_token_counts == (1016, 1020, 1022, 1023)
+    assert model.encoder.branch_time_lengths == (127, 255, 511, 1023)
     assert model.encoder.total_token_count == 4081
+    assert model.encoder.total_temporal_length == 1916
 
 
-def test_latent_query_pooler_returns_expected_shape() -> None:
+def test_encoder_returns_temporal_event_tokens_and_context() -> None:
     model = MultiScaleRdtAstModel(_small_model_config(num_classes=2))
     input_values = torch.randn(2, 32, 32)
 
-    evidence_memory = model.encoder(input_values.unsqueeze(1))
-    latent = model.latent_pooler(evidence_memory)
+    encoder_output = model.encoder(input_values.unsqueeze(1))
 
-    assert latent.shape == (2, 4, 32)
+    assert tuple(tokens.shape for tokens in encoder_output.branch_event_tokens) == (
+        (2, 7, 32),
+        (2, 15, 32),
+        (2, 31, 32),
+        (2, 3, 32),
+    )
+    assert encoder_output.context_tokens.shape == (2, 56, 32)
 
 
-def test_rdt_block_is_reused_for_all_recurrent_steps() -> None:
-    model = MultiScaleRdtAstModel(_small_model_config(num_classes=2))
+def test_model_runs_without_rdt_when_disabled() -> None:
+    model = MultiScaleRdtAstModel(_small_model_config(num_classes=2, rdt_enabled=False))
+    output = model(torch.randn(1, 32, 32))
+
+    assert model.rdt_block is None
+    assert output.logits.shape == (1,)
+    assert output.selected_evidence_tokens is not None
+    assert output.selected_evidence_tokens.shape == (1, 8, 32)
+
+
+def test_rdt_block_is_reused_for_all_configured_steps() -> None:
+    model = MultiScaleRdtAstModel(
+        _small_model_config(num_classes=2, rdt_enabled=True, rdt_steps=2)
+    )
     input_values = torch.randn(1, 32, 32)
+    assert model.rdt_block is not None
 
     with mock.patch.object(
         model.rdt_block,
@@ -127,5 +177,5 @@ def test_rdt_block_is_reused_for_all_recurrent_steps() -> None:
     ) as wrapped:
         output = model(input_values)
 
-    assert wrapped.call_count == 3
+    assert wrapped.call_count == 2
     assert output.pooled_embedding.shape == (1, 32)

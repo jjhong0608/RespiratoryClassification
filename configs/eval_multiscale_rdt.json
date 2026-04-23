@@ -1,10 +1,10 @@
 {
   "experiment": {
     "name": "respiratory_multiscale_rdt_ast_eval",
-    "task": "normal_vs_wheeze",
+    "task": "normal_vs_abnormal",
     "mode": "clip",
     "seed": 42,
-    "device": "cpu",
+    "device": "mps",
     "output_dir": "checkpoints"
   },
   "checkpoint_path": "checkpoints/respiratory_multiscale_rdt_ast_binary/last.pt",
@@ -12,11 +12,11 @@
     "train_dirs": [],
     "val_dirs": [],
     "eval_dirs": [
-      "datasets/wheeze/test"
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/test/"
     ],
     "label_to_index": {
       "normal": 0,
-      "wheeze": 1
+      "abnormal": 1
     },
     "batch_size": 4,
     "num_workers": 0,

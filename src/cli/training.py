@@ -49,14 +49,20 @@ def main() -> None:
     adaptation_summary = apply_encoder_adaptation(model, model.cfg.encoder.adaptation)
     logger.info(
         "Model architecture | encoder_type=%s | hidden_size=%d | num_heads=%d | "
-        "branch_token_counts=%s | total_tokens=%d | latent_queries=%d | rdt_steps=%d",
+        "branch_token_counts=%s | branch_time_lengths=%s | total_patch_tokens=%d | "
+        "total_temporal_length=%d | rdt_enabled=%s | rdt_steps=%d | "
+        "top_tokens_per_branch=%d | branch_auxiliary=%s",
         architecture_summary.encoder_type,
         architecture_summary.hidden_size,
         architecture_summary.num_attention_heads,
         list(architecture_summary.branch_token_counts),
-        architecture_summary.total_token_count,
-        architecture_summary.latent_query_count,
+        list(architecture_summary.branch_time_lengths),
+        architecture_summary.total_patch_token_count,
+        architecture_summary.total_temporal_length,
+        architecture_summary.rdt_enabled,
         architecture_summary.rdt_steps,
+        architecture_summary.rdt_top_tokens_per_branch,
+        cfg.train.loss.branch_auxiliary.enabled,
     )
     logger.info(
         "Encoder adaptation | mode=%s | num_layers=%d | trainable_params=%d | frozen_params=%d",
@@ -139,6 +145,7 @@ def main() -> None:
             loss_type=cfg.train.loss.type,
             gamma=cfg.train.loss.gamma,
             pos_weight=imbalance.pos_weight,
+            branch_auxiliary=cfg.train.loss.branch_auxiliary,
             analysis=cfg.analysis,
             early_stopping=cfg.train.early_stopping,
         )

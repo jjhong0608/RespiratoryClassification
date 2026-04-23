@@ -26,7 +26,7 @@ def _small_patch_branches_payload() -> list[dict[str, list[int]]]:
 def _base_payload() -> dict:
     return {
         "experiment": {
-            "name": "respiratory_multiscale_rdt_ast",
+            "name": "respiratory_event_mil",
             "task": "normal_vs_wheeze",
             "mode": "clip",
             "seed": 7,
@@ -74,9 +74,14 @@ def _base_payload() -> dict:
                     "layer_norm_eps": 1e-6,
                     "shared_stem_depth": 1,
                     "adapter_depth": 1,
-                    "latent_query_count": 4,
-                    "rdt_steps": 2,
                     "patch_branches": _small_patch_branches_payload(),
+                    "rdt": {
+                        "enabled": True,
+                        "steps": 2,
+                        "top_tokens_per_branch": 2,
+                        "gated_residual": True,
+                        "layerscale_init": 0.01,
+                    },
                 },
             },
             "classifier": {
@@ -103,6 +108,11 @@ def _base_payload() -> dict:
                 "auto_pos_weight": False,
                 "pos_weight": None,
                 "gamma": 2.0,
+                "branch_auxiliary": {
+                    "enabled": False,
+                    "weight": 0.3,
+                    "aggregation": "mean",
+                },
             },
             "sampler": {
                 "weighted_random": True,
@@ -141,7 +151,7 @@ def _eval_payload() -> dict:
     payload = _base_payload()
     payload.pop("train")
     payload.pop("model")
-    payload["checkpoint_path"] = "checkpoints/respiratory_multiscale_rdt_ast/last.pt"
+    payload["checkpoint_path"] = "checkpoints/respiratory_event_mil/last.pt"
     payload["threshold_optimization"] = {
         "enabled": True,
         "metric": "f1",
@@ -150,6 +160,10 @@ def _eval_payload() -> dict:
 
 
 def test_repo_example_configs_load() -> None:
+    b0_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b0.json")
+    b1_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b1.json")
+    b2_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b2.json")
+    b3_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b3.json")
     training_cfg = JsonConfigLoader.load_training(
         ROOT / "configs/training_multiscale_rdt.json"
     )
@@ -159,13 +173,17 @@ def test_repo_example_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
+    assert b0_cfg.model.encoder.architecture.rdt.enabled is False
+    assert b1_cfg.train.loss.branch_auxiliary.enabled is True
+    assert b2_cfg.model.encoder.architecture.rdt.steps == 2
+    assert b3_cfg.model.encoder.architecture.rdt.steps == 3
     assert training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert multiclass_cfg.train.loss.type == "cross_entropy"
     assert cv_cfg.folds[0].name == "fold_0"
     assert eval_cfg.threshold_optimization.metric == "f1"
 
 
-def test_load_training_config_uses_multiscale_rdt_schema(tmp_path: Path) -> None:
+def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     config_path = _write_json(tmp_path / "train.json", _base_payload())
 
     cfg = JsonConfigLoader.load_training(config_path)
@@ -174,7 +192,8 @@ def test_load_training_config_uses_multiscale_rdt_schema(tmp_path: Path) -> None
     assert cfg.data.preprocessing.ast_fbank.max_length == 32
     assert cfg.model.encoder.type == "multiscale_rdt_ast"
     assert cfg.model.classifier.pooling == "latent_mean"
-    assert cfg.train.loss.type == "bce"
+    assert cfg.model.encoder.architecture.rdt.enabled is True
+    assert cfg.train.loss.branch_auxiliary.enabled is False
 
 
 def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) -> None:
@@ -189,15 +208,21 @@ def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) 
     assert cfg.train.loss.type == "cross_entropy"
 
 
-def test_legacy_mil_fields_are_rejected(tmp_path: Path) -> None:
+def test_valid_disabled_rdt_ignores_steps_value(tmp_path: Path) -> None:
     payload = _base_payload()
-    payload["data"]["segment"] = {
-        "mode": "sliding_window",
+    payload["model"]["encoder"]["architecture"]["rdt"] = {
+        "enabled": False,
+        "steps": 0,
+        "top_tokens_per_branch": 2,
+        "gated_residual": True,
+        "layerscale_init": 0.01,
     }
-    config_path = _write_json(tmp_path / "legacy.json", payload)
+    config_path = _write_json(tmp_path / "b0.json", payload)
 
-    with pytest.raises(TypeError, match="segment"):
-        JsonConfigLoader.load_training(config_path)
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.model.encoder.architecture.rdt.enabled is False
+    assert cfg.model.encoder.architecture.rdt.steps == 0
 
 
 def test_invalid_encoder_type_is_rejected(tmp_path: Path) -> None:
@@ -233,6 +258,68 @@ def test_hidden_size_must_be_divisible_by_head_count(tmp_path: Path) -> None:
     config_path = _write_json(tmp_path / "bad_hidden.json", payload)
 
     with pytest.raises(ValueError, match="divisible"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_rdt_steps_when_enabled_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["rdt"]["steps"] = 0
+    config_path = _write_json(tmp_path / "bad_steps.json", payload)
+
+    with pytest.raises(ValueError, match="rdt.steps"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_top_tokens_per_branch_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["rdt"]["top_tokens_per_branch"] = 0
+    config_path = _write_json(tmp_path / "bad_top_tokens.json", payload)
+
+    with pytest.raises(ValueError, match="top_tokens_per_branch"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_branch_auxiliary_weight_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["branch_auxiliary"] = {
+        "enabled": True,
+        "weight": 0.0,
+        "aggregation": "mean",
+    }
+    config_path = _write_json(tmp_path / "bad_branch_aux_weight.json", payload)
+
+    with pytest.raises(ValueError, match="branch_auxiliary.weight"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_branch_auxiliary_aggregation_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["branch_auxiliary"]["aggregation"] = "sum"
+    config_path = _write_json(tmp_path / "bad_branch_aux_agg.json", payload)
+
+    with pytest.raises(ValueError, match="aggregation"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    "field_name, field_value, match",
+    [
+        ("latent_query_count", 4, "latent_query_count"),
+        ("summary_tokens_per_scale", 2, "summary_tokens_per_scale"),
+        ("rdt_steps", 2, "rdt_steps"),
+    ],
+)
+def test_legacy_architecture_fields_are_rejected(
+    tmp_path: Path,
+    field_name: str,
+    field_value: int,
+    match: str,
+) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"][field_name] = field_value
+    config_path = _write_json(tmp_path / f"legacy_{field_name}.json", payload)
+
+    with pytest.raises(ValueError, match=match):
         JsonConfigLoader.load_training(config_path)
 
 

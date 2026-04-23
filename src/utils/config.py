@@ -13,7 +13,9 @@ from src.models.model import (
     EncoderAdaptationConfig,
     MultiScaleRdtArchitectureConfig,
     PatchBranchConfig,
+    RdtConfig,
     compute_token_count,
+    compute_token_grid,
 )
 
 
@@ -101,11 +103,21 @@ class SchedulerConfig:
 
 
 @dataclass(frozen=True)
+class BranchAuxiliaryLossConfig:
+    enabled: bool = False
+    weight: float = 0.3
+    aggregation: Literal["mean"] = "mean"
+
+
+@dataclass(frozen=True)
 class LossConfig:
     type: Literal["bce", "focal", "cross_entropy"] = "bce"
     auto_pos_weight: bool = False
     pos_weight: float | None = None
     gamma: float = 2.0
+    branch_auxiliary: BranchAuxiliaryLossConfig = field(
+        default_factory=BranchAuxiliaryLossConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -323,17 +335,23 @@ class JsonConfigLoader:
             raise ValueError(
                 "model.encoder.architecture.adapter_depth must be greater than zero"
             )
-        if architecture.latent_query_count <= 0:
-            raise ValueError(
-                "model.encoder.architecture.latent_query_count must be greater than zero"
-            )
-        if architecture.rdt_steps <= 0:
-            raise ValueError(
-                "model.encoder.architecture.rdt_steps must be greater than zero"
-            )
         if not architecture.patch_branches:
             raise ValueError(
                 "model.encoder.architecture.patch_branches must not be empty"
+            )
+        if not isinstance(architecture.rdt.enabled, bool):
+            raise ValueError("model.encoder.architecture.rdt.enabled must be a boolean")
+        if architecture.rdt.enabled and architecture.rdt.steps <= 0:
+            raise ValueError(
+                "model.encoder.architecture.rdt.steps must be greater than zero when rdt.enabled is true"
+            )
+        if architecture.rdt.top_tokens_per_branch <= 0:
+            raise ValueError(
+                "model.encoder.architecture.rdt.top_tokens_per_branch must be greater than zero"
+            )
+        if architecture.rdt.layerscale_init <= 0:
+            raise ValueError(
+                "model.encoder.architecture.rdt.layerscale_init must be greater than zero"
             )
 
         feature_dims = AstFeatureDims(
@@ -366,6 +384,15 @@ class JsonConfigLoader:
                 raise ValueError(
                     "model.encoder.architecture.patch_branches must yield a positive "
                     f"token count; branch_index={branch_index}"
+                )
+            time_steps, _ = compute_token_grid(
+                feature_dims=feature_dims,
+                patch_branch=branch,
+            )
+            if architecture.rdt.top_tokens_per_branch > time_steps:
+                raise ValueError(
+                    "model.encoder.architecture.rdt.top_tokens_per_branch exceeds "
+                    f"branch time length for branch_index={branch_index}"
                 )
 
     @staticmethod
@@ -409,6 +436,14 @@ class JsonConfigLoader:
             raise ValueError("train.early_stopping.patience must be greater than zero")
         if cfg.early_stopping.min_delta < 0:
             raise ValueError("train.early_stopping.min_delta must be non-negative")
+        if not isinstance(cfg.loss.branch_auxiliary.enabled, bool):
+            raise ValueError("train.loss.branch_auxiliary.enabled must be a boolean")
+        if cfg.loss.branch_auxiliary.aggregation != "mean":
+            raise ValueError("train.loss.branch_auxiliary.aggregation must be 'mean'")
+        if cfg.loss.branch_auxiliary.enabled and cfg.loss.branch_auxiliary.weight <= 0:
+            raise ValueError(
+                "train.loss.branch_auxiliary.weight must be greater than zero when branch auxiliary loss is enabled"
+            )
         if num_classes == 2:
             if cfg.loss.type not in {"bce", "focal"}:
                 raise ValueError(
@@ -496,6 +531,21 @@ class JsonConfigLoader:
         kwargs = dict(raw)
         encoder = dict(raw["encoder"])
         architecture = dict(encoder.get("architecture", {}))
+        if "latent_query_count" in architecture:
+            raise ValueError(
+                "latent_query_count is deprecated in the event-MIL architecture. "
+                "Use model.encoder.architecture.rdt instead."
+            )
+        if "summary_tokens_per_scale" in architecture:
+            raise ValueError(
+                "summary_tokens_per_scale is deprecated in the event-MIL architecture. "
+                "Use model.encoder.architecture.rdt.top_tokens_per_branch instead."
+            )
+        if "rdt_steps" in architecture:
+            raise ValueError(
+                "Flat rdt_steps is deprecated in the event-MIL architecture. "
+                "Use model.encoder.architecture.rdt.steps instead."
+            )
         patch_branches_raw = architecture.get("patch_branches")
         if patch_branches_raw is not None:
             if not isinstance(patch_branches_raw, Sequence) or isinstance(
@@ -508,6 +558,7 @@ class JsonConfigLoader:
                 JsonConfigLoader._parse_patch_branch(dict(branch_raw))
                 for branch_raw in patch_branches_raw
             )
+        architecture["rdt"] = RdtConfig(**dict(architecture.get("rdt", {})))
         encoder["adaptation"] = EncoderAdaptationConfig(
             **dict(encoder.get("adaptation", {}))
         )
@@ -523,7 +574,11 @@ class JsonConfigLoader:
         kwargs = dict(raw)
         kwargs["optimizer"] = OptimizerConfig(**dict(raw["optimizer"]))
         kwargs["scheduler"] = SchedulerConfig(**dict(raw.get("scheduler", {})))
-        kwargs["loss"] = LossConfig(**dict(raw.get("loss", {})))
+        loss = dict(raw.get("loss", {}))
+        loss["branch_auxiliary"] = BranchAuxiliaryLossConfig(
+            **dict(loss.get("branch_auxiliary", {}))
+        )
+        kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))
         kwargs["early_stopping"] = EarlyStoppingConfig(
             **dict(raw.get("early_stopping", {}))

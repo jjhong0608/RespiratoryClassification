@@ -12,6 +12,7 @@ import torch
 from src.cli.cv import main as cv_main
 from src.cli.evaluate import evaluate_checkpoint
 from src.data.loaders import build_clip_loader, build_dataset
+from src.models.model import AstModelOutput
 from src.training.ast_setup import (
     apply_encoder_adaptation,
     build_ast_model,
@@ -25,6 +26,7 @@ from src.utils.config import (
     AstFbankConfig,
     AudioConfig,
     BandPassConfig,
+    BranchAuxiliaryLossConfig,
     ClassifierConfig,
     DataConfig,
     EarlyStoppingConfig,
@@ -35,6 +37,7 @@ from src.utils.config import (
     ModelEncoderConfig,
     MultiScaleRdtArchitectureConfig,
     PreprocessingConfig,
+    RdtConfig,
 )
 
 from conftest import small_patch_branches
@@ -51,13 +54,17 @@ def _analysis_cfg() -> AnalysisConfig:
         outputs=AnalysisOutputConfig(
             save_logits=True,
             save_probabilities=True,
-            save_embeddings=False,
+            save_embeddings=True,
             save_clip_metadata=True,
         )
     )
 
 
-def _small_architecture() -> MultiScaleRdtArchitectureConfig:
+def _small_architecture(
+    *,
+    rdt_enabled: bool,
+    rdt_steps: int,
+) -> MultiScaleRdtArchitectureConfig:
     return MultiScaleRdtArchitectureConfig(
         hidden_size=32,
         num_attention_heads=4,
@@ -67,20 +74,30 @@ def _small_architecture() -> MultiScaleRdtArchitectureConfig:
         layer_norm_eps=1e-6,
         shared_stem_depth=1,
         adapter_depth=1,
-        latent_query_count=4,
-        rdt_steps=2,
         patch_branches=small_patch_branches(),
+        rdt=RdtConfig(
+            enabled=rdt_enabled,
+            steps=rdt_steps,
+            top_tokens_per_branch=2,
+            gated_residual=True,
+            layerscale_init=0.01,
+        ),
     )
 
 
 def _model_cfg(
     *,
     classifier_type: Literal["linear", "mlp"] = "linear",
+    rdt_enabled: bool = True,
+    rdt_steps: int = 3,
 ) -> ModelConfig:
     return ModelConfig(
         encoder=ModelEncoderConfig(
             adaptation=EncoderAdaptationConfig(mode="full", num_layers=0),
-            architecture=_small_architecture(),
+            architecture=_small_architecture(
+                rdt_enabled=rdt_enabled,
+                rdt_steps=rdt_steps,
+            ),
         ),
         classifier=ClassifierConfig(
             type=classifier_type,
@@ -161,6 +178,44 @@ def _prepare_multiclass_dataset(root: Path) -> DataConfig:
     return _multiclass_data_cfg(root)
 
 
+def _trainer_cfg(
+    *,
+    num_classes: int,
+    run_dir: Path,
+    loss_type: str,
+    pos_weight: float | None = None,
+    branch_auxiliary_enabled: bool = False,
+    branch_auxiliary_weight: float = 0.3,
+) -> TrainerConfig:
+    return TrainerConfig(
+        device="cpu",
+        epochs=1,
+        encoder_lr=1e-4,
+        head_lr=1e-3,
+        weight_decay=0.0,
+        warmup_ratio=0.0,
+        max_grad_norm=1.0,
+        top_k=1,
+        run_dir=run_dir,
+        num_classes=num_classes,
+        loss_type=loss_type,
+        gamma=2.0,
+        pos_weight=pos_weight,
+        branch_auxiliary=BranchAuxiliaryLossConfig(
+            enabled=branch_auxiliary_enabled,
+            weight=branch_auxiliary_weight,
+            aggregation="mean",
+        ),
+        analysis=_analysis_cfg(),
+        early_stopping=EarlyStoppingConfig(
+            enabled=True,
+            monitor="val_loss",
+            patience=5,
+            min_delta=1e-4,
+        ),
+    )
+
+
 def _train_smoke_run(
     tmp_path: Path,
     *,
@@ -168,6 +223,7 @@ def _train_smoke_run(
     model_cfg: ModelConfig,
     loss_type: str,
     pos_weight: float | None = None,
+    branch_auxiliary_enabled: bool = False,
 ) -> tuple[Path, DataConfig]:
     torch.manual_seed(0)
     train_dataset = build_dataset(data_cfg, split="train")
@@ -204,27 +260,12 @@ def _train_smoke_run(
 
     run_dir = tmp_path / "run"
     trainer = Trainer(
-        TrainerConfig(
-            device="cpu",
-            epochs=1,
-            encoder_lr=1e-4,
-            head_lr=1e-3,
-            weight_decay=0.0,
-            warmup_ratio=0.0,
-            max_grad_norm=1.0,
-            top_k=1,
-            run_dir=run_dir,
+        _trainer_cfg(
             num_classes=len(data_cfg.label_to_index),
+            run_dir=run_dir,
             loss_type=loss_type,
-            gamma=2.0,
             pos_weight=pos_weight,
-            analysis=_analysis_cfg(),
-            early_stopping=EarlyStoppingConfig(
-                enabled=True,
-                monitor="val_loss",
-                patience=5,
-                min_delta=1e-4,
-            ),
+            branch_auxiliary_enabled=branch_auxiliary_enabled,
         )
     )
     trainer.fit(
@@ -313,14 +354,19 @@ def _cv_payload(root: Path, output_dir: Path) -> dict:
                     "layer_norm_eps": 1e-6,
                     "shared_stem_depth": 1,
                     "adapter_depth": 1,
-                    "latent_query_count": 4,
-                    "rdt_steps": 2,
                     "patch_branches": [
                         {"patch_size": [8, 8], "stride": [4, 8]},
                         {"patch_size": [4, 16], "stride": [2, 16]},
                         {"patch_size": [2, 32], "stride": [1, 32]},
                         {"patch_size": [16, 4], "stride": [8, 4]},
                     ],
+                    "rdt": {
+                        "enabled": True,
+                        "steps": 3,
+                        "top_tokens_per_branch": 2,
+                        "gated_residual": True,
+                        "layerscale_init": 0.01,
+                    },
                 },
             },
             "classifier": {
@@ -345,6 +391,11 @@ def _cv_payload(root: Path, output_dir: Path) -> dict:
                 "auto_pos_weight": False,
                 "pos_weight": None,
                 "gamma": 2.0,
+                "branch_auxiliary": {
+                    "enabled": True,
+                    "weight": 0.3,
+                    "aggregation": "mean",
+                },
             },
             "sampler": {"weighted_random": False},
             "early_stopping": {
@@ -358,7 +409,7 @@ def _cv_payload(root: Path, output_dir: Path) -> dict:
             "outputs": {
                 "save_logits": True,
                 "save_probabilities": True,
-                "save_embeddings": False,
+                "save_embeddings": True,
                 "save_clip_metadata": True,
             },
         },
@@ -383,14 +434,86 @@ def _prepare_cv_dataset(root: Path) -> Path:
     return root
 
 
-def test_binary_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
+def test_trainer_total_loss_matches_final_loss_when_branch_auxiliary_disabled() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="bce",
+            branch_auxiliary_enabled=False,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.0, -0.1, 0.2, -0.3]]),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    total_loss, aux_loss = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+
+    assert aux_loss is None
+    assert torch.isclose(total_loss, final_loss)
+
+
+def test_trainer_total_loss_includes_branch_auxiliary_when_enabled() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="bce",
+            branch_auxiliary_enabled=True,
+            branch_auxiliary_weight=0.5,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.0, -0.1, 0.2, -0.3]]),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+
+    assert auxiliary_loss is not None
+    expected = final_loss + (0.5 * auxiliary_loss)
+    assert torch.isclose(total_loss, expected)
+
+
+def test_trainer_raises_when_branch_auxiliary_enabled_without_branch_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="bce",
+            branch_auxiliary_enabled=True,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=None,
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="branch auxiliary loss enabled"):
+        trainer._compute_total_loss(criterion, output, labels)
+
+
+def test_binary_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:
     data_cfg = _prepare_binary_dataset(tmp_path / "clips")
     checkpoint_path, data_cfg = _train_smoke_run(
         tmp_path,
         data_cfg=data_cfg,
-        model_cfg=_model_cfg(),
+        model_cfg=_model_cfg(rdt_enabled=True, rdt_steps=3),
         loss_type="focal",
         pos_weight=2.0,
+        branch_auxiliary_enabled=True,
     )
     run_dir = checkpoint_path.parent
 
@@ -412,15 +535,22 @@ def test_binary_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
     assert metrics["threshold_optimization"]["enabled"] is True
     assert len(rows) == len(build_dataset(data_cfg, split="eval"))
     assert len(diagnostics) == len(rows)
+    assert "branch_logits" in diagnostics[0]
+    assert "selected_evidence_tokens" in diagnostics[0]
 
 
-def test_multiclass_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
+def test_multiclass_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:
     data_cfg = _prepare_multiclass_dataset(tmp_path / "multiclass")
     checkpoint_path, data_cfg = _train_smoke_run(
         tmp_path,
         data_cfg=data_cfg,
-        model_cfg=_model_cfg(classifier_type="mlp"),
+        model_cfg=_model_cfg(
+            classifier_type="mlp",
+            rdt_enabled=True,
+            rdt_steps=2,
+        ),
         loss_type="cross_entropy",
+        branch_auxiliary_enabled=True,
     )
 
     result = evaluate_checkpoint(
@@ -435,6 +565,7 @@ def test_multiclass_trainer_and_evaluator_smoke(tmp_path: Path) -> None:
     assert metrics["optimized_metrics"]["decision_threshold"] is None
     assert len(rows) == len(build_dataset(data_cfg, split="eval"))
     assert len(diagnostics) == len(rows)
+    assert "branch_logits" in diagnostics[0]
 
 
 def test_evaluator_rejects_frontend_dim_mismatch(tmp_path: Path) -> None:
@@ -442,8 +573,9 @@ def test_evaluator_rejects_frontend_dim_mismatch(tmp_path: Path) -> None:
     checkpoint_path, data_cfg = _train_smoke_run(
         tmp_path,
         data_cfg=data_cfg,
-        model_cfg=_model_cfg(),
+        model_cfg=_model_cfg(rdt_enabled=False, rdt_steps=3),
         loss_type="bce",
+        branch_auxiliary_enabled=False,
     )
     mismatched_cfg = DataConfig(
         train_dirs=data_cfg.train_dirs,
@@ -473,7 +605,7 @@ def test_evaluator_rejects_frontend_dim_mismatch(tmp_path: Path) -> None:
         )
 
 
-def test_cv_cli_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cv_cli_smoke_b3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dataset_root = _prepare_cv_dataset(tmp_path / "cv")
     config_path = _write_json(
         tmp_path / "cv.json",
