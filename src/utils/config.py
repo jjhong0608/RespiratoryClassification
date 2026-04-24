@@ -134,6 +134,14 @@ class EarlyStoppingConfig:
 
 
 @dataclass(frozen=True)
+class TrainingInitializationConfig:
+    checkpoint_path: str | None = None
+    load_model_state: bool = True
+    strict: bool = False
+    load_optimizer_state: bool = False
+
+
+@dataclass(frozen=True)
 class TrainConfig:
     epochs: int
     top_k: int
@@ -143,6 +151,9 @@ class TrainConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     sampler: SamplerConfig = field(default_factory=SamplerConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
+    initialization: TrainingInitializationConfig = field(
+        default_factory=TrainingInitializationConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -436,6 +447,20 @@ class JsonConfigLoader:
             raise ValueError("train.early_stopping.patience must be greater than zero")
         if cfg.early_stopping.min_delta < 0:
             raise ValueError("train.early_stopping.min_delta must be non-negative")
+        if cfg.initialization.checkpoint_path is not None and not isinstance(
+            cfg.initialization.checkpoint_path, str
+        ):
+            raise TypeError(
+                "train.initialization.checkpoint_path must be a string or null"
+            )
+        if not isinstance(cfg.initialization.load_model_state, bool):
+            raise TypeError("train.initialization.load_model_state must be a boolean")
+        if not isinstance(cfg.initialization.strict, bool):
+            raise TypeError("train.initialization.strict must be a boolean")
+        if not isinstance(cfg.initialization.load_optimizer_state, bool):
+            raise TypeError(
+                "train.initialization.load_optimizer_state must be a boolean"
+            )
         if not isinstance(cfg.loss.branch_auxiliary.enabled, bool):
             raise ValueError("train.loss.branch_auxiliary.enabled must be a boolean")
         if cfg.loss.branch_auxiliary.aggregation != "mean":
@@ -582,6 +607,9 @@ class JsonConfigLoader:
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))
         kwargs["early_stopping"] = EarlyStoppingConfig(
             **dict(raw.get("early_stopping", {}))
+        )
+        kwargs["initialization"] = TrainingInitializationConfig(
+            **dict(raw.get("initialization", {}))
         )
         return TrainConfig(**kwargs)
 

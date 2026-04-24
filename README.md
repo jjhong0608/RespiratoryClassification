@@ -32,6 +32,34 @@ pip install -r requirements.txt
 `training_multiclass.json` are the "full" event-MIL examples with branch
 auxiliary supervision enabled and RDT refinement active.
 
+## C0-C5 Experiments
+
+Use `best_loss_*.pt` checkpoints as the primary comparison target for C0-C5.
+`best_f1_*.pt` checkpoints are still saved, but treat them as diagnostic or
+reference artifacts because validation-threshold tuning can overfit binary F1.
+
+| Study | Config | Purpose |
+|---|---|---|
+| C0 | `configs/training_c0_b3_focal_patience8.json` | B3 reproduction with focal loss and shorter patience |
+| C1 | `configs/training_c1_b3_bce_aux01_patience8.json` | B3 with BCE and branch auxiliary weight `0.1` |
+| C2 | `configs/training_c2_b1_bce_aux01_patience8.json` | B1 event-MIL baseline without RDT |
+| C3 stage 1 | `configs/training_c3_stage1_b1_bce_aux01.json` | Train event detectors without RDT |
+| C3 stage 2 | `configs/training_c3_stage2_b3_from_stage1.json` | Warm-start B3 RDT from stage 1 |
+| C4 3-scale | `configs/training_c4_3scale_bce_aux01_rdt3.json` | Remove the `(2, 128)` branch |
+| C4 4-scale | `configs/training_c4_4scale_bce_aux01_rdt3.json` | Matched 4-scale comparator |
+| C5 top-2 | `configs/training_c5_top2_bce_aux01_rdt3.json` | Default top-2 evidence bottleneck |
+| C5 top-4 | `configs/training_c5_top4_bce_aux01_rdt3.json` | Wider top-4 evidence bottleneck |
+
+C3 staged training:
+
+1. Run `python -m src.cli.training --config configs/training_c3_stage1_b1_bce_aux01.json`.
+2. Find the stage-1 `best_loss_*.pt` checkpoint under `checkpoints/respiratory_c3_stage1_b1_bce_aux01/`.
+3. Put that path into `train.initialization.checkpoint_path` in `configs/training_c3_stage2_b3_from_stage1.json`.
+4. Run `python -m src.cli.training --config configs/training_c3_stage2_b3_from_stage1.json`.
+
+Stage 2 intentionally uses `strict=false` and `load_optimizer_state=false`
+because it turns on RDT and uses different learning rates.
+
 ## Train
 
 Binary example:
@@ -53,6 +81,8 @@ Training keeps:
 - `last.pt`
 - `best_loss_*.pt`
 - `best_f1_*.pt`
+
+For C0-C5 analysis and evaluation, start from `best_loss_*.pt`.
 
 ## Evaluate
 
@@ -131,6 +161,9 @@ Default patch token geometry:
 
 The concatenated event context length is `1916`. With the default
 `top_tokens_per_branch = 2`, the initial evidence state is `U0: [B, 8, D]`.
+The C4 3-scale ablation removes the final branch, so the event context length
+becomes `893` and top-2 evidence selection yields `U0: [B, 6, D]`. The C5
+top-4 ablation keeps four branches and yields `U0: [B, 16, D]`.
 
 Default encoder hyperparameters:
 
@@ -215,6 +248,12 @@ The active schema is:
         "weight": 0.3,
         "aggregation": "mean"
       }
+    },
+    "initialization": {
+      "checkpoint_path": null,
+      "load_model_state": true,
+      "strict": false,
+      "load_optimizer_state": false
     }
   }
 }
@@ -286,7 +325,11 @@ Evaluation writes:
 When enabled, diagnostics now include:
 
 - `branch_logits` with the saved logit payload
-- `selected_evidence_tokens` with the saved embedding payload
+- `selected_evidence_indices` for the selected event-token positions
+- `selected_evidence_scores` from branch MIL attention weights
+- `selected_evidence_branch_ids` identifying which branch selected each token
+- `selected_evidence_tokens` with the saved embedding payload only when
+  `save_embeddings=true`
 
 Full branch attention maps stay in the model output for training and tests, but
 they are not dumped into JSONL by default because they are large.

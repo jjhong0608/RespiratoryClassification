@@ -160,6 +160,33 @@ def _eval_payload() -> dict:
 
 
 def test_repo_example_configs_load() -> None:
+    c0_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c0_b3_focal_patience8.json"
+    )
+    c1_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c1_b3_bce_aux01_patience8.json"
+    )
+    c2_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c2_b1_bce_aux01_patience8.json"
+    )
+    c3_stage1_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c3_stage1_b1_bce_aux01.json"
+    )
+    c3_stage2_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c3_stage2_b3_from_stage1.json"
+    )
+    c4_3scale_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c4_3scale_bce_aux01_rdt3.json"
+    )
+    c4_4scale_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c4_4scale_bce_aux01_rdt3.json"
+    )
+    c5_top2_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c5_top2_bce_aux01_rdt3.json"
+    )
+    c5_top4_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_c5_top4_bce_aux01_rdt3.json"
+    )
     b0_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b0.json")
     b1_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b1.json")
     b2_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b2.json")
@@ -177,6 +204,17 @@ def test_repo_example_configs_load() -> None:
     assert b1_cfg.train.loss.branch_auxiliary.enabled is True
     assert b2_cfg.model.encoder.architecture.rdt.steps == 2
     assert b3_cfg.model.encoder.architecture.rdt.steps == 3
+    assert c0_cfg.train.loss.type == "focal"
+    assert c1_cfg.train.loss.type == "bce"
+    assert c2_cfg.model.encoder.architecture.rdt.enabled is False
+    assert c3_stage1_cfg.model.encoder.architecture.rdt.enabled is False
+    assert c3_stage2_cfg.train.initialization.checkpoint_path is None
+    assert c3_stage2_cfg.train.initialization.strict is False
+    assert c3_stage2_cfg.train.initialization.load_optimizer_state is False
+    assert len(c4_3scale_cfg.model.encoder.architecture.patch_branches) == 3
+    assert len(c4_4scale_cfg.model.encoder.architecture.patch_branches) == 4
+    assert c5_top2_cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
+    assert c5_top4_cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 4
     assert training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert multiclass_cfg.train.loss.type == "cross_entropy"
     assert cv_cfg.folds[0].name == "fold_0"
@@ -194,6 +232,7 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.model.classifier.pooling == "latent_mean"
     assert cfg.model.encoder.architecture.rdt.enabled is True
     assert cfg.train.loss.branch_auxiliary.enabled is False
+    assert cfg.train.initialization.checkpoint_path is None
 
 
 def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) -> None:
@@ -298,6 +337,71 @@ def test_invalid_branch_auxiliary_aggregation_is_rejected(tmp_path: Path) -> Non
     config_path = _write_json(tmp_path / "bad_branch_aux_agg.json", payload)
 
     with pytest.raises(ValueError, match="aggregation"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_training_initialization_accepts_checkpoint_path(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["train"]["initialization"] = {
+        "checkpoint_path": "checkpoints/stage1/best_loss_0.123456.pt",
+        "load_model_state": True,
+        "strict": False,
+        "load_optimizer_state": False,
+    }
+    config_path = _write_json(tmp_path / "warmstart.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert (
+        cfg.train.initialization.checkpoint_path
+        == "checkpoints/stage1/best_loss_0.123456.pt"
+    )
+    assert cfg.train.initialization.load_model_state is True
+    assert cfg.train.initialization.strict is False
+    assert cfg.train.initialization.load_optimizer_state is False
+
+
+@pytest.mark.parametrize(
+    "field_name, field_value, match",
+    [
+        ("load_model_state", "yes", "load_model_state"),
+        ("strict", "false", "strict"),
+        ("load_optimizer_state", 1, "load_optimizer_state"),
+    ],
+)
+def test_training_initialization_flags_must_be_booleans(
+    tmp_path: Path,
+    field_name: str,
+    field_value: object,
+    match: str,
+) -> None:
+    payload = _base_payload()
+    payload["train"]["initialization"] = {
+        "checkpoint_path": None,
+        "load_model_state": True,
+        "strict": False,
+        "load_optimizer_state": False,
+    }
+    payload["train"]["initialization"][field_name] = field_value
+    config_path = _write_json(tmp_path / f"bad_init_{field_name}.json", payload)
+
+    with pytest.raises(TypeError, match=match):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_training_initialization_checkpoint_path_must_be_string_or_null(
+    tmp_path: Path,
+) -> None:
+    payload = _base_payload()
+    payload["train"]["initialization"] = {
+        "checkpoint_path": 123,
+        "load_model_state": True,
+        "strict": False,
+        "load_optimizer_state": False,
+    }
+    config_path = _write_json(tmp_path / "bad_init_path.json", payload)
+
+    with pytest.raises(TypeError, match="checkpoint_path"):
         JsonConfigLoader.load_training(config_path)
 
 

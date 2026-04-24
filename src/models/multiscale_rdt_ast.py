@@ -95,6 +95,9 @@ class AstModelOutput:
     branch_logits: Tensor | None = None
     branch_attention_weights: tuple[Tensor, ...] | None = None
     selected_evidence_tokens: Tensor | None = None
+    selected_evidence_indices: Tensor | None = None
+    selected_evidence_scores: Tensor | None = None
+    selected_evidence_branch_ids: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,13 @@ class BranchMilOutput:
     logits: Tensor
     attention_weights: Tensor
     embedding: Tensor
+
+
+@dataclass(frozen=True)
+class SelectedEvidence:
+    tokens: Tensor
+    indices: Tensor
+    scores: Tensor
 
 
 def compute_token_grid(
@@ -134,7 +144,9 @@ def compute_token_count(
     return n_t * n_f
 
 
-def select_top_tokens(tokens: Tensor, scores: Tensor, *, top_k: int) -> Tensor:
+def select_top_tokens(
+    tokens: Tensor, scores: Tensor, *, top_k: int
+) -> SelectedEvidence:
     if tokens.ndim != 3:
         raise ValueError(f"tokens must have shape (B, T, D), got {tuple(tokens.shape)}")
     if scores.ndim != 2:
@@ -148,10 +160,16 @@ def select_top_tokens(tokens: Tensor, scores: Tensor, *, top_k: int) -> Tensor:
         raise ValueError("top_k must be greater than zero")
     if top_k > int(tokens.shape[1]):
         raise ValueError(f"top_k={top_k} exceeds token length {int(tokens.shape[1])}")
-    top_indices = scores.topk(top_k, dim=1).indices
-    return tokens.gather(
+    top = scores.topk(top_k, dim=1)
+    top_indices = top.indices
+    selected_tokens = tokens.gather(
         1,
         top_indices.unsqueeze(-1).expand(-1, -1, tokens.shape[-1]),
+    )
+    return SelectedEvidence(
+        tokens=selected_tokens,
+        indices=top_indices,
+        scores=top.values,
     )
 
 
@@ -548,26 +566,38 @@ class MultiScaleRdtAstModel(nn.Module):
         branch_embeddings: list[Tensor] = []
         branch_attention_weights: list[Tensor] = []
         selected_tokens: list[Tensor] = []
+        selected_indices: list[Tensor] = []
+        selected_scores: list[Tensor] = []
+        selected_branch_ids: list[Tensor] = []
         top_k = self.cfg.encoder.architecture.rdt.top_tokens_per_branch
-        for branch_tokens, branch_head in zip(
-            encoder_output.branch_event_tokens,
-            self.branch_mil_heads,
-            strict=True,
+        for branch_index, (branch_tokens, branch_head) in enumerate(
+            zip(
+                encoder_output.branch_event_tokens,
+                self.branch_mil_heads,
+                strict=True,
+            )
         ):
             mil_output = cast(BranchMilOutput, branch_head(branch_tokens))
             branch_logits.append(mil_output.logits)
             branch_embeddings.append(mil_output.embedding)
             branch_attention_weights.append(mil_output.attention_weights)
-            selected_tokens.append(
-                select_top_tokens(
-                    branch_tokens,
-                    mil_output.attention_weights,
-                    top_k=top_k,
-                )
+            selected = select_top_tokens(
+                branch_tokens,
+                mil_output.attention_weights,
+                top_k=top_k,
+            )
+            selected_tokens.append(selected.tokens)
+            selected_indices.append(selected.indices)
+            selected_scores.append(selected.scores)
+            selected_branch_ids.append(
+                torch.full_like(selected.indices, fill_value=branch_index)
             )
 
         stacked_branch_logits = self._stack_branch_logits(branch_logits)
         selected_evidence_tokens = torch.cat(selected_tokens, dim=1)
+        selected_evidence_indices = torch.cat(selected_indices, dim=1)
+        selected_evidence_scores = torch.cat(selected_scores, dim=1)
+        selected_evidence_branch_ids = torch.cat(selected_branch_ids, dim=1)
         evidence_tokens = selected_evidence_tokens
         if self.rdt_block is not None:
             for _ in range(self.cfg.encoder.architecture.rdt.steps):
@@ -596,4 +626,7 @@ class MultiScaleRdtAstModel(nn.Module):
             branch_logits=stacked_branch_logits,
             branch_attention_weights=tuple(branch_attention_weights),
             selected_evidence_tokens=selected_evidence_tokens,
+            selected_evidence_indices=selected_evidence_indices,
+            selected_evidence_scores=selected_evidence_scores,
+            selected_evidence_branch_ids=selected_evidence_branch_ids,
         )

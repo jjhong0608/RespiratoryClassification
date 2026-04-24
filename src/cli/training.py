@@ -18,6 +18,7 @@ from src.training.imbalance import (
     collect_targets,
     resolve_imbalance,
 )
+from src.training.initialization import initialize_from_checkpoint
 from src.training.trainer import Trainer, TrainerConfig
 from src.utils.config import JsonConfigLoader
 from src.utils.fs import Fs
@@ -129,6 +130,24 @@ def main() -> None:
         optimizer_summary.head_trainable_parameters,
         optimizer_summary.param_group_count,
     )
+    initialization_summary = initialize_from_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        cfg=cfg.train.initialization,
+        map_location="cpu",
+    )
+    if initialization_summary.checkpoint_path is not None:
+        logger.info(
+            "Training initialization | checkpoint=%s | strict=%s | "
+            "loaded_model_state=%s | loaded_optimizer_state=%s | "
+            "missing_keys=%s | unexpected_keys=%s",
+            initialization_summary.checkpoint_path,
+            initialization_summary.strict,
+            initialization_summary.loaded_model_state,
+            initialization_summary.loaded_optimizer_state,
+            list(initialization_summary.missing_keys),
+            list(initialization_summary.unexpected_keys),
+        )
 
     trainer = Trainer(
         TrainerConfig(
@@ -162,6 +181,7 @@ def main() -> None:
             "architecture_summary": asdict(architecture_summary),
             "adaptation_summary": asdict(adaptation_summary),
             "optimizer_summary": asdict(optimizer_summary),
+            "initialization_summary": asdict(initialization_summary),
         },
     )
 

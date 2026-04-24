@@ -536,6 +536,9 @@ def test_binary_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:
     assert len(rows) == len(build_dataset(data_cfg, split="eval"))
     assert len(diagnostics) == len(rows)
     assert "branch_logits" in diagnostics[0]
+    assert "selected_evidence_indices" in diagnostics[0]
+    assert "selected_evidence_scores" in diagnostics[0]
+    assert "selected_evidence_branch_ids" in diagnostics[0]
     assert "selected_evidence_tokens" in diagnostics[0]
 
 
@@ -566,6 +569,9 @@ def test_multiclass_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:
     assert len(rows) == len(build_dataset(data_cfg, split="eval"))
     assert len(diagnostics) == len(rows)
     assert "branch_logits" in diagnostics[0]
+    assert "selected_evidence_indices" in diagnostics[0]
+    assert "selected_evidence_scores" in diagnostics[0]
+    assert "selected_evidence_branch_ids" in diagnostics[0]
 
 
 def test_evaluator_rejects_frontend_dim_mismatch(tmp_path: Path) -> None:

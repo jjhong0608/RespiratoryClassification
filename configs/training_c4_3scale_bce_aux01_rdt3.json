@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "respiratory_event_mil_b2",
+    "name": "respiratory_c4_3scale_bce_aux01_rdt3",
     "task": "normal_vs_abnormal",
     "mode": "clip",
     "seed": 42,
@@ -60,30 +60,44 @@
         "mlp_ratio": 2.0,
         "hidden_dropout_prob": 0.1,
         "attention_probs_dropout_prob": 0.1,
-        "layer_norm_eps": 1e-6,
+        "layer_norm_eps": 1e-06,
         "shared_stem_depth": 2,
         "adapter_depth": 1,
         "patch_branches": [
           {
-            "patch_size": [16, 16],
-            "stride": [8, 16]
+            "patch_size": [
+              16,
+              16
+            ],
+            "stride": [
+              8,
+              16
+            ]
           },
           {
-            "patch_size": [8, 32],
-            "stride": [4, 32]
+            "patch_size": [
+              8,
+              32
+            ],
+            "stride": [
+              4,
+              32
+            ]
           },
           {
-            "patch_size": [4, 64],
-            "stride": [2, 64]
-          },
-          {
-            "patch_size": [2, 128],
-            "stride": [1, 128]
+            "patch_size": [
+              4,
+              64
+            ],
+            "stride": [
+              2,
+              64
+            ]
           }
         ],
         "rdt": {
           "enabled": true,
-          "steps": 2,
+          "steps": 3,
           "top_tokens_per_branch": 2,
           "gated_residual": true,
           "layerscale_init": 0.01
@@ -98,25 +112,25 @@
     }
   },
   "train": {
-    "epochs": 100,
+    "epochs": 40,
     "top_k": 3,
     "max_grad_norm": 1.0,
     "optimizer": {
-      "encoder_lr": 1e-3,
-      "head_lr": 1e-3,
+      "encoder_lr": 0.001,
+      "head_lr": 0.001,
       "weight_decay": 0.01
     },
     "scheduler": {
       "warmup_ratio": 0.15
     },
     "loss": {
-      "type": "focal",
+      "type": "bce",
       "auto_pos_weight": false,
       "pos_weight": null,
       "gamma": 2.0,
       "branch_auxiliary": {
         "enabled": true,
-        "weight": 0.3,
+        "weight": 0.1,
         "aggregation": "mean"
       }
     },
@@ -126,8 +140,8 @@
     "early_stopping": {
       "enabled": true,
       "monitor": "val_loss",
-      "patience": 30,
-      "min_delta": 0.00001
+      "patience": 8,
+      "min_delta": 1e-05
     }
   },
   "analysis": {

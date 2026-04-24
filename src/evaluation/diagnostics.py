@@ -33,6 +33,21 @@ def build_diagnostic_rows(
         if output.selected_evidence_tokens is not None
         else None
     )
+    selected_evidence_indices = (
+        output.selected_evidence_indices.detach().cpu()
+        if output.selected_evidence_indices is not None
+        else None
+    )
+    selected_evidence_scores = (
+        output.selected_evidence_scores.detach().cpu()
+        if output.selected_evidence_scores is not None
+        else None
+    )
+    selected_evidence_branch_ids = (
+        output.selected_evidence_branch_ids.detach().cpu()
+        if output.selected_evidence_branch_ids is not None
+        else None
+    )
 
     for index, audio_path in enumerate(batch.audio_paths):
         predicted_label = int(predicted_labels[index].item())
@@ -58,6 +73,14 @@ def build_diagnostic_rows(
                 row["branch_logits"] = branch_logits[index].tolist()
         if analysis.save_probabilities:
             row["probabilities"] = probability_payload
+        if selected_evidence_indices is not None:
+            row["selected_evidence_indices"] = selected_evidence_indices[index].tolist()
+        if selected_evidence_scores is not None:
+            row["selected_evidence_scores"] = selected_evidence_scores[index].tolist()
+        if selected_evidence_branch_ids is not None:
+            row["selected_evidence_branch_ids"] = selected_evidence_branch_ids[
+                index
+            ].tolist()
         if analysis.save_embeddings:
             row["pooled_embedding"] = embeddings[index].tolist()
             if selected_evidence_tokens is not None:
