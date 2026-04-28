@@ -61,6 +61,7 @@ def build_clip_loader(
     num_workers: int,
     shuffle: bool,
     sampler: WeightedRandomSampler | None = None,
+    generator: torch.Generator | None = None,
 ) -> DataLoader[ClipBatch]:
     return cast(
         DataLoader[ClipBatch],
@@ -71,5 +72,6 @@ def build_clip_loader(
             sampler=sampler,
             num_workers=num_workers,
             collate_fn=clip_collate_fn,
+            generator=generator,
         ),
     )

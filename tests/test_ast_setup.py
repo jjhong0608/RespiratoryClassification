@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import cast
+from typing import Literal, cast
 
+from src.models.model import BranchAwareGatedEvidencePooling
 from src.training.ast_setup import (
     apply_encoder_adaptation,
     build_ast_model,
@@ -14,6 +15,8 @@ from src.utils.checkpoint import parse_model_cfg
 from src.utils.config import (
     ClassifierConfig,
     EncoderAdaptationConfig,
+    EvidencePoolingConfig,
+    MilConfig,
     ModelConfig,
     ModelEncoderConfig,
     MultiScaleRdtArchitectureConfig,
@@ -24,7 +27,16 @@ from torch import nn
 from conftest import small_patch_branches
 
 
-def _run_model_config(*, rdt_enabled: bool = True) -> ModelConfig:
+def _run_model_config(
+    *,
+    rdt_enabled: bool = True,
+    evidence_score_source: Literal[
+        "attention_weight", "attention_logit", "instance_logit"
+    ] = "attention_weight",
+    exclude_branches_from_evidence: tuple[int, ...] = (),
+    attention_temperature: float = 1.0,
+    evidence_pooling: EvidencePoolingConfig | None = None,
+) -> ModelConfig:
     return ModelConfig(
         encoder=ModelEncoderConfig(
             adaptation=EncoderAdaptationConfig(mode="full", num_layers=0),
@@ -44,7 +56,11 @@ def _run_model_config(*, rdt_enabled: bool = True) -> ModelConfig:
                     top_tokens_per_branch=2,
                     gated_residual=True,
                     layerscale_init=0.01,
+                    evidence_score_source=evidence_score_source,
+                    exclude_branches_from_evidence=exclude_branches_from_evidence,
                 ),
+                mil=MilConfig(attention_temperature=attention_temperature),
+                evidence_pooling=evidence_pooling or EvidencePoolingConfig(),
             ),
         ),
         classifier=ClassifierConfig(
@@ -99,6 +115,29 @@ def test_frozen_adaptation_freezes_encoder_side_and_keeps_head_trainable() -> No
     )
 
 
+def test_frozen_adaptation_keeps_branch_gated_pooler_trainable() -> None:
+    model = build_ast_model(
+        _run_model_config(
+            evidence_pooling=EvidencePoolingConfig(
+                type="branch_gated",
+                dropout=0.0,
+            )
+        ),
+        num_mel_bins=32,
+        max_length=32,
+        num_classes=2,
+    )
+
+    apply_encoder_adaptation(
+        model,
+        EncoderAdaptationConfig(mode="frozen", num_layers=0),
+    )
+
+    pooler = cast(BranchAwareGatedEvidencePooling, model.evidence_pooler)
+
+    assert any(parameter.requires_grad for parameter in pooler.parameters())
+
+
 def test_grouped_optimizer_uses_event_mil_encoder_and_head_groups() -> None:
     model = build_ast_model(
         _run_model_config(),
@@ -139,6 +178,36 @@ def test_grouped_optimizer_uses_event_mil_encoder_and_head_groups() -> None:
     assert id(fusion_layer.weight) not in encoder_param_ids
 
 
+def test_grouped_optimizer_includes_branch_gated_pooler_in_head_group() -> None:
+    model = build_ast_model(
+        _run_model_config(
+            evidence_pooling=EvidencePoolingConfig(
+                type="branch_gated",
+                dropout=0.0,
+            )
+        ),
+        num_mel_bins=32,
+        max_length=32,
+        num_classes=2,
+    )
+    apply_encoder_adaptation(model, model.cfg.encoder.adaptation)
+
+    optimizer, _ = build_grouped_optimizer(
+        model,
+        encoder_lr=1e-5,
+        head_lr=1e-4,
+        weight_decay=0.01,
+    )
+
+    head_param_ids = {
+        id(parameter) for parameter in optimizer.param_groups[1]["params"]
+    }
+    pooler = cast(BranchAwareGatedEvidencePooling, model.evidence_pooler)
+    gate_linear = cast(nn.Linear, pooler.gate[1])
+
+    assert id(gate_linear.weight) in head_param_ids
+
+
 def test_grouped_optimizer_still_has_head_group_when_rdt_disabled() -> None:
     model = build_ast_model(
         _run_model_config(rdt_enabled=False),
@@ -165,6 +234,27 @@ def test_inspect_pretrained_encoder_returns_none_for_clean_break_model() -> None
     assert inspect_pretrained_encoder(_run_model_config()) is None
 
 
+def test_build_ast_model_preserves_d_e_f_architecture_knobs() -> None:
+    model = build_ast_model(
+        _run_model_config(
+            evidence_score_source="attention_logit",
+            exclude_branches_from_evidence=(3,),
+            attention_temperature=0.5,
+        ),
+        num_mel_bins=32,
+        max_length=32,
+        num_classes=2,
+    )
+
+    architecture = model.cfg.encoder.architecture
+
+    assert architecture.rdt.evidence_score_source == "attention_logit"
+    assert architecture.rdt.exclude_branches_from_evidence == (3,)
+    assert architecture.mil.attention_temperature == 0.5
+    assert architecture.evidence_pooling.type == "mean"
+    assert model.branch_mil_heads[0].attention_temperature == 0.5
+
+
 def test_architecture_summary_reports_event_geometry() -> None:
     model = build_ast_model(
         _run_model_config(),
@@ -183,6 +273,10 @@ def test_architecture_summary_reports_event_geometry() -> None:
     assert summary.rdt_enabled is True
     assert summary.rdt_steps == 2
     assert summary.rdt_top_tokens_per_branch == 2
+    assert summary.rdt_evidence_score_source == "attention_weight"
+    assert summary.rdt_exclude_branches_from_evidence == ()
+    assert summary.mil_attention_temperature == 1.0
+    assert summary.evidence_pooling_type == "mean"
 
 
 def test_parse_model_cfg_reconstructs_checkpoint_config() -> None:
@@ -201,6 +295,9 @@ def test_parse_model_cfg_reconstructs_checkpoint_config() -> None:
     assert parsed.encoder.architecture.rdt.enabled is True
     assert parsed.encoder.architecture.rdt.steps == 2
     assert parsed.encoder.architecture.rdt.top_tokens_per_branch == 2
+    assert parsed.encoder.architecture.rdt.evidence_score_source == "attention_weight"
+    assert parsed.encoder.architecture.mil.attention_temperature == 1.0
+    assert parsed.encoder.architecture.evidence_pooling.type == "mean"
     assert parsed.num_classes == 3
 
 

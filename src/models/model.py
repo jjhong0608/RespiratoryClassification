@@ -3,9 +3,14 @@ from __future__ import annotations
 from src.models.multiscale_rdt_ast import (
     AstFeatureDims,
     AstModelOutput,
+    BranchAwareGatedEvidencePooling,
     BranchMilOutput,
     ClassifierConfig,
     EncoderAdaptationConfig,
+    EvidencePoolingConfig,
+    EvidencePoolingOutput,
+    MeanEvidencePooling,
+    MilConfig,
     MultiScaleEncoderOutput,
     MultiScalePatchStemAdapterEncoder,
     MultiScaleRdtArchitectureConfig,
@@ -20,15 +25,21 @@ from src.models.multiscale_rdt_ast import (
     compute_token_count,
     compute_token_grid,
     default_patch_branches,
+    get_evidence_scores,
     select_top_tokens,
 )
 
 __all__ = [
     "AstFeatureDims",
     "AstModelOutput",
+    "BranchAwareGatedEvidencePooling",
     "BranchMilOutput",
     "ClassifierConfig",
     "EncoderAdaptationConfig",
+    "EvidencePoolingConfig",
+    "EvidencePoolingOutput",
+    "MeanEvidencePooling",
+    "MilConfig",
     "MultiScaleEncoderOutput",
     "MultiScalePatchStemAdapterEncoder",
     "MultiScaleRdtArchitectureConfig",
@@ -43,5 +54,6 @@ __all__ = [
     "compute_token_count",
     "compute_token_grid",
     "default_patch_branches",
+    "get_evidence_scores",
     "select_top_tokens",
 ]

@@ -27,4 +27,6 @@ scripts/*
 src/plots/*
 !src/plots/__init__.py
 !src/plots/export.py
-checkpoints_old/
+checkpoints*/
+configs/*
+codex*.md

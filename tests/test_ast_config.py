@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,79 @@ def _eval_payload() -> dict:
 
 
 def test_repo_example_configs_load() -> None:
+    d_e_f_config_paths = [
+        "training_d1_c3_3scale_stage1.json",
+        "training_d1_c3_3scale_stage2.json",
+        "training_d2_stage2_no_rdt_from_stage1.json",
+        "training_d3_direct_b3_low_lr.json",
+        "training_d4_c3_top1_stage2.json",
+        "training_d4_c3_top3_stage2.json",
+        "training_d5_c3_stage1_seed0.json",
+        "training_d5_c3_stage2_seed0.json",
+        "training_d5_c3_stage1_seed1.json",
+        "training_d5_c3_stage2_seed1.json",
+        "training_d5_c3_stage1_seed2.json",
+        "training_d5_c3_stage2_seed2.json",
+        "training_e1_c3_attention_logit_stage2.json",
+        "training_e2_c3_instance_logit_stage2.json",
+        "training_e3_c3_attention_temp05_stage2.json",
+        "training_e4_c3_entropy001_stage2.json",
+        "training_f1_c3_branch_aux_weights_stage2.json",
+        "training_f2_c3_exclude_branch4_evidence_stage2.json",
+    ]
+    d_e_f_configs = [
+        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
+        for config_path in d_e_f_config_paths
+    ]
+    g_config_paths = [
+        "training_g1_d3_seed0.json",
+        "training_g1_d3_seed1.json",
+        "training_g1_d3_seed2.json",
+        "training_g1_d3_seed42.json",
+        "training_g1_d3_seed43.json",
+        "training_g2_direct_low_lr_no_rdt.json",
+        "training_g3_direct_low_lr_3scale.json",
+        "training_g4_direct_low_lr_aux005.json",
+        "training_g5_direct_low_lr_no_aux.json",
+        "training_g6_direct_low_lr_focal_gamma1.json",
+        "training_g7_direct_low_lr_focal_gamma2.json",
+    ]
+    g_configs = [
+        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
+        for config_path in g_config_paths
+    ]
+    h0_gated_config_paths = [
+        "training_h0_branch_gated_seed0.json",
+        "training_h0_branch_gated_seed1.json",
+        "training_h0_branch_gated_seed2.json",
+        "training_h0_branch_gated_seed42.json",
+        "training_h0_branch_gated_seed43.json",
+    ]
+    h0_gated_configs = [
+        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
+        for config_path in h0_gated_config_paths
+    ]
+    h_config_paths = [
+        "training_h1_no_rdt_seed0.json",
+        "training_h1_no_rdt_seed1.json",
+        "training_h1_no_rdt_seed2.json",
+        "training_h1_no_rdt_seed42.json",
+        "training_h1_no_rdt_seed43.json",
+        "training_h2_no_aux_seed0.json",
+        "training_h2_no_aux_seed1.json",
+        "training_h2_no_aux_seed2.json",
+        "training_h2_no_aux_seed42.json",
+        "training_h2_no_aux_seed43.json",
+        "training_h3_3scale_seed0.json",
+        "training_h3_3scale_seed1.json",
+        "training_h3_3scale_seed2.json",
+        "training_h3_3scale_seed42.json",
+        "training_h3_3scale_seed43.json",
+    ]
+    h_configs = [
+        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
+        for config_path in h_config_paths
+    ]
     c0_cfg = JsonConfigLoader.load_training(
         ROOT / "configs/training_c0_b3_focal_patience8.json"
     )
@@ -215,10 +289,126 @@ def test_repo_example_configs_load() -> None:
     assert len(c4_4scale_cfg.model.encoder.architecture.patch_branches) == 4
     assert c5_top2_cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
     assert c5_top4_cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 4
+    assert len(d_e_f_configs) == len(d_e_f_config_paths)
+    assert d_e_f_configs[0].model.encoder.architecture.rdt.enabled is False
+    assert len(d_e_f_configs[0].model.encoder.architecture.patch_branches) == 3
+    assert d_e_f_configs[4].model.encoder.architecture.rdt.top_tokens_per_branch == 1
+    assert d_e_f_configs[5].model.encoder.architecture.rdt.top_tokens_per_branch == 3
+    assert d_e_f_configs[6].experiment.seed == 0
+    assert d_e_f_configs[10].experiment.seed == 2
+    assert (
+        d_e_f_configs[12].model.encoder.architecture.rdt.evidence_score_source
+        == "attention_logit"
+    )
+    assert (
+        d_e_f_configs[13].model.encoder.architecture.rdt.evidence_score_source
+        == "instance_logit"
+    )
+    assert d_e_f_configs[14].model.encoder.architecture.mil.attention_temperature == 0.5
+    assert d_e_f_configs[15].train.loss.attention_entropy.enabled is True
+    assert d_e_f_configs[16].train.loss.branch_auxiliary.weights == (
+        0.1,
+        0.1,
+        0.1,
+        0.03,
+    )
+    assert d_e_f_configs[
+        17
+    ].model.encoder.architecture.rdt.exclude_branches_from_evidence == (3,)
+    assert len(g_configs) == len(g_config_paths)
+    assert [cfg.experiment.seed for cfg in g_configs[:5]] == [0, 1, 2, 42, 43]
+    assert all(cfg.train.initialization.checkpoint_path is None for cfg in g_configs)
+    assert all(cfg.train.initialization.load_model_state is False for cfg in g_configs)
+    assert all(cfg.train.initialization.strict is False for cfg in g_configs)
+    assert all(
+        cfg.train.initialization.load_optimizer_state is False for cfg in g_configs
+    )
+    assert g_configs[5].model.encoder.architecture.rdt.enabled is False
+    assert len(g_configs[6].model.encoder.architecture.patch_branches) == 3
+    assert g_configs[7].train.loss.branch_auxiliary.weight == 0.05
+    assert g_configs[8].train.loss.branch_auxiliary.enabled is False
+    assert g_configs[8].train.loss.branch_auxiliary.weight == 0.1
+    assert g_configs[9].train.loss.type == "focal"
+    assert g_configs[9].train.loss.gamma == 1.0
+    assert g_configs[10].train.loss.type == "focal"
+    assert g_configs[10].train.loss.gamma == 2.0
+    assert len(h0_gated_configs) == len(h0_gated_config_paths)
+    assert [cfg.experiment.seed for cfg in h0_gated_configs] == [0, 1, 2, 42, 43]
+    assert all(
+        cfg.model.encoder.architecture.evidence_pooling.type == "branch_gated"
+        for cfg in h0_gated_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.evidence_pooling.temperature == 1.0
+        for cfg in h0_gated_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.rdt.enabled is True for cfg in h0_gated_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.rdt.steps == 3 for cfg in h0_gated_configs
+    )
+    assert all(
+        cfg.train.loss.branch_auxiliary.enabled is True for cfg in h0_gated_configs
+    )
+    assert all(
+        cfg.train.loss.branch_auxiliary.weight == 0.1 for cfg in h0_gated_configs
+    )
+    assert all(
+        cfg.train.initialization.load_model_state is False for cfg in h0_gated_configs
+    )
+    assert len(h_configs) == len(h_config_paths)
+    assert [cfg.experiment.seed for cfg in h_configs[:5]] == [0, 1, 2, 42, 43]
+    assert [cfg.experiment.seed for cfg in h_configs[5:10]] == [0, 1, 2, 42, 43]
+    assert [cfg.experiment.seed for cfg in h_configs[10:]] == [0, 1, 2, 42, 43]
+    assert all(cfg.train.initialization.checkpoint_path is None for cfg in h_configs)
+    assert all(cfg.train.initialization.load_model_state is False for cfg in h_configs)
+    assert all(cfg.train.initialization.strict is False for cfg in h_configs)
+    assert all(
+        cfg.train.initialization.load_optimizer_state is False for cfg in h_configs
+    )
+    assert all(cfg.train.loss.type == "bce" for cfg in h_configs)
+    assert all(cfg.train.optimizer.encoder_lr == 1e-5 for cfg in h_configs)
+    assert all(cfg.train.optimizer.head_lr == 3e-4 for cfg in h_configs)
+    assert all(cfg.train.early_stopping.patience == 8 for cfg in h_configs)
+    assert all(
+        cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
+        for cfg in h_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.rdt.enabled is False for cfg in h_configs[:5]
+    )
+    assert all(
+        cfg.train.loss.branch_auxiliary.enabled is False for cfg in h_configs[5:10]
+    )
+    assert all(
+        len(cfg.model.encoder.architecture.patch_branches) == 3
+        for cfg in h_configs[10:]
+    )
     assert training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert multiclass_cfg.train.loss.type == "cross_entropy"
     assert cv_cfg.folds[0].name == "fold_0"
     assert eval_cfg.threshold_optimization.metric == "f1"
+
+
+def test_g1_configs_differ_from_d3_only_by_name_and_seed() -> None:
+    d3_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_d3_direct_b3_low_lr.json"
+    )
+    expected_seeds = [0, 1, 2, 42, 43]
+
+    for seed in expected_seeds:
+        g1_cfg = JsonConfigLoader.load_training(
+            ROOT / "configs" / f"training_g1_d3_seed{seed}.json"
+        )
+        d3_payload = asdict(d3_cfg)
+        g1_payload = asdict(g1_cfg)
+        d3_payload["experiment"]["name"] = g1_payload["experiment"]["name"]
+        d3_payload["experiment"]["seed"] = g1_payload["experiment"]["seed"]
+
+        assert g1_cfg.experiment.name == f"respiratory_g1_d3_seed{seed}"
+        assert g1_cfg.experiment.seed == seed
+        assert g1_payload == d3_payload
 
 
 def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
@@ -231,8 +421,39 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.model.encoder.type == "multiscale_rdt_ast"
     assert cfg.model.classifier.pooling == "latent_mean"
     assert cfg.model.encoder.architecture.rdt.enabled is True
+    assert cfg.model.encoder.architecture.evidence_pooling.type == "mean"
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.initialization.checkpoint_path is None
+
+
+def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = {
+        "type": "mean",
+        "gate_hidden_size": None,
+        "dropout": 0.1,
+        "temperature": 1.0,
+    }
+    mean_path = _write_json(tmp_path / "mean_pooling.json", payload)
+
+    mean_cfg = JsonConfigLoader.load_training(mean_path)
+
+    assert mean_cfg.model.encoder.architecture.evidence_pooling.type == "mean"
+
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = {
+        "type": "branch_gated",
+        "gate_hidden_size": 16,
+        "dropout": 0.2,
+        "temperature": 0.5,
+    }
+    gated_path = _write_json(tmp_path / "branch_gated_pooling.json", payload)
+
+    gated_cfg = JsonConfigLoader.load_training(gated_path)
+
+    assert gated_cfg.model.encoder.architecture.evidence_pooling.type == "branch_gated"
+    assert gated_cfg.model.encoder.architecture.evidence_pooling.gate_hidden_size == 16
+    assert gated_cfg.model.encoder.architecture.evidence_pooling.dropout == 0.2
+    assert gated_cfg.model.encoder.architecture.evidence_pooling.temperature == 0.5
 
 
 def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) -> None:
@@ -318,6 +539,95 @@ def test_invalid_top_tokens_per_branch_is_rejected(tmp_path: Path) -> None:
         JsonConfigLoader.load_training(config_path)
 
 
+def test_top_tokens_validation_ignores_excluded_branches(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["rdt"]["top_tokens_per_branch"] = 4
+    payload["model"]["encoder"]["architecture"]["rdt"][
+        "exclude_branches_from_evidence"
+    ] = [3]
+    config_path = _write_json(
+        tmp_path / "top_tokens_exclude_short_branch.json", payload
+    )
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 4
+    assert cfg.model.encoder.architecture.rdt.exclude_branches_from_evidence == (3,)
+
+
+def test_invalid_evidence_score_source_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["rdt"]["evidence_score_source"] = (
+        "unsupported"
+    )
+    config_path = _write_json(tmp_path / "bad_source.json", payload)
+
+    with pytest.raises(ValueError, match="evidence_score_source"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_attention_temperature_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["mil"] = {"attention_temperature": 0.0}
+    config_path = _write_json(tmp_path / "bad_temperature.json", payload)
+
+    with pytest.raises(ValueError, match="attention_temperature"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "match"),
+    [
+        ("type", "invalid", "evidence_pooling.type"),
+        ("temperature", 0.0, "evidence_pooling.temperature"),
+        ("dropout", -0.1, "evidence_pooling.dropout"),
+        ("dropout", 1.0, "evidence_pooling.dropout"),
+        ("gate_hidden_size", 0, "evidence_pooling.gate_hidden_size"),
+    ],
+)
+def test_invalid_evidence_pooling_config_is_rejected(
+    tmp_path: Path,
+    field_name: str,
+    field_value: object,
+    match: str,
+) -> None:
+    payload = _base_payload()
+    evidence_pooling: dict[str, object] = {
+        "type": "branch_gated",
+        "gate_hidden_size": None,
+        "dropout": 0.1,
+        "temperature": 1.0,
+    }
+    evidence_pooling[field_name] = field_value
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = evidence_pooling
+    config_path = _write_json(tmp_path / f"bad_pooling_{field_name}.json", payload)
+
+    with pytest.raises(ValueError, match=match):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_excluded_evidence_branch_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["rdt"][
+        "exclude_branches_from_evidence"
+    ] = [4]
+    config_path = _write_json(tmp_path / "bad_excluded_branch.json", payload)
+
+    with pytest.raises(ValueError, match="exclude_branches_from_evidence"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_duplicate_excluded_evidence_branch_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["rdt"][
+        "exclude_branches_from_evidence"
+    ] = [2, 2]
+    config_path = _write_json(tmp_path / "duplicate_excluded_branch.json", payload)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        JsonConfigLoader.load_training(config_path)
+
+
 def test_invalid_branch_auxiliary_weight_is_rejected(tmp_path: Path) -> None:
     payload = _base_payload()
     payload["train"]["loss"]["branch_auxiliary"] = {
@@ -337,6 +647,46 @@ def test_invalid_branch_auxiliary_aggregation_is_rejected(tmp_path: Path) -> Non
     config_path = _write_json(tmp_path / "bad_branch_aux_agg.json", payload)
 
     with pytest.raises(ValueError, match="aggregation"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_branch_auxiliary_weights_length_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["branch_auxiliary"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "weights": [0.1, 0.1, 0.1],
+        "aggregation": "mean",
+    }
+    config_path = _write_json(tmp_path / "bad_branch_weights_length.json", payload)
+
+    with pytest.raises(ValueError, match="weights length"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_branch_auxiliary_weights_value_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["branch_auxiliary"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "weights": [0.1, 0.1, 0.0, 0.1],
+        "aggregation": "mean",
+    }
+    config_path = _write_json(tmp_path / "bad_branch_weights_value.json", payload)
+
+    with pytest.raises(ValueError, match="weights values"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_attention_entropy_weight_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["attention_entropy"] = {
+        "enabled": True,
+        "weight": 0.0,
+    }
+    config_path = _write_json(tmp_path / "bad_entropy.json", payload)
+
+    with pytest.raises(ValueError, match="attention_entropy.weight"):
         JsonConfigLoader.load_training(config_path)
 
 

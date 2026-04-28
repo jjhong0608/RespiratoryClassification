@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from src.data.loaders import ClipBatch
 from src.evaluation.diagnostics import build_diagnostic_rows
@@ -27,6 +28,22 @@ def _output() -> AstModelOutput:
             [[0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]]
         ),
         selected_evidence_branch_ids=torch.tensor([[0, 0, 1, 1, 2, 2, 3, 3]]),
+        evidence_score_source="attention_logit",
+    )
+
+
+def _branch_gated_output() -> AstModelOutput:
+    return AstModelOutput(
+        logits=torch.tensor([0.25]),
+        pooled_embedding=torch.tensor([[0.1, 0.2]]),
+        selected_evidence_indices=torch.tensor([[1, 2]]),
+        selected_evidence_scores=torch.tensor([[0.8, 0.7]]),
+        selected_evidence_branch_ids=torch.tensor([[0, 1]]),
+        evidence_score_source="attention_weight",
+        evidence_pooling_type="branch_gated",
+        evidence_gate_weights=torch.tensor([[0.4, 0.6]]),
+        evidence_gate_entropy=torch.tensor([0.673]),
+        branch_evidence_norms=torch.tensor([[1.0, 2.0]]),
     )
 
 
@@ -48,6 +65,7 @@ def test_diagnostics_always_include_selected_evidence_metadata() -> None:
     assert row["selected_evidence_indices"] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert row["selected_evidence_branch_ids"] == [0, 0, 1, 1, 2, 2, 3, 3]
     assert len(row["selected_evidence_scores"]) == 8
+    assert row["evidence_score_source"] == "attention_logit"
     assert "selected_evidence_tokens" not in row
 
 
@@ -69,3 +87,24 @@ def test_diagnostics_include_selected_evidence_tokens_only_with_embeddings() -> 
     assert "pooled_embedding" in row
     assert "selected_evidence_tokens" in row
     assert len(row["selected_evidence_tokens"]) == 8
+
+
+def test_diagnostics_include_branch_gated_pooling_metadata() -> None:
+    rows = build_diagnostic_rows(
+        _batch(),
+        _branch_gated_output(),
+        probabilities=torch.tensor([0.75]),
+        predicted_labels=torch.tensor([1]),
+        analysis=AnalysisOutputConfig(
+            save_logits=True,
+            save_probabilities=True,
+            save_embeddings=False,
+            save_clip_metadata=True,
+        ),
+    )
+
+    row = rows[0]
+    assert row["evidence_pooling_type"] == "branch_gated"
+    assert row["evidence_gate_weights"] == [0.4000000059604645, 0.6000000238418579]
+    assert row["evidence_gate_entropy"] == pytest.approx(0.673)
+    assert row["branch_evidence_norms"] == [1.0, 2.0]

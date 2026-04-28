@@ -4,6 +4,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+import torch
 from torch.utils.data import WeightedRandomSampler
 
 from src.data.dataset import RespiratoryClipDataset
@@ -35,10 +36,19 @@ def compute_binary_pos_weight(targets: Sequence[int], positive: int = 1) -> floa
     return float(negatives) / float(positives)
 
 
-def build_weighted_sampler(targets: Sequence[int]) -> WeightedRandomSampler:
+def build_weighted_sampler(
+    targets: Sequence[int],
+    *,
+    generator: torch.Generator | None = None,
+) -> WeightedRandomSampler:
     counts = class_counts(targets)
     weights = [1.0 / float(counts[int(target)]) for target in targets]
-    return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+    return WeightedRandomSampler(
+        weights,
+        num_samples=len(weights),
+        replacement=True,
+        generator=generator,
+    )
 
 
 def resolve_imbalance(

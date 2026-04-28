@@ -24,6 +24,7 @@ from src.utils.config import (
     AnalysisConfig,
     AnalysisOutputConfig,
     AstFbankConfig,
+    AttentionEntropyLossConfig,
     AudioConfig,
     BandPassConfig,
     BranchAuxiliaryLossConfig,
@@ -183,9 +184,13 @@ def _trainer_cfg(
     num_classes: int,
     run_dir: Path,
     loss_type: str,
+    gamma: float = 2.0,
     pos_weight: float | None = None,
     branch_auxiliary_enabled: bool = False,
     branch_auxiliary_weight: float = 0.3,
+    branch_auxiliary_weights: tuple[float, ...] | None = None,
+    attention_entropy_enabled: bool = False,
+    attention_entropy_weight: float = 0.0,
 ) -> TrainerConfig:
     return TrainerConfig(
         device="cpu",
@@ -199,12 +204,17 @@ def _trainer_cfg(
         run_dir=run_dir,
         num_classes=num_classes,
         loss_type=loss_type,
-        gamma=2.0,
+        gamma=gamma,
         pos_weight=pos_weight,
         branch_auxiliary=BranchAuxiliaryLossConfig(
             enabled=branch_auxiliary_enabled,
             weight=branch_auxiliary_weight,
             aggregation="mean",
+            weights=branch_auxiliary_weights,
+        ),
+        attention_entropy=AttentionEntropyLossConfig(
+            enabled=attention_entropy_enabled,
+            weight=attention_entropy_weight,
         ),
         analysis=_analysis_cfg(),
         early_stopping=EarlyStoppingConfig(
@@ -458,6 +468,30 @@ def test_trainer_total_loss_matches_final_loss_when_branch_auxiliary_disabled() 
     assert torch.isclose(total_loss, final_loss)
 
 
+def test_trainer_branch_auxiliary_disabled_allows_missing_branch_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="bce",
+            branch_auxiliary_enabled=False,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=None,
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    total_loss, aux_loss = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+
+    assert aux_loss is None
+    assert torch.isclose(total_loss, final_loss)
+
+
 def test_trainer_total_loss_includes_branch_auxiliary_when_enabled() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -484,6 +518,44 @@ def test_trainer_total_loss_includes_branch_auxiliary_when_enabled() -> None:
     assert torch.isclose(total_loss, expected)
 
 
+def test_trainer_branch_auxiliary_weights_override_scalar_weight() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="bce",
+            branch_auxiliary_enabled=True,
+            branch_auxiliary_weight=9.0,
+            branch_auxiliary_weights=(0.1, 0.2, 0.3, 0.4),
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.0, -0.1, 0.2, -0.3]]),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+    assert output.branch_logits is not None
+    branch_losses = trainer._compute_branch_auxiliary_losses(
+        criterion,
+        output.branch_logits,
+        labels,
+    )
+    weight_tensor = torch.tensor(
+        [0.1, 0.2, 0.3, 0.4],
+        dtype=branch_losses.dtype,
+    )
+    expected_auxiliary = (branch_losses * weight_tensor).sum() / weight_tensor.sum()
+
+    assert auxiliary_loss is not None
+    assert torch.isclose(auxiliary_loss, expected_auxiliary)
+    assert torch.isclose(total_loss, final_loss + expected_auxiliary)
+
+
 def test_trainer_raises_when_branch_auxiliary_enabled_without_branch_logits() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -502,6 +574,116 @@ def test_trainer_raises_when_branch_auxiliary_enabled_without_branch_logits() ->
     labels = torch.tensor([1, 0], dtype=torch.long)
 
     with pytest.raises(ValueError, match="branch auxiliary loss enabled"):
+        trainer._compute_total_loss(criterion, output, labels)
+
+
+def test_trainer_attention_entropy_disabled_adds_no_term() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="bce",
+            branch_auxiliary_enabled=False,
+            attention_entropy_enabled=False,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_attention_weights=(
+            torch.tensor([[0.75, 0.25], [0.60, 0.40]], dtype=torch.float32),
+            torch.tensor([[0.20, 0.80], [0.55, 0.45]], dtype=torch.float32),
+        ),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+
+    assert auxiliary_loss is None
+    assert torch.isclose(total_loss, final_loss)
+
+
+@pytest.mark.parametrize("gamma", [1.0, 2.0])
+def test_trainer_focal_loss_builder_accepts_round_g_gamma_values(
+    gamma: float,
+) -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="focal",
+            gamma=gamma,
+            branch_auxiliary_enabled=True,
+            branch_auxiliary_weight=0.1,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor([[0.1, 0.2, 0.3], [0.0, -0.1, 0.2]]),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+
+    assert trainer.cfg.gamma == gamma
+    assert torch.isfinite(total_loss)
+    assert auxiliary_loss is not None
+    assert torch.isfinite(auxiliary_loss)
+
+
+def test_trainer_attention_entropy_enabled_adds_weighted_entropy() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="bce",
+            branch_auxiliary_enabled=False,
+            attention_entropy_enabled=True,
+            attention_entropy_weight=0.25,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_attention_weights=(
+            torch.tensor([[0.75, 0.25], [0.60, 0.40]], dtype=torch.float32),
+            torch.tensor([[0.20, 0.80], [0.55, 0.45]], dtype=torch.float32),
+        ),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+    entropy_loss = trainer._compute_attention_entropy_loss(output)
+
+    assert auxiliary_loss is None
+    assert torch.isclose(total_loss, final_loss + (0.25 * entropy_loss))
+
+
+def test_trainer_raises_when_attention_entropy_enabled_without_attention() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="bce",
+            attention_entropy_enabled=True,
+            attention_entropy_weight=0.1,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor([0.4, -0.7], dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_attention_weights=None,
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="attention entropy loss enabled"):
         trainer._compute_total_loss(criterion, output, labels)
 
 
@@ -539,6 +721,7 @@ def test_binary_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:
     assert "selected_evidence_indices" in diagnostics[0]
     assert "selected_evidence_scores" in diagnostics[0]
     assert "selected_evidence_branch_ids" in diagnostics[0]
+    assert diagnostics[0]["evidence_score_source"] == "attention_weight"
     assert "selected_evidence_tokens" in diagnostics[0]
 
 
@@ -572,6 +755,7 @@ def test_multiclass_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:
     assert "selected_evidence_indices" in diagnostics[0]
     assert "selected_evidence_scores" in diagnostics[0]
     assert "selected_evidence_branch_ids" in diagnostics[0]
+    assert diagnostics[0]["evidence_score_source"] == "attention_weight"
 
 
 def test_evaluator_rejects_frontend_dim_mismatch(tmp_path: Path) -> None:

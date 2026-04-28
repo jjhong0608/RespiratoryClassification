@@ -8,6 +8,8 @@ from src.models.model import (
     AstFeatureDims,
     ClassifierConfig,
     EncoderAdaptationConfig,
+    EvidencePoolingConfig,
+    MilConfig,
     MultiScaleRdtArchitectureConfig,
     MultiScaleRdtAstModelConfig,
     MultiScaleRdtEncoderConfig,
@@ -107,7 +109,22 @@ def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
         architecture_kwargs["patch_branches"] = tuple(
             _parse_patch_branch(branch_raw) for branch_raw in patch_branches_raw
         )
-    architecture_kwargs["rdt"] = RdtConfig(**dict(architecture_kwargs.get("rdt", {})))
+    rdt_kwargs = dict(architecture_kwargs.get("rdt", {}))
+    excluded = rdt_kwargs.get("exclude_branches_from_evidence")
+    if excluded is not None:
+        if not isinstance(excluded, Sequence) or isinstance(excluded, (str, bytes)):
+            raise TypeError(
+                "model_cfg.encoder.architecture.rdt.exclude_branches_from_evidence "
+                "must be a list"
+            )
+        rdt_kwargs["exclude_branches_from_evidence"] = tuple(
+            int(item) for item in excluded
+        )
+    architecture_kwargs["rdt"] = RdtConfig(**rdt_kwargs)
+    architecture_kwargs["mil"] = MilConfig(**dict(architecture_kwargs.get("mil", {})))
+    architecture_kwargs["evidence_pooling"] = EvidencePoolingConfig(
+        **dict(architecture_kwargs.get("evidence_pooling", {}))
+    )
 
     return MultiScaleRdtAstModelConfig(
         encoder=MultiScaleRdtEncoderConfig(

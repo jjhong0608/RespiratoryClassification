@@ -23,6 +23,7 @@ from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
 from src.utils.config import (
     AnalysisConfig,
+    AttentionEntropyLossConfig,
     BranchAuxiliaryLossConfig,
     EarlyStoppingConfig,
 )
@@ -47,6 +48,9 @@ class TrainerConfig:
     pos_weight: float | None = None
     branch_auxiliary: BranchAuxiliaryLossConfig = field(
         default_factory=BranchAuxiliaryLossConfig
+    )
+    attention_entropy: AttentionEntropyLossConfig = field(
+        default_factory=AttentionEntropyLossConfig
     )
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
@@ -165,7 +169,7 @@ class Trainer(LoggingMixin):
         predictions = probabilities.argmax(dim=-1)
         return probabilities, predictions
 
-    def _compute_branch_auxiliary_loss(
+    def _compute_branch_auxiliary_losses(
         self,
         criterion: nn.Module,
         branch_logits: Tensor,
@@ -182,26 +186,73 @@ class Trainer(LoggingMixin):
                     "Binary branch logits must have shape (B, num_branches), "
                     f"got {tuple(branch_logits.shape)}"
                 )
-            expanded_labels = labels.unsqueeze(1).expand_as(branch_logits)
-            return criterion(
-                branch_logits.reshape(-1),
-                expanded_labels.reshape(-1).to(
-                    device=branch_logits.device,
-                    dtype=branch_logits.dtype,
-                ),
+            branch_losses = []
+            branch_labels = labels.to(
+                device=branch_logits.device,
+                dtype=branch_logits.dtype,
             )
+            for branch_index in range(branch_logits.shape[1]):
+                branch_losses.append(
+                    criterion(branch_logits[:, branch_index], branch_labels)
+                )
+            return torch.stack(branch_losses)
         if branch_logits.ndim != 3:
             raise ValueError(
                 "Multiclass branch logits must have shape (B, num_branches, C), "
                 f"got {tuple(branch_logits.shape)}"
             )
-        batch_size, num_branches, num_classes = branch_logits.shape
-        flat_logits = branch_logits.reshape(batch_size * num_branches, num_classes)
-        flat_labels = labels.unsqueeze(1).expand(batch_size, num_branches).reshape(-1)
-        return criterion(
-            flat_logits,
-            flat_labels.to(device=branch_logits.device, dtype=torch.long),
+        branch_losses = []
+        branch_labels = labels.to(device=branch_logits.device, dtype=torch.long)
+        for branch_index in range(branch_logits.shape[1]):
+            branch_losses.append(
+                criterion(branch_logits[:, branch_index, :], branch_labels)
+            )
+        return torch.stack(branch_losses)
+
+    def _compute_branch_auxiliary_loss(
+        self,
+        criterion: nn.Module,
+        branch_logits: Tensor,
+        labels: Tensor,
+    ) -> Tensor:
+        branch_losses = self._compute_branch_auxiliary_losses(
+            criterion,
+            branch_logits,
+            labels,
         )
+        weights = self.cfg.branch_auxiliary.weights
+        if weights is None:
+            return branch_losses.mean()
+        if len(weights) != int(branch_losses.shape[0]):
+            raise ValueError(
+                "train.loss.branch_auxiliary.weights length must match branch logits"
+            )
+        weight_tensor = torch.tensor(
+            weights,
+            device=branch_losses.device,
+            dtype=branch_losses.dtype,
+        )
+        return (branch_losses * weight_tensor).sum() / weight_tensor.sum()
+
+    def _compute_attention_entropy_loss(
+        self,
+        output: AstModelOutput,
+    ) -> Tensor:
+        if output.branch_attention_weights is None:
+            raise ValueError(
+                "attention entropy loss enabled but model did not return branch_attention_weights"
+            )
+        if not output.branch_attention_weights:
+            raise ValueError("attention entropy loss requires at least one branch")
+        entropies = []
+        for attention_weights in output.branch_attention_weights:
+            entropy = (
+                -(attention_weights * (attention_weights + 1e-8).log())
+                .sum(dim=1)
+                .mean()
+            )
+            entropies.append(entropy)
+        return torch.stack(entropies).mean()
 
     def _compute_total_loss(
         self,
@@ -210,18 +261,27 @@ class Trainer(LoggingMixin):
         labels: Tensor,
     ) -> tuple[Tensor, Tensor | None]:
         final_loss = self._compute_main_loss(criterion, output.logits, labels)
-        if not self.cfg.branch_auxiliary.enabled:
-            return final_loss, None
-        if output.branch_logits is None:
-            raise ValueError(
-                "branch auxiliary loss enabled but model did not return branch_logits"
+        total_loss = final_loss
+        auxiliary_loss: Tensor | None = None
+        if self.cfg.branch_auxiliary.enabled:
+            if output.branch_logits is None:
+                raise ValueError(
+                    "branch auxiliary loss enabled but model did not return branch_logits"
+                )
+            auxiliary_loss = self._compute_branch_auxiliary_loss(
+                criterion,
+                output.branch_logits,
+                labels,
             )
-        auxiliary_loss = self._compute_branch_auxiliary_loss(
-            criterion,
-            output.branch_logits,
-            labels,
-        )
-        total_loss = final_loss + (self.cfg.branch_auxiliary.weight * auxiliary_loss)
+            if self.cfg.branch_auxiliary.weights is None:
+                total_loss = total_loss + (
+                    self.cfg.branch_auxiliary.weight * auxiliary_loss
+                )
+            else:
+                total_loss = total_loss + auxiliary_loss
+        if self.cfg.attention_entropy.enabled:
+            entropy_loss = self._compute_attention_entropy_loss(output)
+            total_loss = total_loss + (self.cfg.attention_entropy.weight * entropy_loss)
         return total_loss, auxiliary_loss
 
     def _epoch(

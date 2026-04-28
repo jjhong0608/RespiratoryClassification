@@ -45,6 +45,10 @@ class ModelArchitectureSummary:
     rdt_enabled: bool
     rdt_steps: int
     rdt_top_tokens_per_branch: int
+    rdt_evidence_score_source: str
+    rdt_exclude_branches_from_evidence: tuple[int, ...]
+    mil_attention_temperature: float
+    evidence_pooling_type: str
 
 
 def build_ast_model(
@@ -78,6 +82,8 @@ def build_ast_model(
                 adapter_depth=cfg.encoder.architecture.adapter_depth,
                 patch_branches=cfg.encoder.architecture.patch_branches,
                 rdt=cfg.encoder.architecture.rdt,
+                mil=cfg.encoder.architecture.mil,
+                evidence_pooling=cfg.encoder.architecture.evidence_pooling,
             ),
         ),
         classifier=ClassifierConfig(
@@ -111,6 +117,12 @@ def summarize_model_architecture(
         rdt_enabled=architecture.rdt.enabled,
         rdt_steps=architecture.rdt.steps,
         rdt_top_tokens_per_branch=architecture.rdt.top_tokens_per_branch,
+        rdt_evidence_score_source=architecture.rdt.evidence_score_source,
+        rdt_exclude_branches_from_evidence=(
+            architecture.rdt.exclude_branches_from_evidence
+        ),
+        mil_attention_temperature=architecture.mil.attention_temperature,
+        evidence_pooling_type=architecture.evidence_pooling.type,
     )
 
 

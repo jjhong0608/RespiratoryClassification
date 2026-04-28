@@ -45,6 +45,23 @@ class RdtConfig:
     top_tokens_per_branch: int = 2
     gated_residual: bool = True
     layerscale_init: float = 0.01
+    evidence_score_source: Literal[
+        "attention_weight", "attention_logit", "instance_logit"
+    ] = "attention_weight"
+    exclude_branches_from_evidence: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class MilConfig:
+    attention_temperature: float = 1.0
+
+
+@dataclass(frozen=True)
+class EvidencePoolingConfig:
+    type: Literal["mean", "branch_gated"] = "mean"
+    gate_hidden_size: int | None = None
+    dropout: float = 0.1
+    temperature: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +78,10 @@ class MultiScaleRdtArchitectureConfig:
         default_factory=default_patch_branches
     )
     rdt: RdtConfig = field(default_factory=RdtConfig)
+    mil: MilConfig = field(default_factory=MilConfig)
+    evidence_pooling: EvidencePoolingConfig = field(
+        default_factory=EvidencePoolingConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -98,6 +119,11 @@ class AstModelOutput:
     selected_evidence_indices: Tensor | None = None
     selected_evidence_scores: Tensor | None = None
     selected_evidence_branch_ids: Tensor | None = None
+    evidence_score_source: str | None = None
+    evidence_pooling_type: str | None = None
+    evidence_gate_weights: Tensor | None = None
+    evidence_gate_entropy: Tensor | None = None
+    branch_evidence_norms: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +136,8 @@ class MultiScaleEncoderOutput:
 class BranchMilOutput:
     logits: Tensor
     attention_weights: Tensor
+    attention_logits: Tensor
+    instance_logits: Tensor | None
     embedding: Tensor
 
 
@@ -118,6 +146,15 @@ class SelectedEvidence:
     tokens: Tensor
     indices: Tensor
     scores: Tensor
+
+
+@dataclass(frozen=True)
+class EvidencePoolingOutput:
+    pooled_embedding: Tensor
+    gate_weights: Tensor | None = None
+    gate_entropy: Tensor | None = None
+    branch_evidence_summary: Tensor | None = None
+    branch_evidence_norms: Tensor | None = None
 
 
 def compute_token_grid(
@@ -171,6 +208,136 @@ def select_top_tokens(
         indices=top_indices,
         scores=top.values,
     )
+
+
+def get_evidence_scores(
+    mil_output: BranchMilOutput,
+    *,
+    source: str,
+) -> Tensor:
+    if source == "attention_weight":
+        return mil_output.attention_weights
+    if source == "attention_logit":
+        return mil_output.attention_logits
+    if source == "instance_logit":
+        if mil_output.instance_logits is None:
+            raise ValueError(
+                "instance_logit evidence selection requires instance_logits"
+            )
+        if mil_output.instance_logits.ndim == 2:
+            return mil_output.instance_logits
+        if mil_output.instance_logits.ndim == 3:
+            return mil_output.instance_logits.max(dim=-1).values
+        raise ValueError(
+            "instance_logits must have shape (B, T) or (B, T, C), "
+            f"got {tuple(mil_output.instance_logits.shape)}"
+        )
+    raise ValueError(f"Unsupported evidence_score_source: {source}")
+
+
+class MeanEvidencePooling(nn.Module):
+    def forward(
+        self,
+        evidence_tokens: Tensor,
+        branch_ids: Tensor | None = None,
+    ) -> EvidencePoolingOutput:
+        del branch_ids
+        if evidence_tokens.ndim != 3:
+            raise ValueError(
+                "evidence_tokens must have shape (B, K, D), "
+                f"got {tuple(evidence_tokens.shape)}"
+            )
+        return EvidencePoolingOutput(pooled_embedding=evidence_tokens.mean(dim=1))
+
+
+class BranchAwareGatedEvidencePooling(nn.Module):
+    def __init__(self, *, hidden_size: int, cfg: EvidencePoolingConfig) -> None:
+        super().__init__()
+        self.temperature = cfg.temperature
+        gate_hidden_size = cfg.gate_hidden_size or max(hidden_size // 2, 1)
+        self.gate = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Linear(hidden_size, gate_hidden_size),
+            nn.GELU(),
+            nn.Dropout(cfg.dropout),
+            nn.Linear(gate_hidden_size, 1),
+        )
+
+    def _summarize_by_branch(
+        self,
+        evidence_tokens: Tensor,
+        branch_ids: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        branch_values = torch.unique(branch_ids.detach().cpu()).sort().values.tolist()
+        if not branch_values:
+            raise ValueError("branch_ids must contain at least one branch")
+
+        branch_summaries: list[Tensor] = []
+        branch_present_masks: list[Tensor] = []
+        for branch_value in branch_values:
+            branch_mask = branch_ids == int(branch_value)
+            branch_counts = branch_mask.sum(dim=1)
+            branch_sum = (
+                evidence_tokens * branch_mask.unsqueeze(-1).to(evidence_tokens.dtype)
+            ).sum(dim=1)
+            branch_summaries.append(
+                branch_sum / branch_counts.clamp_min(1).unsqueeze(-1)
+            )
+            branch_present_masks.append(branch_counts > 0)
+
+        return (
+            torch.stack(branch_summaries, dim=1),
+            torch.stack(branch_present_masks, dim=1),
+        )
+
+    def forward(
+        self,
+        evidence_tokens: Tensor,
+        branch_ids: Tensor | None = None,
+    ) -> EvidencePoolingOutput:
+        if evidence_tokens.ndim != 3:
+            raise ValueError(
+                "evidence_tokens must have shape (B, K, D), "
+                f"got {tuple(evidence_tokens.shape)}"
+            )
+        if branch_ids is None:
+            raise ValueError("branch_gated evidence pooling requires branch_ids")
+        if branch_ids.ndim != 2:
+            raise ValueError(
+                f"branch_ids must have shape (B, K), got {tuple(branch_ids.shape)}"
+            )
+        if branch_ids.shape != evidence_tokens.shape[:2]:
+            raise ValueError(
+                "branch_ids must align with evidence_tokens on batch/token "
+                f"dimensions; got evidence_tokens={tuple(evidence_tokens.shape)} "
+                f"branch_ids={tuple(branch_ids.shape)}"
+            )
+
+        branch_evidence_summary, branch_present_mask = self._summarize_by_branch(
+            evidence_tokens,
+            branch_ids,
+        )
+        if torch.any(branch_present_mask.sum(dim=1) == 0):
+            raise ValueError("Every sample must contain at least one evidence branch")
+
+        gate_logits = self.gate(branch_evidence_summary).squeeze(-1)
+        gate_logits = gate_logits.masked_fill(~branch_present_mask, float("-inf"))
+        gate_weights = torch.softmax(gate_logits / self.temperature, dim=1)
+        gate_entropy = -(
+            gate_weights * (gate_weights + torch.finfo(gate_weights.dtype).eps).log()
+        ).sum(dim=1)
+        pooled_embedding = torch.sum(
+            gate_weights.unsqueeze(-1) * branch_evidence_summary,
+            dim=1,
+        )
+        branch_evidence_norms = branch_evidence_summary.norm(dim=-1)
+        return EvidencePoolingOutput(
+            pooled_embedding=pooled_embedding,
+            gate_weights=gate_weights,
+            gate_entropy=gate_entropy,
+            branch_evidence_summary=branch_evidence_summary,
+            branch_evidence_norms=branch_evidence_norms,
+        )
 
 
 class TransformerBlock(nn.Module):
@@ -272,27 +439,38 @@ class BranchMilHead(nn.Module):
         hidden_size: int,
         output_dim: int,
         layer_norm_eps: float,
+        attention_temperature: float,
     ) -> None:
         super().__init__()
+        self.attention_temperature = attention_temperature
         self.token_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         self.attention = nn.Linear(hidden_size, 1)
+        self.instance_logit_proj = nn.Linear(hidden_size, output_dim)
         self.embedding_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         self.logit_proj = nn.Linear(hidden_size, output_dim)
 
     def forward(self, event_tokens: Tensor) -> BranchMilOutput:
         normalized_tokens = self.token_norm(event_tokens)
         attention_logits = self.attention(normalized_tokens).squeeze(-1)
-        attention_weights = torch.softmax(attention_logits, dim=1)
+        attention_weights = torch.softmax(
+            attention_logits / self.attention_temperature,
+            dim=1,
+        )
         embedding = torch.sum(
             event_tokens * attention_weights.unsqueeze(-1),
             dim=1,
         )
+        instance_logits = self.instance_logit_proj(normalized_tokens)
+        if instance_logits.ndim == 3 and instance_logits.shape[-1] == 1:
+            instance_logits = instance_logits.squeeze(-1)
         logits = self.logit_proj(self.embedding_norm(embedding))
         if logits.ndim == 2 and logits.shape[1] == 1:
             logits = logits.squeeze(1)
         return BranchMilOutput(
             logits=logits,
             attention_weights=attention_weights,
+            attention_logits=attention_logits,
+            instance_logits=instance_logits,
             embedding=embedding,
         )
 
@@ -500,12 +678,25 @@ class MultiScaleRdtAstModel(nn.Module):
                 hidden_size=architecture.hidden_size,
                 output_dim=output_dim,
                 layer_norm_eps=architecture.layer_norm_eps,
+                attention_temperature=architecture.mil.attention_temperature,
             )
             for _ in architecture.patch_branches
         )
         self.rdt_block = (
             RdtRefinementBlock(architecture) if architecture.rdt.enabled else None
         )
+        if architecture.evidence_pooling.type == "mean":
+            self.evidence_pooler: nn.Module = MeanEvidencePooling()
+        elif architecture.evidence_pooling.type == "branch_gated":
+            self.evidence_pooler = BranchAwareGatedEvidencePooling(
+                hidden_size=architecture.hidden_size,
+                cfg=architecture.evidence_pooling,
+            )
+        else:
+            raise ValueError(
+                "Unsupported evidence pooling type: "
+                f"{architecture.evidence_pooling.type}"
+            )
         fusion_input_dim = (2 * architecture.hidden_size) + (
             len(architecture.patch_branches) * output_dim
         )
@@ -531,7 +722,11 @@ class MultiScaleRdtAstModel(nn.Module):
         return (self.encoder, self.branch_mil_heads)
 
     def head_side_modules(self) -> tuple[nn.Module, ...]:
-        modules: list[nn.Module] = [self.fusion_projector, self.classifier]
+        modules: list[nn.Module] = [
+            self.evidence_pooler,
+            self.fusion_projector,
+            self.classifier,
+        ]
         if self.rdt_block is not None:
             modules.insert(0, self.rdt_block)
         return tuple(modules)
@@ -570,6 +765,10 @@ class MultiScaleRdtAstModel(nn.Module):
         selected_scores: list[Tensor] = []
         selected_branch_ids: list[Tensor] = []
         top_k = self.cfg.encoder.architecture.rdt.top_tokens_per_branch
+        evidence_source = self.cfg.encoder.architecture.rdt.evidence_score_source
+        excluded_branches = set(
+            self.cfg.encoder.architecture.rdt.exclude_branches_from_evidence
+        )
         for branch_index, (branch_tokens, branch_head) in enumerate(
             zip(
                 encoder_output.branch_event_tokens,
@@ -581,9 +780,15 @@ class MultiScaleRdtAstModel(nn.Module):
             branch_logits.append(mil_output.logits)
             branch_embeddings.append(mil_output.embedding)
             branch_attention_weights.append(mil_output.attention_weights)
+            if branch_index in excluded_branches:
+                continue
+            evidence_scores = get_evidence_scores(
+                mil_output,
+                source=evidence_source,
+            )
             selected = select_top_tokens(
                 branch_tokens,
-                mil_output.attention_weights,
+                evidence_scores,
                 top_k=top_k,
             )
             selected_tokens.append(selected.tokens)
@@ -594,6 +799,8 @@ class MultiScaleRdtAstModel(nn.Module):
             )
 
         stacked_branch_logits = self._stack_branch_logits(branch_logits)
+        if not selected_tokens:
+            raise ValueError("At least one branch must contribute selected evidence")
         selected_evidence_tokens = torch.cat(selected_tokens, dim=1)
         selected_evidence_indices = torch.cat(selected_indices, dim=1)
         selected_evidence_scores = torch.cat(selected_scores, dim=1)
@@ -606,7 +813,11 @@ class MultiScaleRdtAstModel(nn.Module):
                     encoder_output.context_tokens,
                 )
 
-        evidence_embedding = evidence_tokens.mean(dim=1)
+        pooling_output = self.evidence_pooler(
+            evidence_tokens,
+            selected_evidence_branch_ids,
+        )
+        evidence_embedding = pooling_output.pooled_embedding
         branch_embedding_mean = torch.stack(branch_embeddings, dim=1).mean(dim=1)
         branch_logit_features = stacked_branch_logits.reshape(
             stacked_branch_logits.shape[0],
@@ -629,4 +840,9 @@ class MultiScaleRdtAstModel(nn.Module):
             selected_evidence_indices=selected_evidence_indices,
             selected_evidence_scores=selected_evidence_scores,
             selected_evidence_branch_ids=selected_evidence_branch_ids,
+            evidence_score_source=evidence_source,
+            evidence_pooling_type=self.cfg.encoder.architecture.evidence_pooling.type,
+            evidence_gate_weights=pooling_output.gate_weights,
+            evidence_gate_entropy=pooling_output.gate_entropy,
+            branch_evidence_norms=pooling_output.branch_evidence_norms,
         )

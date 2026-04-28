@@ -48,6 +48,21 @@ def build_diagnostic_rows(
         if output.selected_evidence_branch_ids is not None
         else None
     )
+    evidence_gate_weights = (
+        output.evidence_gate_weights.detach().cpu()
+        if output.evidence_gate_weights is not None
+        else None
+    )
+    evidence_gate_entropy = (
+        output.evidence_gate_entropy.detach().cpu()
+        if output.evidence_gate_entropy is not None
+        else None
+    )
+    branch_evidence_norms = (
+        output.branch_evidence_norms.detach().cpu()
+        if output.branch_evidence_norms is not None
+        else None
+    )
 
     for index, audio_path in enumerate(batch.audio_paths):
         predicted_label = int(predicted_labels[index].item())
@@ -81,6 +96,16 @@ def build_diagnostic_rows(
             row["selected_evidence_branch_ids"] = selected_evidence_branch_ids[
                 index
             ].tolist()
+        if output.evidence_score_source is not None:
+            row["evidence_score_source"] = output.evidence_score_source
+        if output.evidence_pooling_type is not None:
+            row["evidence_pooling_type"] = output.evidence_pooling_type
+        if evidence_gate_weights is not None:
+            row["evidence_gate_weights"] = evidence_gate_weights[index].tolist()
+        if evidence_gate_entropy is not None:
+            row["evidence_gate_entropy"] = float(evidence_gate_entropy[index].item())
+        if branch_evidence_norms is not None:
+            row["branch_evidence_norms"] = branch_evidence_norms[index].tolist()
         if analysis.save_embeddings:
             row["pooled_embedding"] = embeddings[index].tolist()
             if selected_evidence_tokens is not None:

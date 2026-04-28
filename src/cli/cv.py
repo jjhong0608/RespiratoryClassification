@@ -4,8 +4,6 @@ import argparse
 from dataclasses import asdict, replace
 from pathlib import Path
 
-import torch
-
 from src.data.loaders import build_clip_loader, build_dataset
 from src.training.ast_setup import (
     apply_encoder_adaptation,
@@ -22,6 +20,7 @@ from src.training.trainer import Trainer, TrainerConfig
 from src.utils.config import JsonConfigLoader
 from src.utils.fs import Fs
 from src.utils.logging import enable_file_logging, logger
+from src.utils.reproducibility import Reproducibility
 
 
 def main() -> None:
@@ -30,13 +29,15 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = JsonConfigLoader.load_cv(args.config)
-    torch.manual_seed(cfg.experiment.seed)
+    Reproducibility.seed_everything(cfg.experiment.seed)
 
     base_dir = Fs.ensure_dir(Path(cfg.experiment.output_dir) / cfg.experiment.name)
     Fs.copy_file(args.config, base_dir)
     num_classes = len(cfg.data.label_to_index)
 
-    for fold in cfg.folds:
+    for fold_index, fold in enumerate(cfg.folds):
+        fold_seed = cfg.experiment.seed + fold_index
+        generators = Reproducibility.create_generators(fold_seed)
         fold_dir = Fs.ensure_dir(base_dir / fold.name)
         enable_file_logging(fold_dir / "run.log", mode="w")
         fold_data = replace(
@@ -60,7 +61,9 @@ def main() -> None:
             "[%s] Model architecture | encoder_type=%s | hidden_size=%d | num_heads=%d | "
             "branch_token_counts=%s | branch_time_lengths=%s | total_patch_tokens=%d | "
             "total_temporal_length=%d | rdt_enabled=%s | rdt_steps=%d | "
-            "top_tokens_per_branch=%d | branch_auxiliary=%s",
+            "top_tokens_per_branch=%d | evidence_score_source=%s | "
+            "exclude_branches_from_evidence=%s | attention_temperature=%.4f | "
+            "evidence_pooling=%s | branch_auxiliary=%s",
             fold.name,
             architecture_summary.encoder_type,
             architecture_summary.hidden_size,
@@ -72,6 +75,10 @@ def main() -> None:
             architecture_summary.rdt_enabled,
             architecture_summary.rdt_steps,
             architecture_summary.rdt_top_tokens_per_branch,
+            architecture_summary.rdt_evidence_score_source,
+            list(architecture_summary.rdt_exclude_branches_from_evidence),
+            architecture_summary.mil_attention_temperature,
+            architecture_summary.evidence_pooling_type,
             cfg.train.loss.branch_auxiliary.enabled,
         )
         logger.info(
@@ -110,7 +117,9 @@ def main() -> None:
                     cfg.train.loss.type,
                 )
         sampler = (
-            build_weighted_sampler(train_targets) if imbalance.weighted_random else None
+            build_weighted_sampler(train_targets, generator=generators.sampler)
+            if imbalance.weighted_random
+            else None
         )
         if sampler is not None:
             logger.info("[%s] Using weighted random sampler", fold.name)
@@ -121,12 +130,14 @@ def main() -> None:
             num_workers=fold_data.num_workers,
             shuffle=sampler is None,
             sampler=sampler,
+            generator=generators.train_loader,
         )
         val_loader = build_clip_loader(
             val_dataset,
             batch_size=fold_data.batch_size,
             num_workers=fold_data.num_workers,
             shuffle=False,
+            generator=generators.val_loader,
         )
         logger.info(
             "[%s] Train clips: %d | Val clips: %d",
@@ -166,6 +177,7 @@ def main() -> None:
                 gamma=cfg.train.loss.gamma,
                 pos_weight=imbalance.pos_weight,
                 branch_auxiliary=cfg.train.loss.branch_auxiliary,
+                attention_entropy=cfg.train.loss.attention_entropy,
                 analysis=cfg.analysis,
                 early_stopping=cfg.train.early_stopping,
             )

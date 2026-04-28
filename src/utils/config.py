@@ -11,6 +11,8 @@ from src.models.model import (
     AstFeatureDims,
     ClassifierConfig,
     EncoderAdaptationConfig,
+    EvidencePoolingConfig,
+    MilConfig,
     MultiScaleRdtArchitectureConfig,
     PatchBranchConfig,
     RdtConfig,
@@ -106,7 +108,14 @@ class SchedulerConfig:
 class BranchAuxiliaryLossConfig:
     enabled: bool = False
     weight: float = 0.3
+    weights: tuple[float, ...] | None = None
     aggregation: Literal["mean"] = "mean"
+
+
+@dataclass(frozen=True)
+class AttentionEntropyLossConfig:
+    enabled: bool = False
+    weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -117,6 +126,9 @@ class LossConfig:
     gamma: float = 2.0
     branch_auxiliary: BranchAuxiliaryLossConfig = field(
         default_factory=BranchAuxiliaryLossConfig
+    )
+    attention_entropy: AttentionEntropyLossConfig = field(
+        default_factory=AttentionEntropyLossConfig
     )
 
 
@@ -209,6 +221,12 @@ class CvRunConfig:
 class JsonConfigLoader:
     _THRESHOLD_METRICS = {"f1", "balanced_accuracy", "youden_j"}
     _EARLY_STOPPING_MONITORS = {"val_loss"}
+    _EVIDENCE_SCORE_SOURCES = {
+        "attention_weight",
+        "attention_logit",
+        "instance_logit",
+    }
+    _EVIDENCE_POOLING_TYPES = {"mean", "branch_gated"}
 
     @staticmethod
     def load_json(path: str | Path) -> dict[str, Any]:
@@ -364,11 +382,63 @@ class JsonConfigLoader:
             raise ValueError(
                 "model.encoder.architecture.rdt.layerscale_init must be greater than zero"
             )
+        if (
+            architecture.rdt.evidence_score_source
+            not in JsonConfigLoader._EVIDENCE_SCORE_SOURCES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.rdt.evidence_score_source must be one of "
+                f"{sorted(JsonConfigLoader._EVIDENCE_SCORE_SOURCES)}"
+            )
+        if architecture.mil.attention_temperature <= 0:
+            raise ValueError(
+                "model.encoder.architecture.mil.attention_temperature must be greater than zero"
+            )
+        if architecture.evidence_pooling.type not in (
+            JsonConfigLoader._EVIDENCE_POOLING_TYPES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.type must be one of "
+                f"{sorted(JsonConfigLoader._EVIDENCE_POOLING_TYPES)}"
+            )
+        if architecture.evidence_pooling.temperature <= 0:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.temperature must be greater than zero"
+            )
+        if not (0.0 <= architecture.evidence_pooling.dropout < 1.0):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.dropout must be within [0, 1)"
+            )
+        if (
+            architecture.evidence_pooling.gate_hidden_size is not None
+            and architecture.evidence_pooling.gate_hidden_size <= 0
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.gate_hidden_size must be null or greater than zero"
+            )
 
         feature_dims = AstFeatureDims(
             num_mel_bins=data_cfg.preprocessing.ast_fbank.num_mel_bins,
             max_length=data_cfg.preprocessing.ast_fbank.max_length,
         )
+        branch_count = len(architecture.patch_branches)
+        excluded_branches = architecture.rdt.exclude_branches_from_evidence
+        if len(set(excluded_branches)) != len(excluded_branches):
+            raise ValueError(
+                "model.encoder.architecture.rdt.exclude_branches_from_evidence "
+                "must not contain duplicate branch indices"
+            )
+        for excluded_branch in excluded_branches:
+            if excluded_branch < 0 or excluded_branch >= branch_count:
+                raise ValueError(
+                    "model.encoder.architecture.rdt.exclude_branches_from_evidence "
+                    f"contains invalid branch index {excluded_branch}"
+                )
+        if len(excluded_branches) >= branch_count:
+            raise ValueError(
+                "model.encoder.architecture.rdt.exclude_branches_from_evidence "
+                "must leave at least one evidence branch"
+            )
         for branch_index, branch in enumerate(architecture.patch_branches):
             patch_t, patch_f = branch.patch_size
             stride_t, stride_f = branch.stride
@@ -400,7 +470,10 @@ class JsonConfigLoader:
                 feature_dims=feature_dims,
                 patch_branch=branch,
             )
-            if architecture.rdt.top_tokens_per_branch > time_steps:
+            if (
+                branch_index not in excluded_branches
+                and architecture.rdt.top_tokens_per_branch > time_steps
+            ):
                 raise ValueError(
                     "model.encoder.architecture.rdt.top_tokens_per_branch exceeds "
                     f"branch time length for branch_index={branch_index}"
@@ -423,7 +496,12 @@ class JsonConfigLoader:
         JsonConfigLoader._validate_classifier(cfg.classifier)
 
     @staticmethod
-    def _validate_train(cfg: TrainConfig, *, num_classes: int) -> None:
+    def _validate_train(
+        cfg: TrainConfig,
+        *,
+        num_classes: int,
+        num_branches: int,
+    ) -> None:
         if cfg.epochs <= 0:
             raise ValueError("train.epochs must be greater than zero")
         if cfg.top_k <= 0:
@@ -465,9 +543,32 @@ class JsonConfigLoader:
             raise ValueError("train.loss.branch_auxiliary.enabled must be a boolean")
         if cfg.loss.branch_auxiliary.aggregation != "mean":
             raise ValueError("train.loss.branch_auxiliary.aggregation must be 'mean'")
-        if cfg.loss.branch_auxiliary.enabled and cfg.loss.branch_auxiliary.weight <= 0:
+        if cfg.loss.branch_auxiliary.weights is not None:
+            if len(cfg.loss.branch_auxiliary.weights) != num_branches:
+                raise ValueError(
+                    "train.loss.branch_auxiliary.weights length must match the number "
+                    "of model.encoder.architecture.patch_branches"
+                )
+            if any(weight <= 0 for weight in cfg.loss.branch_auxiliary.weights):
+                raise ValueError(
+                    "train.loss.branch_auxiliary.weights values must be greater than zero"
+                )
+        if (
+            cfg.loss.branch_auxiliary.enabled
+            and cfg.loss.branch_auxiliary.weights is None
+            and cfg.loss.branch_auxiliary.weight <= 0
+        ):
             raise ValueError(
                 "train.loss.branch_auxiliary.weight must be greater than zero when branch auxiliary loss is enabled"
+            )
+        if not isinstance(cfg.loss.attention_entropy.enabled, bool):
+            raise ValueError("train.loss.attention_entropy.enabled must be a boolean")
+        if (
+            cfg.loss.attention_entropy.enabled
+            and cfg.loss.attention_entropy.weight <= 0
+        ):
+            raise ValueError(
+                "train.loss.attention_entropy.weight must be greater than zero when enabled"
             )
         if num_classes == 2:
             if cfg.loss.type not in {"bce", "focal"}:
@@ -531,6 +632,28 @@ class JsonConfigLoader:
         return first, second
 
     @staticmethod
+    def _coerce_int_tuple(values: object, *, field_name: str) -> tuple[int, ...]:
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            raise TypeError(f"{field_name} must be a list of integers")
+        result: list[int] = []
+        for value in values:
+            if not isinstance(value, int):
+                raise TypeError(f"{field_name} must contain integers")
+            result.append(value)
+        return tuple(result)
+
+    @staticmethod
+    def _coerce_float_tuple(values: object, *, field_name: str) -> tuple[float, ...]:
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            raise TypeError(f"{field_name} must be a list of numbers")
+        result: list[float] = []
+        for value in values:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise TypeError(f"{field_name} must contain numbers")
+            result.append(float(value))
+        return tuple(result)
+
+    @staticmethod
     def _parse_patch_branch(raw: Mapping[str, Any]) -> PatchBranchConfig:
         patch_size_raw = raw.get("patch_size")
         stride_raw = raw.get("stride")
@@ -583,7 +706,19 @@ class JsonConfigLoader:
                 JsonConfigLoader._parse_patch_branch(dict(branch_raw))
                 for branch_raw in patch_branches_raw
             )
-        architecture["rdt"] = RdtConfig(**dict(architecture.get("rdt", {})))
+        rdt = dict(architecture.get("rdt", {}))
+        if "exclude_branches_from_evidence" in rdt:
+            rdt["exclude_branches_from_evidence"] = JsonConfigLoader._coerce_int_tuple(
+                rdt["exclude_branches_from_evidence"],
+                field_name=(
+                    "model.encoder.architecture.rdt.exclude_branches_from_evidence"
+                ),
+            )
+        architecture["rdt"] = RdtConfig(**rdt)
+        architecture["mil"] = MilConfig(**dict(architecture.get("mil", {})))
+        architecture["evidence_pooling"] = EvidencePoolingConfig(
+            **dict(architecture.get("evidence_pooling", {}))
+        )
         encoder["adaptation"] = EncoderAdaptationConfig(
             **dict(encoder.get("adaptation", {}))
         )
@@ -600,8 +735,15 @@ class JsonConfigLoader:
         kwargs["optimizer"] = OptimizerConfig(**dict(raw["optimizer"]))
         kwargs["scheduler"] = SchedulerConfig(**dict(raw.get("scheduler", {})))
         loss = dict(raw.get("loss", {}))
-        loss["branch_auxiliary"] = BranchAuxiliaryLossConfig(
-            **dict(loss.get("branch_auxiliary", {}))
+        branch_auxiliary = dict(loss.get("branch_auxiliary", {}))
+        if "weights" in branch_auxiliary and branch_auxiliary["weights"] is not None:
+            branch_auxiliary["weights"] = JsonConfigLoader._coerce_float_tuple(
+                branch_auxiliary["weights"],
+                field_name="train.loss.branch_auxiliary.weights",
+            )
+        loss["branch_auxiliary"] = BranchAuxiliaryLossConfig(**branch_auxiliary)
+        loss["attention_entropy"] = AttentionEntropyLossConfig(
+            **dict(loss.get("attention_entropy", {}))
         )
         kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))
@@ -648,6 +790,7 @@ class JsonConfigLoader:
         JsonConfigLoader._validate_train(
             cfg.train,
             num_classes=len(cfg.data.label_to_index),
+            num_branches=len(cfg.model.encoder.architecture.patch_branches),
         )
         return cfg
 
@@ -688,5 +831,6 @@ class JsonConfigLoader:
         JsonConfigLoader._validate_train(
             cfg.train,
             num_classes=len(cfg.data.label_to_index),
+            num_branches=len(cfg.model.encoder.architecture.patch_branches),
         )
         return cfg
