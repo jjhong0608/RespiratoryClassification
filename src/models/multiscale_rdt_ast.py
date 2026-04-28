@@ -65,6 +65,32 @@ class EvidencePoolingConfig:
 
 
 @dataclass(frozen=True)
+class BranchEventDropoutConfig:
+    enabled: bool = False
+    probability: float = 0.0
+    mode: Literal["zero_mask"] = "zero_mask"
+    min_keep_tokens: int = 1
+
+
+@dataclass(frozen=True)
+class SelectedEvidenceDropoutConfig:
+    enabled: bool = False
+    probability: float = 0.0
+    mode: Literal["zero"] = "zero"
+    min_keep_per_branch: int = 1
+
+
+@dataclass(frozen=True)
+class TokenAugmentationConfig:
+    branch_event_dropout: BranchEventDropoutConfig = field(
+        default_factory=BranchEventDropoutConfig
+    )
+    selected_evidence_dropout: SelectedEvidenceDropoutConfig = field(
+        default_factory=SelectedEvidenceDropoutConfig
+    )
+
+
+@dataclass(frozen=True)
 class MultiScaleRdtArchitectureConfig:
     hidden_size: int = 192
     num_attention_heads: int = 4
@@ -81,6 +107,9 @@ class MultiScaleRdtArchitectureConfig:
     mil: MilConfig = field(default_factory=MilConfig)
     evidence_pooling: EvidencePoolingConfig = field(
         default_factory=EvidencePoolingConfig
+    )
+    token_augmentation: TokenAugmentationConfig = field(
+        default_factory=TokenAugmentationConfig
     )
 
 
@@ -124,6 +153,8 @@ class AstModelOutput:
     evidence_gate_weights: Tensor | None = None
     evidence_gate_entropy: Tensor | None = None
     branch_evidence_norms: Tensor | None = None
+    selected_evidence_dropout_mask: Tensor | None = None
+    selected_evidence_keep_ratio: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -432,6 +463,120 @@ class FrequencyAttentionPooler(nn.Module):
         return torch.sum(branch_grid * attention_weights.unsqueeze(-1), dim=2)
 
 
+class BranchEventTokenDropout(nn.Module):
+    def __init__(self, cfg: BranchEventDropoutConfig) -> None:
+        super().__init__()
+        self.cfg = cfg
+
+    @staticmethod
+    def _ensure_min_keep(keep_mask: Tensor, min_keep_tokens: int) -> Tensor:
+        for batch_index in range(keep_mask.shape[0]):
+            keep_count = int(keep_mask[batch_index].sum().item())
+            if keep_count >= min_keep_tokens:
+                continue
+            dropped_positions = torch.where(~keep_mask[batch_index])[0]
+            if dropped_positions.numel() == 0:
+                continue
+            needed = min(min_keep_tokens - keep_count, int(dropped_positions.numel()))
+            order = torch.randperm(
+                int(dropped_positions.numel()),
+                device=keep_mask.device,
+            )
+            keep_mask[batch_index, dropped_positions[order[:needed]]] = True
+        return keep_mask
+
+    def forward(self, tokens: Tensor) -> tuple[Tensor, Tensor]:
+        if tokens.ndim != 3:
+            raise ValueError(
+                f"tokens must have shape (B, T, D), got {tuple(tokens.shape)}"
+            )
+        batch_size, token_count, _ = tokens.shape
+        all_true = torch.ones(
+            batch_size,
+            token_count,
+            dtype=torch.bool,
+            device=tokens.device,
+        )
+        if not self.training or not self.cfg.enabled or self.cfg.probability <= 0:
+            return tokens, all_true
+
+        keep_mask = torch.rand(batch_size, token_count, device=tokens.device) >= float(
+            self.cfg.probability
+        )
+        min_keep_tokens = min(int(self.cfg.min_keep_tokens), token_count)
+        keep_mask = self._ensure_min_keep(keep_mask, min_keep_tokens)
+        dropped_tokens = tokens * keep_mask.unsqueeze(-1).to(tokens.dtype)
+        return dropped_tokens, keep_mask
+
+
+class SelectedEvidenceDropout(nn.Module):
+    def __init__(self, cfg: SelectedEvidenceDropoutConfig) -> None:
+        super().__init__()
+        self.cfg = cfg
+
+    def forward(
+        self,
+        selected_tokens: Tensor,
+        selected_branch_ids: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        if selected_tokens.ndim != 3:
+            raise ValueError(
+                "selected_tokens must have shape (B, K, D), "
+                f"got {tuple(selected_tokens.shape)}"
+            )
+        if selected_branch_ids.ndim != 2:
+            raise ValueError(
+                "selected_branch_ids must have shape (B, K), "
+                f"got {tuple(selected_branch_ids.shape)}"
+            )
+        if selected_branch_ids.shape != selected_tokens.shape[:2]:
+            raise ValueError(
+                "selected_branch_ids must align with selected_tokens on batch/token "
+                f"dimensions; got selected_tokens={tuple(selected_tokens.shape)} "
+                f"selected_branch_ids={tuple(selected_branch_ids.shape)}"
+            )
+
+        batch_size, selected_count, _ = selected_tokens.shape
+        keep_mask = torch.ones(
+            batch_size,
+            selected_count,
+            dtype=torch.bool,
+            device=selected_tokens.device,
+        )
+        if not self.training or not self.cfg.enabled or self.cfg.probability <= 0:
+            return selected_tokens, keep_mask
+
+        for batch_index in range(batch_size):
+            branch_ids = torch.unique(selected_branch_ids[batch_index])
+            for branch_id in branch_ids:
+                positions = torch.where(selected_branch_ids[batch_index] == branch_id)[
+                    0
+                ]
+                if positions.numel() == 0:
+                    continue
+                branch_keep = torch.rand(
+                    int(positions.numel()), device=selected_tokens.device
+                ) >= float(self.cfg.probability)
+                min_keep = min(
+                    int(self.cfg.min_keep_per_branch), int(positions.numel())
+                )
+                keep_count = int(branch_keep.sum().item())
+                if keep_count < min_keep:
+                    dropped_positions = torch.where(~branch_keep)[0]
+                    needed = min(min_keep - keep_count, int(dropped_positions.numel()))
+                    order = torch.randperm(
+                        int(dropped_positions.numel()),
+                        device=selected_tokens.device,
+                    )
+                    branch_keep[dropped_positions[order[:needed]]] = True
+                keep_mask[batch_index, positions] = branch_keep
+
+        dropped_tokens = selected_tokens * keep_mask.unsqueeze(-1).to(
+            selected_tokens.dtype
+        )
+        return dropped_tokens, keep_mask
+
+
 class BranchMilHead(nn.Module):
     def __init__(
         self,
@@ -449,9 +594,21 @@ class BranchMilHead(nn.Module):
         self.embedding_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         self.logit_proj = nn.Linear(hidden_size, output_dim)
 
-    def forward(self, event_tokens: Tensor) -> BranchMilOutput:
+    def forward(
+        self,
+        event_tokens: Tensor,
+        token_mask: Tensor | None = None,
+    ) -> BranchMilOutput:
         normalized_tokens = self.token_norm(event_tokens)
         attention_logits = self.attention(normalized_tokens).squeeze(-1)
+        if token_mask is not None:
+            if token_mask.shape != attention_logits.shape:
+                raise ValueError(
+                    "token_mask must align with event token batch/time dimensions; "
+                    f"got token_mask={tuple(token_mask.shape)} "
+                    f"event_tokens={tuple(event_tokens.shape)}"
+                )
+            attention_logits = attention_logits.masked_fill(~token_mask, -1e4)
         attention_weights = torch.softmax(
             attention_logits / self.attention_temperature,
             dim=1,
@@ -682,6 +839,20 @@ class MultiScaleRdtAstModel(nn.Module):
             )
             for _ in architecture.patch_branches
         )
+        branch_event_dropout_cfg = architecture.token_augmentation.branch_event_dropout
+        self.branch_event_dropout = (
+            BranchEventTokenDropout(branch_event_dropout_cfg)
+            if branch_event_dropout_cfg.enabled
+            else None
+        )
+        selected_evidence_dropout_cfg = (
+            architecture.token_augmentation.selected_evidence_dropout
+        )
+        self.selected_evidence_dropout = (
+            SelectedEvidenceDropout(selected_evidence_dropout_cfg)
+            if selected_evidence_dropout_cfg.enabled
+            else None
+        )
         self.rdt_block = (
             RdtRefinementBlock(architecture) if architecture.rdt.enabled else None
         )
@@ -776,7 +947,15 @@ class MultiScaleRdtAstModel(nn.Module):
                 strict=True,
             )
         ):
-            mil_output = cast(BranchMilOutput, branch_head(branch_tokens))
+            branch_token_mask = None
+            if self.branch_event_dropout is not None:
+                branch_tokens, branch_token_mask = self.branch_event_dropout(
+                    branch_tokens
+                )
+            mil_output = cast(
+                BranchMilOutput,
+                branch_head(branch_tokens, token_mask=branch_token_mask),
+            )
             branch_logits.append(mil_output.logits)
             branch_embeddings.append(mil_output.embedding)
             branch_attention_weights.append(mil_output.attention_weights)
@@ -806,6 +985,18 @@ class MultiScaleRdtAstModel(nn.Module):
         selected_evidence_scores = torch.cat(selected_scores, dim=1)
         selected_evidence_branch_ids = torch.cat(selected_branch_ids, dim=1)
         evidence_tokens = selected_evidence_tokens
+        selected_evidence_dropout_mask = None
+        selected_evidence_keep_ratio = None
+        if self.selected_evidence_dropout is not None:
+            evidence_tokens, selected_evidence_dropout_mask = (
+                self.selected_evidence_dropout(
+                    evidence_tokens,
+                    selected_evidence_branch_ids,
+                )
+            )
+            selected_evidence_keep_ratio = selected_evidence_dropout_mask.to(
+                evidence_tokens.dtype
+            ).mean(dim=1)
         if self.rdt_block is not None:
             for _ in range(self.cfg.encoder.architecture.rdt.steps):
                 evidence_tokens = self.rdt_block(
@@ -845,4 +1036,6 @@ class MultiScaleRdtAstModel(nn.Module):
             evidence_gate_weights=pooling_output.gate_weights,
             evidence_gate_entropy=pooling_output.gate_entropy,
             branch_evidence_norms=pooling_output.branch_evidence_norms,
+            selected_evidence_dropout_mask=selected_evidence_dropout_mask,
+            selected_evidence_keep_ratio=selected_evidence_keep_ratio,
         )

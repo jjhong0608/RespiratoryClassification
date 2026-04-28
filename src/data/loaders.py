@@ -35,7 +35,13 @@ def build_dataset(cfg: DataConfig, *, split: str = "train") -> RespiratoryClipDa
     }
     if split not in split_to_roots:
         raise ValueError(f"Unsupported split: {split}")
-    dataset = RespiratoryClipDataset(cfg, split_to_roots[split])
+    apply_augmentation = split == "train" and cfg.augmentation.enabled
+    dataset = RespiratoryClipDataset(
+        cfg,
+        split_to_roots[split],
+        split=split,
+        apply_augmentation=apply_augmentation,
+    )
     if len(dataset) == 0:
         raise ValueError(
             f"No usable .wav files found for split={split} under {split_to_roots[split]}"

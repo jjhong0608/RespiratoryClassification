@@ -84,6 +84,7 @@ def build_ast_model(
                 rdt=cfg.encoder.architecture.rdt,
                 mil=cfg.encoder.architecture.mil,
                 evidence_pooling=cfg.encoder.architecture.evidence_pooling,
+                token_augmentation=cfg.encoder.architecture.token_augmentation,
             ),
         ),
         classifier=ClassifierConfig(

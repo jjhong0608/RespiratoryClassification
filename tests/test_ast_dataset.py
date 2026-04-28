@@ -10,9 +10,16 @@ from src.data.loaders import build_clip_loader, build_dataset
 from src.utils.config import (
     AstFbankConfig,
     AudioConfig,
+    AugmentationPolicyChoiceConfig,
+    AugmentationPolicyConfig,
     BandPassConfig,
+    DataAugmentationConfig,
     DataConfig,
+    FbankAugmentationConfig,
+    MaskConfig,
     PreprocessingConfig,
+    RandomGainConfig,
+    WaveformAugmentationConfig,
 )
 
 
@@ -26,11 +33,14 @@ def _data_config(
     roots: list[str],
     *,
     source_type: Literal["original", "harmonic", "percussive"] = "original",
+    val_roots: list[str] | None = None,
+    eval_roots: list[str] | None = None,
+    augmentation: DataAugmentationConfig | None = None,
 ) -> DataConfig:
     return DataConfig(
         train_dirs=roots,
-        val_dirs=[],
-        eval_dirs=[],
+        val_dirs=val_roots or [],
+        eval_dirs=eval_roots or [],
         label_to_index={"normal": 0, "wheeze": 1},
         batch_size=2,
         num_workers=0,
@@ -46,6 +56,37 @@ def _data_config(
                 std=4.5689974,
             ),
         ),
+        augmentation=augmentation or DataAugmentationConfig(),
+    )
+
+
+def _augmentation_config() -> DataAugmentationConfig:
+    return DataAugmentationConfig(
+        enabled=True,
+        waveform=WaveformAugmentationConfig(
+            enabled=True,
+            probability=1.0,
+            gain=RandomGainConfig(
+                enabled=True, probability=1.0, min_db=1.0, max_db=1.0
+            ),
+        ),
+        fbank=FbankAugmentationConfig(
+            enabled=True,
+            probability=1.0,
+            time_mask=MaskConfig(enabled=True, num_masks=1, max_width=1),
+        ),
+    )
+
+
+def _oneof_augmentation_config() -> DataAugmentationConfig:
+    return DataAugmentationConfig(
+        enabled=True,
+        policy=AugmentationPolicyConfig(
+            type="one_of",
+            choices=(AugmentationPolicyChoiceConfig(name="none", probability=1.0),),
+        ),
+        waveform=WaveformAugmentationConfig(enabled=True, probability=1.0),
+        fbank=FbankAugmentationConfig(enabled=True, probability=1.0),
     )
 
 
@@ -134,3 +175,74 @@ def test_source_type_changes_clip_features(tmp_path: Path) -> None:
         original_dataset[0].input_values,
         harmonic_dataset[0].input_values,
     )
+
+
+def test_augmentation_is_train_only(tmp_path: Path) -> None:
+    train_root = tmp_path / "train"
+    val_root = tmp_path / "val"
+    eval_root = tmp_path / "eval"
+    for root in [train_root, val_root, eval_root]:
+        normal_dir = root / "normal"
+        normal_dir.mkdir(parents=True)
+        _write_wav(normal_dir / "sample.wav", duration_sec=1.0, sample_rate=16000)
+
+    cfg = _data_config(
+        [str(train_root)],
+        val_roots=[str(val_root)],
+        eval_roots=[str(eval_root)],
+        augmentation=_augmentation_config(),
+    )
+
+    train_dataset = build_dataset(cfg, split="train")
+    val_dataset = build_dataset(cfg, split="val")
+    eval_dataset = build_dataset(cfg, split="eval")
+
+    assert train_dataset.split == "train"
+    assert train_dataset.apply_augmentation is True
+    assert train_dataset.root_datasets[0].waveform_augmentation_enabled is True
+    assert train_dataset.root_datasets[0].fbank_augmentation_enabled is True
+    assert val_dataset.split == "val"
+    assert val_dataset.apply_augmentation is False
+    assert val_dataset.root_datasets[0].waveform_augmentation_enabled is False
+    assert val_dataset.root_datasets[0].fbank_augmentation_enabled is False
+    assert eval_dataset.split == "eval"
+    assert eval_dataset.apply_augmentation is False
+    assert eval_dataset.root_datasets[0].waveform_augmentation_enabled is False
+    assert eval_dataset.root_datasets[0].fbank_augmentation_enabled is False
+
+
+def test_disabled_augmentation_does_not_apply_to_train_split(tmp_path: Path) -> None:
+    normal_dir = tmp_path / "normal"
+    normal_dir.mkdir()
+    _write_wav(normal_dir / "sample.wav", duration_sec=1.0, sample_rate=16000)
+
+    dataset = build_dataset(_data_config([str(tmp_path)]), split="train")
+
+    assert dataset.apply_augmentation is False
+    assert dataset.root_datasets[0].waveform_augmentation_enabled is False
+    assert dataset.root_datasets[0].fbank_augmentation_enabled is False
+
+
+def test_oneof_augmentation_is_train_only(tmp_path: Path) -> None:
+    train_root = tmp_path / "train"
+    val_root = tmp_path / "val"
+    for root in [train_root, val_root]:
+        normal_dir = root / "normal"
+        normal_dir.mkdir(parents=True)
+        _write_wav(normal_dir / "sample.wav", duration_sec=1.0, sample_rate=16000)
+
+    cfg = _data_config(
+        [str(train_root)],
+        val_roots=[str(val_root)],
+        augmentation=_oneof_augmentation_config(),
+    )
+
+    train_dataset = build_dataset(cfg, split="train")
+    val_dataset = build_dataset(cfg, split="val")
+
+    assert train_dataset.apply_augmentation is True
+    assert train_dataset.root_datasets[0].waveform_augmentation_enabled is True
+    assert train_dataset.root_datasets[0].fbank_augmentation_enabled is True
+    assert val_dataset.apply_augmentation is False
+    assert val_dataset.root_datasets[0].waveform_augmentation_enabled is False
+    assert val_dataset.root_datasets[0].fbank_augmentation_enabled is False

@@ -174,6 +174,60 @@ Dynamic shapes:
 - 4-scale top-2 -> `U0: [B, 8, D]`, `H_ctx` length `1916`
 - 3-scale top-2 -> `U0: [B, 6, D]`, `H_ctx` length `893`
 
+## Data Augmentation
+
+AUG0-AUG3 isolate train-time augmentation effects on the same H0 branch-gated
+model. Keep model, optimizer, loss, early stopping, and seed policy fixed across
+the four configs.
+
+| Study | Config | Purpose |
+|---|---|---|
+| AUG0 | `configs/training_aug0_h0_gated_no_aug.json` | H0 gated baseline without augmentation |
+| AUG1 | `configs/training_aug1_h0_gated_waveform_aug.json` | Waveform augmentation only |
+| AUG2 | `configs/training_aug2_h0_gated_fbank_aug.json` | Fbank augmentation only |
+| AUG3 | `configs/training_aug3_h0_gated_waveform_fbank_aug.json` | Combined waveform and fbank augmentation |
+
+Placement:
+
+- Waveform augmentation runs after waveform preprocessing and before AST fbank
+  extraction.
+- Fbank augmentation runs after normalized fbank extraction and transpose to
+  `[1024, 128]`.
+- Augmentation is train-only. Validation, evaluation, and test splits are never
+  augmented.
+- CV train folds may augment; CV validation folds do not.
+
+Compare AUG0-AUG3 with `best_loss_*.pt` checkpoints. Report `F1@0.5`,
+`F1@opt`, `ROC-AUC`, `PR-AUC`, `Brier`, `balanced accuracy`, and optimal
+threshold.
+
+## One-of and Token-Level Augmentation
+
+AUG4/PT1/PT2/PT3 keep the same H0 branch-aware gated model as AUG0-AUG3. Only
+input augmentation policy and model-internal token regularization differ.
+
+| Config | Purpose |
+|---|---|
+| `configs/training_aug4_h0_gated_oneof.json` | One-of augmentation only |
+| `configs/training_pt1_h0_gated_oneof_branch_event_dropout.json` | One-of + branch event token dropout |
+| `configs/training_pt2_h0_gated_oneof_selected_evidence_dropout.json` | One-of + selected evidence dropout |
+| `configs/training_pt3_h0_gated_oneof_both_token_dropouts.json` | One-of + both token dropouts |
+
+The one-of policy samples exactly one recipe per training clip: `none`,
+`waveform`, `fbank`, or `both_light`. This keeps augmentation diversity without
+always stacking waveform and fbank perturbations on the same sample.
+
+Token-level regularizers are train-only:
+
+- Branch event token dropout runs after frequency-attention pooling and before
+  branch MIL. Dropped event tokens are zeroed and masked so branch MIL cannot
+  attend to them.
+- Selected evidence dropout runs after top-k evidence selection and before RDT.
+  It zeros selected evidence state tokens `U0` while leaving `H_ctx`, selected
+  indices, scores, and branch IDs unchanged.
+- Both dropouts guarantee at least one kept token at their configured branch
+  granularity.
+
 ## Train
 
 Binary example:
@@ -448,6 +502,10 @@ Additional experiment knobs:
 - `architecture.mil.attention_temperature` must be greater than zero and scales
   branch MIL attention softmax logits
 - `architecture.evidence_pooling.type` supports `mean` and `branch_gated`
+- `data.augmentation` is disabled by default and applies only to train datasets
+- `data.augmentation.policy.type` supports `independent` and `one_of`
+- `architecture.token_augmentation` controls branch event and selected evidence
+  token dropout
 - `train.loss.attention_entropy.enabled = true` adds
   `weight * mean_branch(entropy(attention))`
 - `train.loss.branch_auxiliary.weights` overrides scalar

@@ -38,6 +38,23 @@ def main() -> None:
 
     train_dataset = build_dataset(cfg.data, split="train")
     val_dataset = build_dataset(cfg.data, split="val")
+    augmentation = cfg.data.augmentation
+    logger.info(
+        "Data augmentation | enabled=%s | train_apply=%s | waveform=%s | "
+        "waveform_probability=%.4f | gain=%s | noise=%s | time_shift=%s | "
+        "fbank=%s | fbank_probability=%.4f | time_mask=%s | freq_mask=%s",
+        augmentation.enabled,
+        train_dataset.apply_augmentation,
+        augmentation.waveform.enabled,
+        augmentation.waveform.probability,
+        augmentation.waveform.gain.enabled,
+        augmentation.waveform.noise.enabled,
+        augmentation.waveform.time_shift.enabled,
+        augmentation.fbank.enabled,
+        augmentation.fbank.probability,
+        augmentation.fbank.time_mask.enabled,
+        augmentation.fbank.freq_mask.enabled,
+    )
     num_classes = len(cfg.data.label_to_index)
     model = build_ast_model(
         cfg.model,

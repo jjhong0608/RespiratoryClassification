@@ -9,6 +9,7 @@ from typing import Any, Literal
 from src.evaluation.thresholds import ThresholdOptimizationConfig
 from src.models.model import (
     AstFeatureDims,
+    BranchEventDropoutConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -16,6 +17,8 @@ from src.models.model import (
     MultiScaleRdtArchitectureConfig,
     PatchBranchConfig,
     RdtConfig,
+    SelectedEvidenceDropoutConfig,
+    TokenAugmentationConfig,
     compute_token_count,
     compute_token_grid,
 )
@@ -66,6 +69,77 @@ class PreprocessingConfig:
 
 
 @dataclass(frozen=True)
+class RandomGainConfig:
+    enabled: bool = False
+    probability: float = 0.5
+    min_db: float = -3.0
+    max_db: float = 3.0
+
+
+@dataclass(frozen=True)
+class AdditiveNoiseConfig:
+    enabled: bool = False
+    probability: float = 0.3
+    snr_db_min: float = 15.0
+    snr_db_max: float = 30.0
+
+
+@dataclass(frozen=True)
+class TimeShiftConfig:
+    enabled: bool = False
+    probability: float = 0.5
+    max_shift_fraction: float = 0.05
+    mode: Literal["zero_pad", "roll"] = "zero_pad"
+
+
+@dataclass(frozen=True)
+class WaveformAugmentationConfig:
+    enabled: bool = False
+    probability: float = 1.0
+    gain: RandomGainConfig = field(default_factory=RandomGainConfig)
+    noise: AdditiveNoiseConfig = field(default_factory=AdditiveNoiseConfig)
+    time_shift: TimeShiftConfig = field(default_factory=TimeShiftConfig)
+
+
+@dataclass(frozen=True)
+class MaskConfig:
+    enabled: bool = False
+    num_masks: int = 1
+    max_width: int = 32
+
+
+@dataclass(frozen=True)
+class FbankAugmentationConfig:
+    enabled: bool = False
+    probability: float = 0.5
+    time_mask: MaskConfig = field(default_factory=MaskConfig)
+    freq_mask: MaskConfig = field(default_factory=MaskConfig)
+    mask_value: float = 0.0
+
+
+@dataclass(frozen=True)
+class AugmentationPolicyChoiceConfig:
+    name: Literal["none", "waveform", "fbank", "both_light"]
+    probability: float
+
+
+@dataclass(frozen=True)
+class AugmentationPolicyConfig:
+    type: Literal["independent", "one_of"] = "independent"
+    choices: tuple[AugmentationPolicyChoiceConfig, ...] = ()
+
+
+@dataclass(frozen=True)
+class DataAugmentationConfig:
+    enabled: bool = False
+    policy: AugmentationPolicyConfig = field(default_factory=AugmentationPolicyConfig)
+    waveform: WaveformAugmentationConfig = field(
+        default_factory=WaveformAugmentationConfig
+    )
+    fbank: FbankAugmentationConfig = field(default_factory=FbankAugmentationConfig)
+
+
+@dataclass(frozen=True)
 class DataConfig:
     train_dirs: list[str]
     val_dirs: list[str]
@@ -75,6 +149,7 @@ class DataConfig:
     num_workers: int
     audio: AudioConfig
     preprocessing: PreprocessingConfig
+    augmentation: DataAugmentationConfig = field(default_factory=DataAugmentationConfig)
 
 
 @dataclass(frozen=True)
@@ -227,6 +302,16 @@ class JsonConfigLoader:
         "instance_logit",
     }
     _EVIDENCE_POOLING_TYPES = {"mean", "branch_gated"}
+    _TIME_SHIFT_MODES = {"zero_pad", "roll"}
+    _AUGMENTATION_POLICY_TYPES = {"independent", "one_of"}
+    _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
+    _BRANCH_EVENT_DROPOUT_MODES = {"zero_mask"}
+    _SELECTED_EVIDENCE_DROPOUT_MODES = {"zero"}
+
+    @staticmethod
+    def _validate_probability(value: float, *, field_name: str) -> None:
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"{field_name} must be within [0, 1]")
 
     @staticmethod
     def load_json(path: str | Path) -> dict[str, Any]:
@@ -300,12 +385,122 @@ class JsonConfigLoader:
         JsonConfigLoader._validate_bandpass(cfg.bandpass, sample_rate)
 
     @staticmethod
+    def _validate_mask(cfg: MaskConfig, *, field_name: str) -> None:
+        if cfg.num_masks < 0:
+            raise ValueError(f"{field_name}.num_masks must be non-negative")
+        if cfg.max_width < 0:
+            raise ValueError(f"{field_name}.max_width must be non-negative")
+
+    @staticmethod
+    def _validate_augmentation_policy(cfg: AugmentationPolicyConfig) -> None:
+        if cfg.type not in JsonConfigLoader._AUGMENTATION_POLICY_TYPES:
+            raise ValueError(
+                "data.augmentation.policy.type must be one of "
+                f"{sorted(JsonConfigLoader._AUGMENTATION_POLICY_TYPES)}"
+            )
+        if cfg.type == "independent":
+            return
+        if not cfg.choices:
+            raise ValueError(
+                "data.augmentation.policy.choices must not be empty for one_of policy"
+            )
+        total_probability = 0.0
+        positive_count = 0
+        seen_names: set[str] = set()
+        for choice in cfg.choices:
+            if choice.name not in JsonConfigLoader._AUGMENTATION_POLICY_CHOICES:
+                raise ValueError(
+                    "data.augmentation.policy.choices.name must be one of "
+                    f"{sorted(JsonConfigLoader._AUGMENTATION_POLICY_CHOICES)}"
+                )
+            if choice.name in seen_names:
+                raise ValueError(
+                    "data.augmentation.policy.choices must not contain duplicate names"
+                )
+            seen_names.add(choice.name)
+            if choice.probability < 0:
+                raise ValueError(
+                    "data.augmentation.policy.choices.probability must be non-negative"
+                )
+            total_probability += float(choice.probability)
+            if choice.probability > 0:
+                positive_count += 1
+        if positive_count == 0:
+            raise ValueError(
+                "data.augmentation.policy.choices must contain at least one positive probability"
+            )
+        if abs(total_probability - 1.0) > 1e-6:
+            raise ValueError(
+                "data.augmentation.policy.choices probabilities must sum to 1.0"
+            )
+
+    @staticmethod
+    def _validate_augmentation(cfg: DataAugmentationConfig) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise ValueError("data.augmentation.enabled must be a boolean")
+        if not isinstance(cfg.waveform.enabled, bool):
+            raise ValueError("data.augmentation.waveform.enabled must be a boolean")
+        if not isinstance(cfg.fbank.enabled, bool):
+            raise ValueError("data.augmentation.fbank.enabled must be a boolean")
+        JsonConfigLoader._validate_augmentation_policy(cfg.policy)
+        JsonConfigLoader._validate_probability(
+            cfg.waveform.probability,
+            field_name="data.augmentation.waveform.probability",
+        )
+        JsonConfigLoader._validate_probability(
+            cfg.waveform.gain.probability,
+            field_name="data.augmentation.waveform.gain.probability",
+        )
+        JsonConfigLoader._validate_probability(
+            cfg.waveform.noise.probability,
+            field_name="data.augmentation.waveform.noise.probability",
+        )
+        JsonConfigLoader._validate_probability(
+            cfg.waveform.time_shift.probability,
+            field_name="data.augmentation.waveform.time_shift.probability",
+        )
+        JsonConfigLoader._validate_probability(
+            cfg.fbank.probability,
+            field_name="data.augmentation.fbank.probability",
+        )
+        if cfg.waveform.gain.min_db > cfg.waveform.gain.max_db:
+            raise ValueError(
+                "data.augmentation.waveform.gain.min_db must be less than or equal to max_db"
+            )
+        if cfg.waveform.noise.snr_db_min <= 0:
+            raise ValueError(
+                "data.augmentation.waveform.noise.snr_db_min must be greater than zero"
+            )
+        if cfg.waveform.noise.snr_db_min > cfg.waveform.noise.snr_db_max:
+            raise ValueError(
+                "data.augmentation.waveform.noise.snr_db_min must be less than or equal to snr_db_max"
+            )
+        if not (0.0 <= cfg.waveform.time_shift.max_shift_fraction < 1.0):
+            raise ValueError(
+                "data.augmentation.waveform.time_shift.max_shift_fraction must be within [0, 1)"
+            )
+        if cfg.waveform.time_shift.mode not in JsonConfigLoader._TIME_SHIFT_MODES:
+            raise ValueError(
+                "data.augmentation.waveform.time_shift.mode must be one of "
+                f"{sorted(JsonConfigLoader._TIME_SHIFT_MODES)}"
+            )
+        JsonConfigLoader._validate_mask(
+            cfg.fbank.time_mask,
+            field_name="data.augmentation.fbank.time_mask",
+        )
+        JsonConfigLoader._validate_mask(
+            cfg.fbank.freq_mask,
+            field_name="data.augmentation.fbank.freq_mask",
+        )
+
+    @staticmethod
     def _validate_data(cfg: DataConfig) -> None:
         JsonConfigLoader._validate_contiguous_labels(cfg.label_to_index)
         JsonConfigLoader._validate_audio(cfg.audio)
         JsonConfigLoader._validate_preprocessing(
             cfg.preprocessing, cfg.audio.sample_rate
         )
+        JsonConfigLoader._validate_augmentation(cfg.augmentation)
         if cfg.batch_size <= 0:
             raise ValueError("data.batch_size must be greater than zero")
         if cfg.num_workers < 0:
@@ -415,6 +610,45 @@ class JsonConfigLoader:
         ):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.gate_hidden_size must be null or greater than zero"
+            )
+        token_augmentation = architecture.token_augmentation
+        if not isinstance(token_augmentation.branch_event_dropout.enabled, bool):
+            raise ValueError(
+                "model.encoder.architecture.token_augmentation.branch_event_dropout.enabled must be a boolean"
+            )
+        if not (0.0 <= token_augmentation.branch_event_dropout.probability < 1.0):
+            raise ValueError(
+                "model.encoder.architecture.token_augmentation.branch_event_dropout.probability must be within [0, 1)"
+            )
+        if (
+            token_augmentation.branch_event_dropout.mode
+            not in JsonConfigLoader._BRANCH_EVENT_DROPOUT_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.token_augmentation.branch_event_dropout.mode must be 'zero_mask'"
+            )
+        if token_augmentation.branch_event_dropout.min_keep_tokens < 1:
+            raise ValueError(
+                "model.encoder.architecture.token_augmentation.branch_event_dropout.min_keep_tokens must be at least 1"
+            )
+        if not isinstance(token_augmentation.selected_evidence_dropout.enabled, bool):
+            raise ValueError(
+                "model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled must be a boolean"
+            )
+        if not (0.0 <= token_augmentation.selected_evidence_dropout.probability < 1.0):
+            raise ValueError(
+                "model.encoder.architecture.token_augmentation.selected_evidence_dropout.probability must be within [0, 1)"
+            )
+        if (
+            token_augmentation.selected_evidence_dropout.mode
+            not in JsonConfigLoader._SELECTED_EVIDENCE_DROPOUT_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.token_augmentation.selected_evidence_dropout.mode must be 'zero'"
+            )
+        if token_augmentation.selected_evidence_dropout.min_keep_per_branch < 1:
+            raise ValueError(
+                "model.encoder.architecture.token_augmentation.selected_evidence_dropout.min_keep_per_branch must be at least 1"
             )
 
         feature_dims = AstFeatureDims(
@@ -614,6 +848,31 @@ class JsonConfigLoader:
         preprocessing["bandpass"] = BandPassConfig(**preprocessing.get("bandpass", {}))
         preprocessing["ast_fbank"] = AstFbankConfig(**dict(preprocessing["ast_fbank"]))
         kwargs["preprocessing"] = PreprocessingConfig(**preprocessing)
+        augmentation = dict(raw.get("augmentation", {}))
+        policy = dict(augmentation.get("policy", {}))
+        policy_choices = policy.get("choices", ())
+        if policy_choices:
+            if not isinstance(policy_choices, Sequence) or isinstance(
+                policy_choices, (str, bytes)
+            ):
+                raise TypeError("data.augmentation.policy.choices must be a list")
+            policy["choices"] = tuple(
+                AugmentationPolicyChoiceConfig(**dict(choice_raw))
+                for choice_raw in policy_choices
+            )
+        else:
+            policy["choices"] = ()
+        augmentation["policy"] = AugmentationPolicyConfig(**policy)
+        waveform = dict(augmentation.get("waveform", {}))
+        waveform["gain"] = RandomGainConfig(**dict(waveform.get("gain", {})))
+        waveform["noise"] = AdditiveNoiseConfig(**dict(waveform.get("noise", {})))
+        waveform["time_shift"] = TimeShiftConfig(**dict(waveform.get("time_shift", {})))
+        augmentation["waveform"] = WaveformAugmentationConfig(**waveform)
+        fbank = dict(augmentation.get("fbank", {}))
+        fbank["time_mask"] = MaskConfig(**dict(fbank.get("time_mask", {})))
+        fbank["freq_mask"] = MaskConfig(**dict(fbank.get("freq_mask", {})))
+        augmentation["fbank"] = FbankAugmentationConfig(**fbank)
+        kwargs["augmentation"] = DataAugmentationConfig(**augmentation)
         cfg = DataConfig(**kwargs)
         JsonConfigLoader._validate_data(cfg)
         return cfg
@@ -718,6 +977,16 @@ class JsonConfigLoader:
         architecture["mil"] = MilConfig(**dict(architecture.get("mil", {})))
         architecture["evidence_pooling"] = EvidencePoolingConfig(
             **dict(architecture.get("evidence_pooling", {}))
+        )
+        token_augmentation = dict(architecture.get("token_augmentation", {}))
+        token_augmentation["branch_event_dropout"] = BranchEventDropoutConfig(
+            **dict(token_augmentation.get("branch_event_dropout", {}))
+        )
+        token_augmentation["selected_evidence_dropout"] = SelectedEvidenceDropoutConfig(
+            **dict(token_augmentation.get("selected_evidence_dropout", {}))
+        )
+        architecture["token_augmentation"] = TokenAugmentationConfig(
+            **token_augmentation
         )
         encoder["adaptation"] = EncoderAdaptationConfig(
             **dict(encoder.get("adaptation", {}))

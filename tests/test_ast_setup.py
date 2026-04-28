@@ -13,6 +13,7 @@ from src.training.ast_setup import (
 )
 from src.utils.checkpoint import parse_model_cfg
 from src.utils.config import (
+    BranchEventDropoutConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -21,6 +22,8 @@ from src.utils.config import (
     ModelEncoderConfig,
     MultiScaleRdtArchitectureConfig,
     RdtConfig,
+    SelectedEvidenceDropoutConfig,
+    TokenAugmentationConfig,
 )
 from torch import nn
 
@@ -36,6 +39,7 @@ def _run_model_config(
     exclude_branches_from_evidence: tuple[int, ...] = (),
     attention_temperature: float = 1.0,
     evidence_pooling: EvidencePoolingConfig | None = None,
+    token_augmentation: TokenAugmentationConfig | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         encoder=ModelEncoderConfig(
@@ -61,6 +65,7 @@ def _run_model_config(
                 ),
                 mil=MilConfig(attention_temperature=attention_temperature),
                 evidence_pooling=evidence_pooling or EvidencePoolingConfig(),
+                token_augmentation=token_augmentation or TokenAugmentationConfig(),
             ),
         ),
         classifier=ClassifierConfig(
@@ -281,7 +286,20 @@ def test_architecture_summary_reports_event_geometry() -> None:
 
 def test_parse_model_cfg_reconstructs_checkpoint_config() -> None:
     model = build_ast_model(
-        _run_model_config(),
+        _run_model_config(
+            token_augmentation=TokenAugmentationConfig(
+                branch_event_dropout=BranchEventDropoutConfig(
+                    enabled=True,
+                    probability=0.05,
+                    min_keep_tokens=1,
+                ),
+                selected_evidence_dropout=SelectedEvidenceDropoutConfig(
+                    enabled=True,
+                    probability=0.05,
+                    min_keep_per_branch=1,
+                ),
+            )
+        ),
         num_mel_bins=32,
         max_length=32,
         num_classes=3,
@@ -298,6 +316,14 @@ def test_parse_model_cfg_reconstructs_checkpoint_config() -> None:
     assert parsed.encoder.architecture.rdt.evidence_score_source == "attention_weight"
     assert parsed.encoder.architecture.mil.attention_temperature == 1.0
     assert parsed.encoder.architecture.evidence_pooling.type == "mean"
+    assert (
+        parsed.encoder.architecture.token_augmentation.branch_event_dropout.enabled
+        is True
+    )
+    assert (
+        parsed.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
+        is True
+    )
     assert parsed.num_classes == 3
 
 

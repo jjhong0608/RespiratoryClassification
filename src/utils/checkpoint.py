@@ -6,6 +6,7 @@ import torch
 
 from src.models.model import (
     AstFeatureDims,
+    BranchEventDropoutConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -15,6 +16,8 @@ from src.models.model import (
     MultiScaleRdtEncoderConfig,
     PatchBranchConfig,
     RdtConfig,
+    SelectedEvidenceDropoutConfig,
+    TokenAugmentationConfig,
 )
 
 
@@ -124,6 +127,16 @@ def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
     architecture_kwargs["mil"] = MilConfig(**dict(architecture_kwargs.get("mil", {})))
     architecture_kwargs["evidence_pooling"] = EvidencePoolingConfig(
         **dict(architecture_kwargs.get("evidence_pooling", {}))
+    )
+    token_augmentation = dict(architecture_kwargs.get("token_augmentation", {}))
+    token_augmentation["branch_event_dropout"] = BranchEventDropoutConfig(
+        **dict(token_augmentation.get("branch_event_dropout", {}))
+    )
+    token_augmentation["selected_evidence_dropout"] = SelectedEvidenceDropoutConfig(
+        **dict(token_augmentation.get("selected_evidence_dropout", {}))
+    )
+    architecture_kwargs["token_augmentation"] = TokenAugmentationConfig(
+        **token_augmentation
     )
 
     return MultiScaleRdtAstModelConfig(

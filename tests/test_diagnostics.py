@@ -47,6 +47,18 @@ def _branch_gated_output() -> AstModelOutput:
     )
 
 
+def _dropout_output() -> AstModelOutput:
+    return AstModelOutput(
+        logits=torch.tensor([0.25]),
+        pooled_embedding=torch.tensor([[0.1, 0.2]]),
+        selected_evidence_indices=torch.tensor([[1, 2, 3, 4]]),
+        selected_evidence_scores=torch.tensor([[0.8, 0.7, 0.6, 0.5]]),
+        selected_evidence_branch_ids=torch.tensor([[0, 0, 1, 1]]),
+        selected_evidence_dropout_mask=torch.tensor([[True, False, True, True]]),
+        selected_evidence_keep_ratio=torch.tensor([0.75]),
+    )
+
+
 def test_diagnostics_always_include_selected_evidence_metadata() -> None:
     rows = build_diagnostic_rows(
         _batch(),
@@ -108,3 +120,22 @@ def test_diagnostics_include_branch_gated_pooling_metadata() -> None:
     assert row["evidence_gate_weights"] == [0.4000000059604645, 0.6000000238418579]
     assert row["evidence_gate_entropy"] == pytest.approx(0.673)
     assert row["branch_evidence_norms"] == [1.0, 2.0]
+
+
+def test_diagnostics_include_selected_evidence_dropout_metadata() -> None:
+    rows = build_diagnostic_rows(
+        _batch(),
+        _dropout_output(),
+        probabilities=torch.tensor([0.75]),
+        predicted_labels=torch.tensor([1]),
+        analysis=AnalysisOutputConfig(
+            save_logits=True,
+            save_probabilities=True,
+            save_embeddings=False,
+            save_clip_metadata=True,
+        ),
+    )
+
+    row = rows[0]
+    assert row["selected_evidence_dropout_mask"] == [True, False, True, True]
+    assert row["selected_evidence_keep_ratio"] == pytest.approx(0.75)

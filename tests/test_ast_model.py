@@ -8,6 +8,9 @@ import torch
 from src.models.model import (
     AstFeatureDims,
     BranchAwareGatedEvidencePooling,
+    BranchEventDropoutConfig,
+    BranchEventTokenDropout,
+    BranchMilHead,
     BranchMilOutput,
     ClassifierConfig,
     EncoderAdaptationConfig,
@@ -20,6 +23,9 @@ from src.models.model import (
     MultiScaleRdtEncoderConfig,
     PatchBranchConfig,
     RdtConfig,
+    SelectedEvidenceDropout,
+    SelectedEvidenceDropoutConfig,
+    TokenAugmentationConfig,
     default_patch_branches,
     get_evidence_scores,
 )
@@ -39,6 +45,7 @@ def _small_architecture(
     exclude_branches_from_evidence: tuple[int, ...] = (),
     attention_temperature: float = 1.0,
     evidence_pooling: EvidencePoolingConfig | None = None,
+    token_augmentation: TokenAugmentationConfig | None = None,
 ) -> MultiScaleRdtArchitectureConfig:
     return MultiScaleRdtArchitectureConfig(
         hidden_size=32,
@@ -61,6 +68,7 @@ def _small_architecture(
         ),
         mil=MilConfig(attention_temperature=attention_temperature),
         evidence_pooling=evidence_pooling or EvidencePoolingConfig(),
+        token_augmentation=token_augmentation or TokenAugmentationConfig(),
     )
 
 
@@ -77,6 +85,7 @@ def _small_model_config(
     exclude_branches_from_evidence: tuple[int, ...] = (),
     attention_temperature: float = 1.0,
     evidence_pooling: EvidencePoolingConfig | None = None,
+    token_augmentation: TokenAugmentationConfig | None = None,
 ) -> MultiScaleRdtAstModelConfig:
     return MultiScaleRdtAstModelConfig(
         encoder=MultiScaleRdtEncoderConfig(
@@ -91,6 +100,7 @@ def _small_model_config(
                 exclude_branches_from_evidence=exclude_branches_from_evidence,
                 attention_temperature=attention_temperature,
                 evidence_pooling=evidence_pooling,
+                token_augmentation=token_augmentation,
             ),
         ),
         classifier=ClassifierConfig(
@@ -272,6 +282,109 @@ def test_branch_aware_gated_pooling_uses_only_present_branches() -> None:
     assert output.gate_weights.shape == (1, 3)
 
 
+def test_branch_event_token_dropout_disabled_returns_identity() -> None:
+    tokens = torch.randn(2, 5, 4)
+    dropout = BranchEventTokenDropout(
+        BranchEventDropoutConfig(enabled=False, probability=1.0, min_keep_tokens=2)
+    )
+    dropout.train()
+
+    output, keep_mask = dropout(tokens)
+
+    assert output is tokens
+    assert torch.equal(output, tokens)
+    assert keep_mask.dtype == torch.bool
+    assert torch.all(keep_mask)
+
+
+def test_branch_event_token_dropout_zeroes_tokens_and_keeps_minimum() -> None:
+    torch.manual_seed(0)
+    tokens = torch.ones(2, 5, 4)
+    dropout = BranchEventTokenDropout(
+        BranchEventDropoutConfig(enabled=True, probability=1.0, min_keep_tokens=2)
+    )
+    dropout.train()
+
+    output, keep_mask = dropout(tokens)
+
+    assert output.shape == tokens.shape
+    assert keep_mask.shape == tokens.shape[:2]
+    assert keep_mask.dtype == torch.bool
+    assert torch.all(keep_mask.sum(dim=1) == 2)
+    assert torch.all(output[~keep_mask] == 0)
+    assert torch.all(output[keep_mask] == 1)
+
+
+def test_branch_mil_head_respects_token_mask() -> None:
+    head = BranchMilHead(
+        hidden_size=4,
+        output_dim=1,
+        layer_norm_eps=1e-6,
+        attention_temperature=1.0,
+    )
+    event_tokens = torch.randn(1, 4, 4)
+    token_mask = torch.tensor([[True, False, True, False]])
+
+    output = head(event_tokens, token_mask=token_mask)
+
+    assert output.attention_weights.shape == (1, 4)
+    assert torch.all(output.attention_weights[~token_mask] < 1e-6)
+    assert torch.allclose(output.attention_weights.sum(dim=1), torch.ones(1))
+
+
+def test_selected_evidence_dropout_disabled_returns_identity() -> None:
+    tokens = torch.randn(1, 6, 4)
+    branch_ids = torch.tensor([[0, 0, 1, 1, 2, 2]])
+    dropout = SelectedEvidenceDropout(
+        SelectedEvidenceDropoutConfig(
+            enabled=False,
+            probability=1.0,
+            min_keep_per_branch=1,
+        )
+    )
+    dropout.train()
+
+    output, keep_mask = dropout(tokens, branch_ids)
+
+    assert output is tokens
+    assert torch.equal(output, tokens)
+    assert keep_mask.dtype == torch.bool
+    assert torch.all(keep_mask)
+
+
+@pytest.mark.parametrize(
+    "branch_ids",
+    [
+        torch.tensor([[0, 0, 1, 1, 2, 2, 3, 3]]),
+        torch.tensor([[0, 0, 1, 1, 2, 2]]),
+    ],
+)
+def test_selected_evidence_dropout_keeps_minimum_per_branch(
+    branch_ids: torch.Tensor,
+) -> None:
+    torch.manual_seed(0)
+    tokens = torch.ones(1, branch_ids.shape[1], 4)
+    dropout = SelectedEvidenceDropout(
+        SelectedEvidenceDropoutConfig(
+            enabled=True,
+            probability=1.0,
+            min_keep_per_branch=1,
+        )
+    )
+    dropout.train()
+
+    output, keep_mask = dropout(tokens, branch_ids)
+
+    assert output.shape == tokens.shape
+    assert keep_mask.shape == branch_ids.shape
+    assert keep_mask.dtype == torch.bool
+    for branch_id in torch.unique(branch_ids):
+        branch_mask = branch_ids == branch_id
+        assert int(keep_mask[branch_mask].sum().item()) == 1
+    assert torch.all(output[~keep_mask] == 0)
+    assert torch.all(output[keep_mask] == 1)
+
+
 def test_model_runs_without_rdt_when_disabled() -> None:
     model = MultiScaleRdtAstModel(_small_model_config(num_classes=2, rdt_enabled=False))
     output = model(torch.randn(1, 32, 32))
@@ -287,6 +400,91 @@ def test_model_runs_without_rdt_when_disabled() -> None:
     assert output.selected_evidence_scores.shape == (1, 8)
     assert output.selected_evidence_branch_ids is not None
     assert output.selected_evidence_branch_ids.shape == (1, 8)
+
+
+@pytest.mark.parametrize(
+    "token_augmentation",
+    [
+        TokenAugmentationConfig(),
+        TokenAugmentationConfig(
+            branch_event_dropout=BranchEventDropoutConfig(
+                enabled=True,
+                probability=0.5,
+                min_keep_tokens=1,
+            )
+        ),
+        TokenAugmentationConfig(
+            selected_evidence_dropout=SelectedEvidenceDropoutConfig(
+                enabled=True,
+                probability=0.5,
+                min_keep_per_branch=1,
+            )
+        ),
+        TokenAugmentationConfig(
+            branch_event_dropout=BranchEventDropoutConfig(
+                enabled=True,
+                probability=0.5,
+                min_keep_tokens=1,
+            ),
+            selected_evidence_dropout=SelectedEvidenceDropoutConfig(
+                enabled=True,
+                probability=0.5,
+                min_keep_per_branch=1,
+            ),
+        ),
+    ],
+)
+def test_model_forward_supports_token_augmentation_modes(
+    token_augmentation: TokenAugmentationConfig,
+) -> None:
+    torch.manual_seed(0)
+    model = MultiScaleRdtAstModel(
+        _small_model_config(
+            num_classes=2,
+            token_augmentation=token_augmentation,
+        )
+    )
+    model.train()
+
+    output = model(torch.randn(1, 32, 32))
+
+    assert output.logits.shape == (1,)
+    assert output.pooled_embedding.shape == (1, 32)
+    assert output.selected_evidence_tokens is not None
+    assert output.selected_evidence_indices is not None
+    assert output.selected_evidence_scores is not None
+    assert output.selected_evidence_branch_ids is not None
+    if token_augmentation.selected_evidence_dropout.enabled:
+        assert output.selected_evidence_dropout_mask is not None
+        assert output.selected_evidence_dropout_mask.shape == (1, 8)
+        assert output.selected_evidence_keep_ratio is not None
+        assert output.selected_evidence_keep_ratio.shape == (1,)
+    else:
+        assert output.selected_evidence_dropout_mask is None
+        assert output.selected_evidence_keep_ratio is None
+
+
+def test_model_eval_disables_selected_evidence_dropout() -> None:
+    model = MultiScaleRdtAstModel(
+        _small_model_config(
+            num_classes=2,
+            token_augmentation=TokenAugmentationConfig(
+                selected_evidence_dropout=SelectedEvidenceDropoutConfig(
+                    enabled=True,
+                    probability=0.5,
+                    min_keep_per_branch=1,
+                )
+            ),
+        )
+    )
+    model.eval()
+
+    output = model(torch.randn(1, 32, 32))
+
+    assert output.selected_evidence_dropout_mask is not None
+    assert torch.all(output.selected_evidence_dropout_mask)
+    assert output.selected_evidence_keep_ratio is not None
+    assert torch.allclose(output.selected_evidence_keep_ratio, torch.ones(1))
 
 
 @pytest.mark.parametrize("num_classes", [2, 3])

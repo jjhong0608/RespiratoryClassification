@@ -14,6 +14,7 @@ from src.data.audio import (
     AudioPreprocessConfig,
     WaveformPreprocessor,
 )
+from src.data.augmentation import AugmentationPipeline
 from src.data.io import WaveformLoader
 from src.utils.config import DataConfig
 from src.utils.logging import LoggingMixin
@@ -28,9 +29,18 @@ class ClipSample:
 
 
 class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
-    def __init__(self, cfg: DataConfig, root: str):
+    def __init__(
+        self,
+        cfg: DataConfig,
+        root: str,
+        *,
+        split: str = "train",
+        apply_augmentation: bool = False,
+    ):
         self.cfg = cfg
         self.root = root
+        self.split = split
+        self.apply_augmentation = bool(apply_augmentation)
         self._paths: list[Path] = []
         self._targets: list[int] = []
         self._label_names: list[str] = []
@@ -63,6 +73,11 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
                 mean=cfg.preprocessing.ast_fbank.mean,
                 std=cfg.preprocessing.ast_fbank.std,
             )
+        )
+        self._augmentation_pipeline = (
+            AugmentationPipeline(cfg.augmentation, sample_rate=cfg.audio.sample_rate)
+            if self.apply_augmentation and cfg.augmentation.enabled
+            else None
         )
 
     @staticmethod
@@ -103,13 +118,39 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
     def file_paths(self) -> list[Path]:
         return list(self._paths)
 
+    @property
+    def waveform_augmentation_enabled(self) -> bool:
+        return (
+            self._augmentation_pipeline is not None
+            and self._augmentation_pipeline.waveform_enabled
+        )
+
+    @property
+    def fbank_augmentation_enabled(self) -> bool:
+        return (
+            self._augmentation_pipeline is not None
+            and self._augmentation_pipeline.fbank_enabled
+        )
+
     def __getitem__(self, idx: int) -> ClipSample:
         path = self._paths[idx]
         waveform = self._waveform_loader.load(path)
         clip_waveform = self._preprocessor.prepare(waveform)
+        augmentation_choice = "independent"
+        if self._augmentation_pipeline is not None:
+            augmentation_choice = self._augmentation_pipeline.sample_choice()
+            clip_waveform = self._augmentation_pipeline.apply_waveform(
+                clip_waveform,
+                augmentation_choice,
+            )
         feature_map = (
             self._feature_extractor(clip_waveform).transpose(0, 1).contiguous()
         )
+        if self._augmentation_pipeline is not None:
+            feature_map = self._augmentation_pipeline.apply_fbank(
+                feature_map,
+                augmentation_choice,
+            )
         return ClipSample(
             input_values=feature_map,
             label=self._targets[idx],
@@ -119,11 +160,25 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
 
 
 class RespiratoryClipDataset(LoggingMixin, Dataset[ClipSample]):
-    def __init__(self, cfg: DataConfig, roots: Sequence[str]):
+    def __init__(
+        self,
+        cfg: DataConfig,
+        roots: Sequence[str],
+        *,
+        split: str = "train",
+        apply_augmentation: bool = False,
+    ):
         self.cfg = cfg
         self.roots = list(roots)
+        self.split = split
+        self.apply_augmentation = bool(apply_augmentation)
         self._datasets = [
-            _RespiratoryClipRootDataset(cfg, root)
+            _RespiratoryClipRootDataset(
+                cfg,
+                root,
+                split=split,
+                apply_augmentation=apply_augmentation,
+            )
             for root in self.roots
             if Path(root).exists()
         ]
@@ -153,6 +208,10 @@ class RespiratoryClipDataset(LoggingMixin, Dataset[ClipSample]):
         for dataset in self._datasets:
             paths.extend(dataset.file_paths)
         return paths
+
+    @property
+    def root_datasets(self) -> tuple[_RespiratoryClipRootDataset, ...]:
+        return tuple(self._datasets)
 
     @property
     def num_mel_bins(self) -> int:

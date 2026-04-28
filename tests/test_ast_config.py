@@ -160,6 +160,49 @@ def _eval_payload() -> dict:
     return payload
 
 
+def _augmentation_payload() -> dict:
+    return {
+        "enabled": True,
+        "waveform": {
+            "enabled": True,
+            "probability": 1.0,
+            "gain": {
+                "enabled": True,
+                "probability": 0.5,
+                "min_db": -3.0,
+                "max_db": 3.0,
+            },
+            "noise": {
+                "enabled": True,
+                "probability": 0.3,
+                "snr_db_min": 15.0,
+                "snr_db_max": 30.0,
+            },
+            "time_shift": {
+                "enabled": True,
+                "probability": 0.5,
+                "max_shift_fraction": 0.05,
+                "mode": "zero_pad",
+            },
+        },
+        "fbank": {
+            "enabled": True,
+            "probability": 0.5,
+            "time_mask": {
+                "enabled": True,
+                "num_masks": 1,
+                "max_width": 32,
+            },
+            "freq_mask": {
+                "enabled": True,
+                "num_masks": 1,
+                "max_width": 8,
+            },
+            "mask_value": 0.0,
+        },
+    }
+
+
 def test_repo_example_configs_load() -> None:
     d_e_f_config_paths = [
         "training_d1_c3_3scale_stage1.json",
@@ -233,6 +276,26 @@ def test_repo_example_configs_load() -> None:
     h_configs = [
         JsonConfigLoader.load_training(ROOT / "configs" / config_path)
         for config_path in h_config_paths
+    ]
+    aug_config_paths = [
+        "training_aug0_h0_gated_no_aug.json",
+        "training_aug1_h0_gated_waveform_aug.json",
+        "training_aug2_h0_gated_fbank_aug.json",
+        "training_aug3_h0_gated_waveform_fbank_aug.json",
+    ]
+    aug_configs = [
+        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
+        for config_path in aug_config_paths
+    ]
+    oneof_token_config_paths = [
+        "training_aug4_h0_gated_oneof.json",
+        "training_pt1_h0_gated_oneof_branch_event_dropout.json",
+        "training_pt2_h0_gated_oneof_selected_evidence_dropout.json",
+        "training_pt3_h0_gated_oneof_both_token_dropouts.json",
+    ]
+    oneof_token_configs = [
+        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
+        for config_path in oneof_token_config_paths
     ]
     c0_cfg = JsonConfigLoader.load_training(
         ROOT / "configs/training_c0_b3_focal_patience8.json"
@@ -385,6 +448,118 @@ def test_repo_example_configs_load() -> None:
         len(cfg.model.encoder.architecture.patch_branches) == 3
         for cfg in h_configs[10:]
     )
+    assert len(aug_configs) == len(aug_config_paths)
+    assert [cfg.experiment.name for cfg in aug_configs] == [
+        "respiratory_aug0_h0_gated_no_aug",
+        "respiratory_aug1_h0_gated_waveform_aug",
+        "respiratory_aug2_h0_gated_fbank_aug",
+        "respiratory_aug3_h0_gated_waveform_fbank_aug",
+    ]
+    assert aug_configs[0].data.augmentation.enabled is False
+    assert aug_configs[1].data.augmentation.waveform.enabled is True
+    assert aug_configs[1].data.augmentation.fbank.enabled is False
+    assert aug_configs[2].data.augmentation.waveform.enabled is False
+    assert aug_configs[2].data.augmentation.fbank.enabled is True
+    assert aug_configs[3].data.augmentation.waveform.enabled is True
+    assert aug_configs[3].data.augmentation.fbank.enabled is True
+    assert all(
+        cfg.model.encoder.architecture.evidence_pooling.type == "branch_gated"
+        for cfg in aug_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.rdt.enabled is True for cfg in aug_configs
+    )
+    assert all(cfg.model.encoder.architecture.rdt.steps == 3 for cfg in aug_configs)
+    assert all(
+        cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
+        for cfg in aug_configs
+    )
+    assert all(cfg.train.loss.type == "bce" for cfg in aug_configs)
+    assert all(cfg.train.loss.branch_auxiliary.enabled is True for cfg in aug_configs)
+    assert all(cfg.train.loss.branch_auxiliary.weight == 0.1 for cfg in aug_configs)
+    assert all(cfg.train.optimizer.encoder_lr == 1e-5 for cfg in aug_configs)
+    assert all(cfg.train.optimizer.head_lr == 3e-4 for cfg in aug_configs)
+    assert all(cfg.train.initialization.checkpoint_path is None for cfg in aug_configs)
+    assert all(
+        cfg.train.initialization.load_model_state is False for cfg in aug_configs
+    )
+    assert len(oneof_token_configs) == len(oneof_token_config_paths)
+    assert [cfg.experiment.name for cfg in oneof_token_configs] == [
+        "respiratory_aug4_h0_gated_oneof",
+        "respiratory_pt1_h0_gated_oneof_branch_event_dropout",
+        "respiratory_pt2_h0_gated_oneof_selected_evidence_dropout",
+        "respiratory_pt3_h0_gated_oneof_both_token_dropouts",
+    ]
+    assert all(
+        cfg.data.augmentation.policy.type == "one_of" for cfg in oneof_token_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.evidence_pooling.type == "branch_gated"
+        for cfg in oneof_token_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.rdt.enabled is True
+        for cfg in oneof_token_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.rdt.steps == 3 for cfg in oneof_token_configs
+    )
+    assert all(
+        cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
+        for cfg in oneof_token_configs
+    )
+    assert all(cfg.train.loss.type == "bce" for cfg in oneof_token_configs)
+    assert all(
+        cfg.train.loss.branch_auxiliary.enabled is True for cfg in oneof_token_configs
+    )
+    assert (
+        oneof_token_configs[
+            0
+        ].model.encoder.architecture.token_augmentation.branch_event_dropout.enabled
+        is False
+    )
+    assert (
+        oneof_token_configs[
+            0
+        ].model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
+        is False
+    )
+    assert (
+        oneof_token_configs[
+            1
+        ].model.encoder.architecture.token_augmentation.branch_event_dropout.enabled
+        is True
+    )
+    assert (
+        oneof_token_configs[
+            1
+        ].model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
+        is False
+    )
+    assert (
+        oneof_token_configs[
+            2
+        ].model.encoder.architecture.token_augmentation.branch_event_dropout.enabled
+        is False
+    )
+    assert (
+        oneof_token_configs[
+            2
+        ].model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
+        is True
+    )
+    assert (
+        oneof_token_configs[
+            3
+        ].model.encoder.architecture.token_augmentation.branch_event_dropout.enabled
+        is True
+    )
+    assert (
+        oneof_token_configs[
+            3
+        ].model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
+        is True
+    )
     assert training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert multiclass_cfg.train.loss.type == "cross_entropy"
     assert cv_cfg.folds[0].name == "fold_0"
@@ -422,6 +597,10 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.model.classifier.pooling == "latent_mean"
     assert cfg.model.encoder.architecture.rdt.enabled is True
     assert cfg.model.encoder.architecture.evidence_pooling.type == "mean"
+    assert cfg.data.augmentation.enabled is False
+    assert cfg.data.augmentation.policy.type == "independent"
+    assert cfg.data.augmentation.waveform.enabled is False
+    assert cfg.data.augmentation.fbank.enabled is False
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.initialization.checkpoint_path is None
 
@@ -572,6 +751,213 @@ def test_invalid_attention_temperature_is_rejected(tmp_path: Path) -> None:
     config_path = _write_json(tmp_path / "bad_temperature.json", payload)
 
     with pytest.raises(ValueError, match="attention_temperature"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field_path", "field_value", "match"),
+    [
+        (("waveform", "probability"), -0.1, "waveform.probability"),
+        (("waveform", "gain", "probability"), 1.1, "gain.probability"),
+        (("waveform", "noise", "probability"), -0.1, "noise.probability"),
+        (("waveform", "time_shift", "probability"), 1.1, "time_shift.probability"),
+        (("fbank", "probability"), -0.1, "fbank.probability"),
+    ],
+)
+def test_invalid_augmentation_probability_is_rejected(
+    tmp_path: Path,
+    field_path: tuple[str, ...],
+    field_value: object,
+    match: str,
+) -> None:
+    payload = _base_payload()
+    augmentation = _augmentation_payload()
+    target = augmentation
+    for field_name in field_path[:-1]:
+        target = target[field_name]
+    target[field_path[-1]] = field_value
+    payload["data"]["augmentation"] = augmentation
+    config_path = _write_json(tmp_path / "bad_augmentation_probability.json", payload)
+
+    with pytest.raises(ValueError, match=match):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        (("waveform", "gain", "min_db", 4.0), "gain.min_db"),
+        (("waveform", "noise", "snr_db_min", 0.0), "noise.snr_db_min"),
+        (("waveform", "noise", "snr_db_max", 10.0), "noise.snr_db_min"),
+        (
+            ("waveform", "time_shift", "max_shift_fraction", -0.1),
+            "max_shift_fraction",
+        ),
+        (
+            ("waveform", "time_shift", "max_shift_fraction", 1.0),
+            "max_shift_fraction",
+        ),
+        (("waveform", "time_shift", "mode", "wrap"), "time_shift.mode"),
+        (("fbank", "time_mask", "num_masks", -1), "time_mask.num_masks"),
+        (("fbank", "freq_mask", "max_width", -1), "freq_mask.max_width"),
+    ],
+)
+def test_invalid_augmentation_config_is_rejected(
+    tmp_path: Path,
+    mutation: tuple[str, str, str, object],
+    match: str,
+) -> None:
+    payload = _base_payload()
+    augmentation = _augmentation_payload()
+    section, subsection, field_name, field_value = mutation
+    augmentation[section][subsection][field_name] = field_value
+    payload["data"]["augmentation"] = augmentation
+    config_path = _write_json(tmp_path / "bad_augmentation.json", payload)
+
+    with pytest.raises(ValueError, match=match):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_zero_width_augmentation_mask_is_valid(tmp_path: Path) -> None:
+    payload = _base_payload()
+    augmentation = _augmentation_payload()
+    augmentation["fbank"]["time_mask"]["max_width"] = 0
+    augmentation["fbank"]["freq_mask"]["max_width"] = 0
+    payload["data"]["augmentation"] = augmentation
+    config_path = _write_json(tmp_path / "zero_width_mask.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.data.augmentation.fbank.time_mask.max_width == 0
+    assert cfg.data.augmentation.fbank.freq_mask.max_width == 0
+
+
+@pytest.mark.parametrize(
+    ("choices", "match"),
+    [
+        (
+            [
+                {"name": "none", "probability": 0.5},
+                {"name": "unsupported", "probability": 0.5},
+            ],
+            "choices.name",
+        ),
+        (
+            [
+                {"name": "none", "probability": -0.1},
+                {"name": "waveform", "probability": 1.1},
+            ],
+            "probability",
+        ),
+        (
+            [
+                {"name": "none", "probability": 0.5},
+                {"name": "waveform", "probability": 0.4},
+            ],
+            "sum to 1.0",
+        ),
+        (
+            [
+                {"name": "none", "probability": 0.0},
+                {"name": "waveform", "probability": 0.0},
+            ],
+            "positive probability",
+        ),
+    ],
+)
+def test_invalid_oneof_augmentation_policy_is_rejected(
+    tmp_path: Path,
+    choices: list[dict[str, object]],
+    match: str,
+) -> None:
+    payload = _base_payload()
+    augmentation = _augmentation_payload()
+    augmentation["policy"] = {
+        "type": "one_of",
+        "choices": choices,
+    }
+    payload["data"]["augmentation"] = augmentation
+    config_path = _write_json(tmp_path / "bad_oneof_policy.json", payload)
+
+    with pytest.raises(ValueError, match=match):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_augmentation_policy_type_is_rejected(tmp_path: Path) -> None:
+    payload = _base_payload()
+    augmentation = _augmentation_payload()
+    augmentation["policy"] = {"type": "sometimes"}
+    payload["data"]["augmentation"] = augmentation
+    config_path = _write_json(tmp_path / "bad_policy_type.json", payload)
+
+    with pytest.raises(ValueError, match="policy.type"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("section", "field_name", "field_value", "match"),
+    [
+        (
+            "branch_event_dropout",
+            "probability",
+            1.0,
+            "branch_event_dropout.probability",
+        ),
+        (
+            "selected_evidence_dropout",
+            "probability",
+            -0.1,
+            "selected_evidence_dropout.probability",
+        ),
+        ("branch_event_dropout", "mode", "zero", "branch_event_dropout.mode"),
+        (
+            "selected_evidence_dropout",
+            "mode",
+            "zero_mask",
+            "selected_evidence_dropout.mode",
+        ),
+        (
+            "branch_event_dropout",
+            "min_keep_tokens",
+            0,
+            "branch_event_dropout.min_keep_tokens",
+        ),
+        (
+            "selected_evidence_dropout",
+            "min_keep_per_branch",
+            0,
+            "selected_evidence_dropout.min_keep_per_branch",
+        ),
+    ],
+)
+def test_invalid_token_augmentation_config_is_rejected(
+    tmp_path: Path,
+    section: str,
+    field_name: str,
+    field_value: object,
+    match: str,
+) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["token_augmentation"] = {
+        "branch_event_dropout": {
+            "enabled": False,
+            "probability": 0.05,
+            "mode": "zero_mask",
+            "min_keep_tokens": 1,
+        },
+        "selected_evidence_dropout": {
+            "enabled": False,
+            "probability": 0.05,
+            "mode": "zero",
+            "min_keep_per_branch": 1,
+        },
+    }
+    payload["model"]["encoder"]["architecture"]["token_augmentation"][section][
+        field_name
+    ] = field_value
+    config_path = _write_json(tmp_path / "bad_token_augmentation.json", payload)
+
+    with pytest.raises(ValueError, match=match):
         JsonConfigLoader.load_training(config_path)
 
 

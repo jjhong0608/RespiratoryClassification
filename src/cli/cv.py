@@ -47,6 +47,24 @@ def main() -> None:
         )
         train_dataset = build_dataset(fold_data, split="train")
         val_dataset = build_dataset(fold_data, split="val")
+        augmentation = fold_data.augmentation
+        logger.info(
+            "[%s] Data augmentation | enabled=%s | train_apply=%s | waveform=%s | "
+            "waveform_probability=%.4f | gain=%s | noise=%s | time_shift=%s | "
+            "fbank=%s | fbank_probability=%.4f | time_mask=%s | freq_mask=%s",
+            fold.name,
+            augmentation.enabled,
+            train_dataset.apply_augmentation,
+            augmentation.waveform.enabled,
+            augmentation.waveform.probability,
+            augmentation.waveform.gain.enabled,
+            augmentation.waveform.noise.enabled,
+            augmentation.waveform.time_shift.enabled,
+            augmentation.fbank.enabled,
+            augmentation.fbank.probability,
+            augmentation.fbank.time_mask.enabled,
+            augmentation.fbank.freq_mask.enabled,
+        )
         model = build_ast_model(
             cfg.model,
             num_mel_bins=train_dataset.num_mel_bins,

@@ -63,6 +63,16 @@ def build_diagnostic_rows(
         if output.branch_evidence_norms is not None
         else None
     )
+    selected_evidence_dropout_mask = (
+        output.selected_evidence_dropout_mask.detach().cpu()
+        if output.selected_evidence_dropout_mask is not None
+        else None
+    )
+    selected_evidence_keep_ratio = (
+        output.selected_evidence_keep_ratio.detach().cpu()
+        if output.selected_evidence_keep_ratio is not None
+        else None
+    )
 
     for index, audio_path in enumerate(batch.audio_paths):
         predicted_label = int(predicted_labels[index].item())
@@ -106,6 +116,14 @@ def build_diagnostic_rows(
             row["evidence_gate_entropy"] = float(evidence_gate_entropy[index].item())
         if branch_evidence_norms is not None:
             row["branch_evidence_norms"] = branch_evidence_norms[index].tolist()
+        if selected_evidence_dropout_mask is not None:
+            row["selected_evidence_dropout_mask"] = selected_evidence_dropout_mask[
+                index
+            ].tolist()
+        if selected_evidence_keep_ratio is not None:
+            row["selected_evidence_keep_ratio"] = float(
+                selected_evidence_keep_ratio[index].item()
+            )
         if analysis.save_embeddings:
             row["pooled_embedding"] = embeddings[index].tolist()
             if selected_evidence_tokens is not None:
