@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ import torch
 from torch.utils.data import WeightedRandomSampler
 
 from src.data.dataset import RespiratoryClipDataset
+from src.utils.config import LossConfig
 
 
 @dataclass(frozen=True)
@@ -15,6 +17,15 @@ class ResolvedImbalance:
     pos_weight: float | None
     weighted_random: bool
     class_counts: Mapping[int, int]
+
+
+@dataclass(frozen=True)
+class ResolvedLossWeights:
+    class_counts: tuple[int, ...]
+    class_weights: tuple[float, ...] | None
+    main_index_to_binary_target: tuple[int, ...] | None
+    binary_counts: Mapping[int, int] | None
+    branch_binary_pos_weight: float | None
 
 
 def collect_targets(dataset: RespiratoryClipDataset) -> list[int]:
@@ -34,6 +45,146 @@ def compute_binary_pos_weight(targets: Sequence[int], positive: int = 1) -> floa
     if negatives <= 0:
         raise ValueError("Cannot compute pos_weight with zero negative samples")
     return float(negatives) / float(positives)
+
+
+def compute_class_counts_by_index(
+    targets: Sequence[int],
+    *,
+    num_classes: int,
+) -> torch.Tensor:
+    if num_classes <= 0:
+        raise ValueError("num_classes must be greater than zero")
+    counts = torch.zeros(num_classes, dtype=torch.float32)
+    for target in targets:
+        target_index = int(target)
+        if target_index < 0 or target_index >= num_classes:
+            raise ValueError(
+                f"target index {target_index} is outside 0..{num_classes - 1}"
+            )
+        counts[target_index] += 1.0
+    return counts
+
+
+def compute_sqrt_inverse_class_weights(class_counts: torch.Tensor) -> torch.Tensor:
+    if class_counts.ndim != 1:
+        raise ValueError(
+            f"class_counts must be a 1D tensor, got {tuple(class_counts.shape)}"
+        )
+    if class_counts.numel() == 0:
+        raise ValueError("class_counts must not be empty")
+    if torch.any(class_counts < 0):
+        raise ValueError("class_counts must be non-negative")
+    weights = torch.rsqrt(class_counts.to(dtype=torch.float32).clamp_min(1.0))
+    return weights / weights.mean().clamp_min(1e-12)
+
+
+def build_main_index_to_binary_target(
+    *,
+    label_to_index: Mapping[str, int],
+    binary_label_to_index: Mapping[str, int],
+) -> tuple[int, ...]:
+    if set(label_to_index.keys()) != set(binary_label_to_index.keys()):
+        missing = sorted(set(label_to_index.keys()) - set(binary_label_to_index.keys()))
+        extra = sorted(set(binary_label_to_index.keys()) - set(label_to_index.keys()))
+        raise ValueError(
+            "branch binary label map must contain exactly the main labels; "
+            f"missing={missing} extra={extra}"
+        )
+    mapping = [0] * len(label_to_index)
+    for label_name, class_index in label_to_index.items():
+        binary_target = int(binary_label_to_index[label_name])
+        if binary_target not in {0, 1}:
+            raise ValueError("branch binary label targets must be 0 or 1")
+        mapping[int(class_index)] = binary_target
+    if all(value == 0 for value in mapping):
+        raise ValueError("branch binary label map must include class 1")
+    if all(value == 1 for value in mapping):
+        raise ValueError("branch binary label map must include class 0")
+    return tuple(mapping)
+
+
+def compute_binary_counts_from_targets(
+    targets: Sequence[int],
+    *,
+    main_index_to_binary_target: Sequence[int],
+) -> dict[int, int]:
+    counts = {0: 0, 1: 0}
+    for target in targets:
+        class_index = int(target)
+        if class_index < 0 or class_index >= len(main_index_to_binary_target):
+            raise ValueError(
+                "target index is outside the branch binary mapping range: "
+                f"{class_index}"
+            )
+        binary_target = int(main_index_to_binary_target[class_index])
+        if binary_target not in {0, 1}:
+            raise ValueError("branch binary mapping values must be 0 or 1")
+        counts[binary_target] += 1
+    return counts
+
+
+def compute_sqrt_normal_over_abnormal_pos_weight(
+    binary_counts: Mapping[int, int],
+) -> float:
+    normal_count = int(binary_counts.get(0, 0))
+    abnormal_count = int(binary_counts.get(1, 0))
+    if normal_count <= 0:
+        raise ValueError(
+            "Cannot compute branch binary pos_weight with zero normal samples"
+        )
+    if abnormal_count <= 0:
+        raise ValueError(
+            "Cannot compute branch binary pos_weight with zero abnormal samples"
+        )
+    return float(math.sqrt(float(normal_count) / float(abnormal_count)))
+
+
+def resolve_loss_weights(
+    *,
+    targets: Sequence[int],
+    num_classes: int,
+    label_to_index: Mapping[str, int],
+    loss_cfg: LossConfig,
+) -> ResolvedLossWeights:
+    class_counts_tensor = compute_class_counts_by_index(
+        targets,
+        num_classes=num_classes,
+    )
+    class_counts_tuple = tuple(int(value.item()) for value in class_counts_tensor)
+    class_weights: tuple[float, ...] | None = None
+    if loss_cfg.class_weighting.enabled:
+        class_weights_tensor = compute_sqrt_inverse_class_weights(class_counts_tensor)
+        class_weights = tuple(float(value.item()) for value in class_weights_tensor)
+
+    main_index_to_binary_target: tuple[int, ...] | None = None
+    binary_counts: dict[int, int] | None = None
+    branch_binary_pos_weight: float | None = None
+    if loss_cfg.branch_binary_auxiliary.enabled:
+        main_index_to_binary_target = build_main_index_to_binary_target(
+            label_to_index=label_to_index,
+            binary_label_to_index=loss_cfg.branch_binary_auxiliary.label_to_index,
+        )
+        binary_counts = compute_binary_counts_from_targets(
+            targets,
+            main_index_to_binary_target=main_index_to_binary_target,
+        )
+        if loss_cfg.branch_binary_auxiliary.pos_weight.enabled:
+            branch_binary_pos_weight = compute_sqrt_normal_over_abnormal_pos_weight(
+                binary_counts
+            )
+        elif binary_counts.get(0, 0) <= 0 or binary_counts.get(1, 0) <= 0:
+            raise ValueError(
+                "branch_binary_auxiliary requires both normal and abnormal train "
+                "examples"
+            )
+
+    return ResolvedLossWeights(
+        class_counts=class_counts_tuple,
+        class_weights=class_weights,
+        main_index_to_binary_target=main_index_to_binary_target,
+        binary_counts=binary_counts,
+        branch_binary_pos_weight=branch_binary_pos_weight,
+    )
 
 
 def build_weighted_sampler(

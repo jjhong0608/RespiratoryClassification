@@ -18,7 +18,12 @@ from src.training.ast_setup import (
     build_ast_model,
     build_grouped_optimizer,
 )
-from src.training.trainer import Trainer, TrainerConfig
+from src.training.trainer import (
+    CheckpointManager,
+    Trainer,
+    TrainerConfig,
+    resolve_branch_binary_aux_weight,
+)
 from src.utils.checkpoint import load_checkpoint
 from src.utils.config import (
     AnalysisConfig,
@@ -28,6 +33,12 @@ from src.utils.config import (
     AudioConfig,
     BandPassConfig,
     BranchAuxiliaryLossConfig,
+    BranchBinaryAuxiliaryLossConfig,
+    BranchBinaryAuxiliaryMonitorConfig,
+    BranchBinaryAuxiliaryScheduleConfig,
+    BranchBinaryPosWeightConfig,
+    CheckpointingConfig,
+    CheckpointMonitorConfig,
     ClassifierConfig,
     DataConfig,
     EarlyStoppingConfig,
@@ -189,6 +200,13 @@ def _trainer_cfg(
     branch_auxiliary_enabled: bool = False,
     branch_auxiliary_weight: float = 0.3,
     branch_auxiliary_weights: tuple[float, ...] | None = None,
+    branch_binary_auxiliary_enabled: bool = False,
+    branch_binary_auxiliary_weight: float = 0.3,
+    branch_binary_auxiliary_schedule: BranchBinaryAuxiliaryScheduleConfig | None = None,
+    branch_binary_auxiliary_monitor: BranchBinaryAuxiliaryMonitorConfig | None = None,
+    branch_binary_pos_weight: float | None = None,
+    main_index_to_binary_target: tuple[int, ...] | None = None,
+    class_weights: tuple[float, ...] | None = None,
     attention_entropy_enabled: bool = False,
     attention_entropy_weight: float = 0.0,
 ) -> TrainerConfig:
@@ -206,12 +224,36 @@ def _trainer_cfg(
         loss_type=loss_type,
         gamma=gamma,
         pos_weight=pos_weight,
+        class_weights=class_weights,
         branch_auxiliary=BranchAuxiliaryLossConfig(
             enabled=branch_auxiliary_enabled,
             weight=branch_auxiliary_weight,
             aggregation="mean",
             weights=branch_auxiliary_weights,
         ),
+        branch_binary_auxiliary=BranchBinaryAuxiliaryLossConfig(
+            enabled=branch_binary_auxiliary_enabled,
+            weight=branch_binary_auxiliary_weight,
+            label_to_index={
+                "normal": 0,
+                "crackle": 1,
+                "wheeze": 1,
+                "rhonchi": 1,
+            },
+            pos_weight=BranchBinaryPosWeightConfig(
+                enabled=branch_binary_pos_weight is not None
+            ),
+            schedule=(
+                branch_binary_auxiliary_schedule
+                or BranchBinaryAuxiliaryScheduleConfig()
+            ),
+            monitor=(
+                branch_binary_auxiliary_monitor or BranchBinaryAuxiliaryMonitorConfig()
+            ),
+            aggregation="mean",
+        ),
+        branch_binary_pos_weight=branch_binary_pos_weight,
+        main_index_to_binary_target=main_index_to_binary_target,
         attention_entropy=AttentionEntropyLossConfig(
             enabled=attention_entropy_enabled,
             weight=attention_entropy_weight,
@@ -461,11 +503,11 @@ def test_trainer_total_loss_matches_final_loss_when_branch_auxiliary_disabled() 
     )
     labels = torch.tensor([1, 0], dtype=torch.long)
 
-    total_loss, aux_loss = trainer._compute_total_loss(criterion, output, labels)
+    components = trainer._compute_total_loss(criterion, output, labels)
     final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
 
-    assert aux_loss is None
-    assert torch.isclose(total_loss, final_loss)
+    assert components.branch_auxiliary is None
+    assert torch.isclose(components.total, final_loss)
 
 
 def test_trainer_branch_auxiliary_disabled_allows_missing_branch_logits() -> None:
@@ -485,11 +527,11 @@ def test_trainer_branch_auxiliary_disabled_allows_missing_branch_logits() -> Non
     )
     labels = torch.tensor([1, 0], dtype=torch.long)
 
-    total_loss, aux_loss = trainer._compute_total_loss(criterion, output, labels)
+    components = trainer._compute_total_loss(criterion, output, labels)
     final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
 
-    assert aux_loss is None
-    assert torch.isclose(total_loss, final_loss)
+    assert components.branch_auxiliary is None
+    assert torch.isclose(components.total, final_loss)
 
 
 def test_trainer_total_loss_includes_branch_auxiliary_when_enabled() -> None:
@@ -510,12 +552,12 @@ def test_trainer_total_loss_includes_branch_auxiliary_when_enabled() -> None:
     )
     labels = torch.tensor([1, 0], dtype=torch.long)
 
-    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    components = trainer._compute_total_loss(criterion, output, labels)
     final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
 
-    assert auxiliary_loss is not None
-    expected = final_loss + (0.5 * auxiliary_loss)
-    assert torch.isclose(total_loss, expected)
+    assert components.branch_auxiliary is not None
+    expected = final_loss + (0.5 * components.branch_auxiliary)
+    assert torch.isclose(components.total, expected)
 
 
 def test_trainer_branch_auxiliary_weights_override_scalar_weight() -> None:
@@ -537,7 +579,7 @@ def test_trainer_branch_auxiliary_weights_override_scalar_weight() -> None:
     )
     labels = torch.tensor([1, 0], dtype=torch.long)
 
-    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    components = trainer._compute_total_loss(criterion, output, labels)
     final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
     assert output.branch_logits is not None
     branch_losses = trainer._compute_branch_auxiliary_losses(
@@ -551,9 +593,9 @@ def test_trainer_branch_auxiliary_weights_override_scalar_weight() -> None:
     )
     expected_auxiliary = (branch_losses * weight_tensor).sum() / weight_tensor.sum()
 
-    assert auxiliary_loss is not None
-    assert torch.isclose(auxiliary_loss, expected_auxiliary)
-    assert torch.isclose(total_loss, final_loss + expected_auxiliary)
+    assert components.branch_auxiliary is not None
+    assert torch.isclose(components.branch_auxiliary, expected_auxiliary)
+    assert torch.isclose(components.total, final_loss + expected_auxiliary)
 
 
 def test_trainer_raises_when_branch_auxiliary_enabled_without_branch_logits() -> None:
@@ -574,6 +616,182 @@ def test_trainer_raises_when_branch_auxiliary_enabled_without_branch_logits() ->
     labels = torch.tensor([1, 0], dtype=torch.long)
 
     with pytest.raises(ValueError, match="branch auxiliary loss enabled"):
+        trainer._compute_total_loss(criterion, output, labels)
+
+
+def test_trainer_total_loss_includes_weighted_ce_and_branch_binary_auxiliary() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=4,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(0.5, 1.0, 1.25, 1.25),
+            branch_binary_auxiliary_enabled=True,
+            branch_binary_auxiliary_weight=0.3,
+            branch_binary_pos_weight=1.5,
+            main_index_to_binary_target=(0, 1, 1, 1),
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    branch_binary_criterion = trainer._branch_binary_criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor(
+            [[2.0, 0.1, -0.3, 0.0], [0.0, 0.2, 1.5, -0.4]],
+            dtype=torch.float32,
+        ),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.zeros(2, 4, 4),
+        branch_binary_logits=torch.tensor(
+            [[0.1, 0.2, 0.3, 0.4], [-0.1, -0.2, 0.0, 0.5]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 2], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+    branch_binary_loss = trainer._compute_branch_binary_auxiliary_loss(
+        branch_binary_criterion,
+        output,
+        labels,
+    )
+
+    assert components.branch_auxiliary is None
+    assert components.branch_binary_auxiliary is not None
+    assert torch.isclose(components.main, final_loss)
+    assert torch.isclose(components.branch_binary_auxiliary, branch_binary_loss)
+    assert torch.isclose(components.total, final_loss + (0.3 * branch_binary_loss))
+
+
+def test_branch_binary_auxiliary_cosine_schedule_resolves_epoch_weights() -> None:
+    cfg = BranchBinaryAuxiliaryLossConfig(
+        enabled=True,
+        weight=0.3,
+        schedule=BranchBinaryAuxiliaryScheduleConfig(
+            enabled=True,
+            type="cosine_floor",
+            max_weight=0.4,
+            min_weight=0.1,
+            total_epochs=120,
+        ),
+    )
+
+    weights = [
+        resolve_branch_binary_aux_weight(cfg, epoch=epoch, total_epochs=120)
+        for epoch in range(1, 121)
+    ]
+    expected_epoch_60 = 0.1 + (0.4 - 0.1) * 0.5 * (1.0 + np.cos(np.pi * (59.0 / 119.0)))
+
+    assert weights[0] == pytest.approx(0.4)
+    assert weights[59] == pytest.approx(expected_epoch_60)
+    assert weights[-1] == pytest.approx(0.1)
+    assert weights == sorted(weights, reverse=True)
+
+
+def test_branch_binary_auxiliary_schedule_disabled_uses_fixed_weight() -> None:
+    cfg = BranchBinaryAuxiliaryLossConfig(
+        enabled=True,
+        weight=0.7,
+        schedule=BranchBinaryAuxiliaryScheduleConfig(enabled=False),
+    )
+    disabled_cfg = BranchBinaryAuxiliaryLossConfig(enabled=False, weight=0.7)
+
+    assert resolve_branch_binary_aux_weight(cfg, epoch=10, total_epochs=20) == 0.7
+    assert (
+        resolve_branch_binary_aux_weight(
+            disabled_cfg,
+            epoch=10,
+            total_epochs=20,
+        )
+        == 0.0
+    )
+
+
+def test_branch_binary_auxiliary_schedule_and_monitor_totals_are_separate() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=4,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_binary_auxiliary_enabled=True,
+            branch_binary_auxiliary_weight=0.3,
+            branch_binary_auxiliary_schedule=BranchBinaryAuxiliaryScheduleConfig(
+                enabled=True,
+                type="cosine_floor",
+                max_weight=0.4,
+                min_weight=0.1,
+                total_epochs=120,
+            ),
+            branch_binary_auxiliary_monitor=BranchBinaryAuxiliaryMonitorConfig(
+                loss_weight=0.3
+            ),
+            main_index_to_binary_target=(0, 1, 1, 1),
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    branch_binary_criterion = trainer._branch_binary_criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor(
+            [[2.0, 0.1, -0.3, 0.0], [0.0, 0.2, 1.5, -0.4]],
+            dtype=torch.float32,
+        ),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_binary_logits=torch.tensor(
+            [[0.1, 0.2, 0.3, 0.4], [-0.1, -0.2, 0.0, 0.5]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 2], dtype=torch.long)
+
+    components = trainer._compute_total_loss(
+        criterion,
+        output,
+        labels,
+        epoch=120,
+        use_monitor_total=True,
+    )
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+    branch_binary_loss = trainer._compute_branch_binary_auxiliary_loss(
+        branch_binary_criterion,
+        output,
+        labels,
+    )
+
+    assert components.branch_binary_aux_weight == pytest.approx(0.1)
+    assert components.branch_binary_aux_monitor_weight == pytest.approx(0.3)
+    assert torch.isclose(
+        components.total_scheduled,
+        final_loss + (0.1 * branch_binary_loss),
+    )
+    assert torch.isclose(
+        components.total_monitor,
+        final_loss + (0.3 * branch_binary_loss),
+    )
+    assert torch.isclose(components.total, components.total_monitor)
+
+
+def test_trainer_raises_when_branch_binary_auxiliary_missing_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=4,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_binary_auxiliary_enabled=True,
+            main_index_to_binary_target=(0, 1, 1, 1),
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor(
+            [[2.0, 0.1, -0.3, 0.0], [0.0, 0.2, 1.5, -0.4]],
+            dtype=torch.float32,
+        ),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_binary_logits=None,
+    )
+    labels = torch.tensor([0, 2], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="branch_binary_logits"):
         trainer._compute_total_loss(criterion, output, labels)
 
 
@@ -598,11 +816,11 @@ def test_trainer_attention_entropy_disabled_adds_no_term() -> None:
     )
     labels = torch.tensor([1, 0], dtype=torch.long)
 
-    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    components = trainer._compute_total_loss(criterion, output, labels)
     final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
 
-    assert auxiliary_loss is None
-    assert torch.isclose(total_loss, final_loss)
+    assert components.branch_auxiliary is None
+    assert torch.isclose(components.total, final_loss)
 
 
 @pytest.mark.parametrize("gamma", [1.0, 2.0])
@@ -627,12 +845,12 @@ def test_trainer_focal_loss_builder_accepts_round_g_gamma_values(
     )
     labels = torch.tensor([1, 0], dtype=torch.long)
 
-    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    components = trainer._compute_total_loss(criterion, output, labels)
 
     assert trainer.cfg.gamma == gamma
-    assert torch.isfinite(total_loss)
-    assert auxiliary_loss is not None
-    assert torch.isfinite(auxiliary_loss)
+    assert torch.isfinite(components.total)
+    assert components.branch_auxiliary is not None
+    assert torch.isfinite(components.branch_auxiliary)
 
 
 def test_trainer_attention_entropy_enabled_adds_weighted_entropy() -> None:
@@ -657,12 +875,12 @@ def test_trainer_attention_entropy_enabled_adds_weighted_entropy() -> None:
     )
     labels = torch.tensor([1, 0], dtype=torch.long)
 
-    total_loss, auxiliary_loss = trainer._compute_total_loss(criterion, output, labels)
+    components = trainer._compute_total_loss(criterion, output, labels)
     final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
     entropy_loss = trainer._compute_attention_entropy_loss(output)
 
-    assert auxiliary_loss is None
-    assert torch.isclose(total_loss, final_loss + (0.25 * entropy_loss))
+    assert components.branch_auxiliary is None
+    assert torch.isclose(components.total, final_loss + (0.25 * entropy_loss))
 
 
 def test_trainer_raises_when_attention_entropy_enabled_without_attention() -> None:
@@ -685,6 +903,84 @@ def test_trainer_raises_when_attention_entropy_enabled_without_attention() -> No
 
     with pytest.raises(ValueError, match="attention entropy loss enabled"):
         trainer._compute_total_loss(criterion, output, labels)
+
+
+def test_configured_checkpoint_monitors_keep_top_three(tmp_path: Path) -> None:
+    manager = CheckpointManager(
+        tmp_path,
+        top_k=1,
+        checkpointing=CheckpointingConfig(
+            monitors=(
+                CheckpointMonitorConfig(
+                    name="val_macro_f1",
+                    mode="max",
+                    top_k=3,
+                ),
+                CheckpointMonitorConfig(
+                    name="val_macro_recall",
+                    mode="max",
+                    top_k=3,
+                ),
+                CheckpointMonitorConfig(
+                    name="val_loss_total_monitor",
+                    mode="min",
+                    top_k=3,
+                    filename_prefix="best_loss",
+                ),
+                CheckpointMonitorConfig(
+                    name="last",
+                    mode="last",
+                    top_k=3,
+                ),
+            )
+        ),
+    )
+
+    for epoch, (macro_f1, macro_recall, loss) in enumerate(
+        [
+            (0.10, 0.20, 0.90),
+            (0.40, 0.30, 0.80),
+            (0.20, 0.50, 0.70),
+            (0.30, 0.10, 0.60),
+        ],
+        start=1,
+    ):
+        state = {"epoch": epoch}
+        manager.save_last(state)
+        manager.save_configured_monitors(
+            {
+                "val_macro_f1": macro_f1,
+                "val_macro_recall": macro_recall,
+                "val_loss_total_monitor": loss,
+            },
+            state,
+            epoch=epoch,
+        )
+
+    assert len(sorted(tmp_path.glob("best_macro_f1_rank*.pt"))) == 3
+    assert len(sorted(tmp_path.glob("best_macro_recall_rank*.pt"))) == 3
+    assert len(sorted(tmp_path.glob("best_loss_rank*.pt"))) == 3
+    assert len(sorted(tmp_path.glob("last_epoch*.pt"))) == 3
+    assert (tmp_path / "last.pt").exists()
+    assert sorted(path.name for path in tmp_path.glob("last_epoch*.pt")) == [
+        "last_epoch002.pt",
+        "last_epoch003.pt",
+        "last_epoch004.pt",
+    ]
+
+
+def test_legacy_checkpoint_behavior_is_preserved(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path, top_k=1)
+    state = {"epoch": 1}
+
+    manager.save_last(state)
+    manager.maybe_save_best("loss", 0.5, state, maximize=False)
+    manager.maybe_save_best("loss", 0.4, {"epoch": 2}, maximize=False)
+    manager.maybe_save_best("f1", 0.1, state, maximize=True)
+
+    assert (tmp_path / "last.pt").exists()
+    assert len(sorted(tmp_path.glob("best_loss_*.pt"))) == 1
+    assert len(sorted(tmp_path.glob("best_f1_*.pt"))) == 1
 
 
 def test_binary_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:

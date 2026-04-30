@@ -22,6 +22,7 @@ def _output() -> AstModelOutput:
         logits=torch.tensor([0.25]),
         pooled_embedding=torch.tensor([[0.1, 0.2]]),
         branch_logits=torch.tensor([[0.2, 0.3, 0.4, 0.5]]),
+        branch_binary_logits=torch.tensor([[0.1, -0.2, 0.3, -0.4]]),
         selected_evidence_tokens=torch.ones(1, 8, 2),
         selected_evidence_indices=torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]]),
         selected_evidence_scores=torch.tensor(
@@ -79,6 +80,31 @@ def test_diagnostics_always_include_selected_evidence_metadata() -> None:
     assert len(row["selected_evidence_scores"]) == 8
     assert row["evidence_score_source"] == "attention_logit"
     assert "selected_evidence_tokens" not in row
+    assert row["branch_binary_logits"] == [
+        0.10000000149011612,
+        -0.20000000298023224,
+        0.30000001192092896,
+        -0.4000000059604645,
+    ]
+    assert len(row["branch_binary_probabilities"]) == 4
+
+
+def test_diagnostics_include_binary_auxiliary_target_when_available() -> None:
+    rows = build_diagnostic_rows(
+        _batch(),
+        _output(),
+        probabilities=torch.tensor([0.75]),
+        predicted_labels=torch.tensor([1]),
+        analysis=AnalysisOutputConfig(
+            save_logits=True,
+            save_probabilities=True,
+            save_embeddings=False,
+            save_clip_metadata=True,
+        ),
+        binary_auxiliary_targets=torch.tensor([1]),
+    )
+
+    assert rows[0]["binary_auxiliary_target"] == 1
 
 
 def test_diagnostics_include_selected_evidence_tokens_only_with_embeddings() -> None:

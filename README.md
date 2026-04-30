@@ -27,10 +27,67 @@ pip install -r requirements.txt
 - Binary CV example: `configs/cv_multiscale_rdt.json`
 - Binary evaluation: `configs/eval_multiscale_rdt.json`
 - Multiclass training example: `configs/training_multiclass.json`
+- 4-class pretraining: `configs/training_4class_pretrain_weighted_ce_branch_bin_aux.json`
+- 4-class pretraining with cosine branch-binary schedule:
+  `configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030.json`
 
 `training_multiscale_rdt.json`, `cv_multiscale_rdt.json`, and
 `training_multiclass.json` are the "full" event-MIL examples with branch
 auxiliary supervision enabled and RDT refinement active.
+
+## 4-Class Supervised Pretraining
+
+`configs/training_4class_pretrain_weighted_ce_branch_bin_aux.json` trains a
+single-label 4-class model over `normal`, `crackle`, `wheeze`, and `rhonchi`.
+It is not a multilabel setup: every clip has exactly one main class target.
+
+The canonical pretraining objective is:
+
+- Main loss: 4-class cross entropy.
+- Class weights: `1 / sqrt(train_count)` normalized so the mean class weight is
+  exactly `1.0`.
+- Weight source: training split only; validation loss reuses the train-derived
+  class weights.
+- Branch binary auxiliary: normal-vs-abnormal BCE on one shared branch-level
+  binary head, with `normal -> 0` and `crackle/wheeze/rhonchi -> 1`.
+- Branch binary `pos_weight`: `sqrt(normal_count / abnormal_count)` computed
+  from the training split.
+
+`branch_binary_auxiliary` is separate from the older `branch_auxiliary`. The
+canonical 4-class pretraining config disables the older branch auxiliary, so
+the total loss is weighted CE plus `0.3 * branch_binary_bce`.
+
+`configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030.json`
+keeps the same 4-class model and train-derived weights, but schedules the
+branch-binary auxiliary weight during training:
+
+- Schedule: `cosine_floor`.
+- Epoch 1 branch-binary weight: `0.4`.
+- Epoch 120 branch-binary weight: `0.1`.
+- Formula:
+  `min_weight + (max_weight - min_weight) * 0.5 * (1 + cos(pi * progress))`.
+- `progress = (epoch - 1) / (total_epochs - 1)`, clamped to `[0, 1]`.
+
+Training uses the scheduled objective:
+
+```text
+L_train = L_4cls + lambda(epoch) * L_branch_binary
+```
+
+Validation logs both the scheduled total and a fixed monitor total. `val_loss`
+and `best_loss` are intentionally tied to the fixed monitor total, not the
+decreasing scheduled validation objective:
+
+```text
+L_monitor = L_4cls + 0.3 * L_branch_binary
+```
+
+The config also enables monitor-based checkpoint retention:
+
+- `val_macro_f1`: maximize and keep top 3.
+- `val_macro_recall`: maximize and keep top 3.
+- `val_loss` or `val_loss_total_monitor`: minimize and keep top 3.
+- `last`: keep the latest 3 epoch checkpoints while also updating `last.pt`.
 
 ## C0-C5 Experiments
 
@@ -469,6 +526,23 @@ The active schema is:
         "aggregation": "mean",
         "weights": null
       },
+      "class_weighting": {
+        "enabled": false,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train"
+      },
+      "branch_binary_auxiliary": {
+        "enabled": false,
+        "weight": 0.3,
+        "label_to_index": {},
+        "pos_weight": {
+          "enabled": false,
+          "type": "sqrt_normal_over_abnormal",
+          "source": "train"
+        },
+        "aggregation": "mean"
+      },
       "attention_entropy": {
         "enabled": false,
         "weight": 0.0
@@ -510,6 +584,14 @@ Additional experiment knobs:
   `weight * mean_branch(entropy(attention))`
 - `train.loss.branch_auxiliary.weights` overrides scalar
   `branch_auxiliary.weight` with normalized per-branch weighting
+- `train.loss.class_weighting.enabled = true` adds train-derived
+  sqrt-inverse-frequency CE weights for multiclass pretraining
+- `train.loss.branch_binary_auxiliary.enabled = true` adds branch-level
+  normal-vs-abnormal BCE using its own binary label map
+- `train.loss.branch_binary_auxiliary.schedule.enabled = true` supports the
+  `cosine_floor` schedule for the branch-binary loss weight
+- `train.loss.branch_binary_auxiliary.monitor.loss_weight` fixes the
+  branch-binary contribution used by `val_loss_total_monitor`
 
 ## Loss Rules
 
@@ -525,18 +607,28 @@ Loss behavior still depends on the number of classes:
   - binary-only weighting options are rejected
   - branch auxiliary loss applies cross-entropy to each branch head and then
     averages across branches
+  - optional `class_weighting` uses train-only class counts and applies the
+    same weights to training and validation loss
+  - optional `branch_binary_auxiliary` maps each main class to `0` or `1` and
+    trains branch-level binary logits; this does not add a global binary output
 
 When `train.loss.branch_auxiliary.weights` is absent, the scalar
 `branch_auxiliary.weight` is applied to the mean branch loss. When `weights` is
 present, the scalar is ignored and the auxiliary term is
 `sum(weights[i] * branch_loss[i]) / sum(weights)`.
 
+When `train.loss.branch_binary_auxiliary.pos_weight.enabled = true`, the binary
+auxiliary BCE uses `sqrt(n_normal / n_abnormal)`, computed from the training
+targets after applying the configured binary map. If either binary side is
+absent in the training split, training fails fast with a clear error.
+
 ## Optimizer Layout
 
 Training keeps two AdamW parameter groups:
 
 - encoder parameters -> patch tokenizers, shared stem, adapters,
-  frequency-attention poolers, branch MIL heads -> `train.optimizer.encoder_lr`
+  frequency-attention poolers, branch MIL heads, branch binary head ->
+  `train.optimizer.encoder_lr`
 - head parameters -> optional RDT, fusion projector, final classifier ->
   `train.optimizer.head_lr`
 
@@ -573,6 +665,9 @@ Evaluation writes:
 When enabled, diagnostics now include:
 
 - `branch_logits` with the saved logit payload
+- `branch_binary_logits`, `branch_binary_probabilities`, and
+  `binary_auxiliary_target` when the branch binary auxiliary mapping is
+  available
 - `selected_evidence_indices` for the selected event-token positions
 - `selected_evidence_scores` from the configured evidence score source
 - `selected_evidence_branch_ids` identifying which branch selected each token

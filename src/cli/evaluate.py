@@ -89,6 +89,12 @@ def evaluate_checkpoint(
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
     model.eval()
+    loss_weight_summary = checkpoint.get("loss_weight_summary", {})
+    main_index_to_binary_target = None
+    if isinstance(loss_weight_summary, dict):
+        raw_mapping = loss_weight_summary.get("main_index_to_binary_target")
+        if isinstance(raw_mapping, (list, tuple)):
+            main_index_to_binary_target = tuple(int(item) for item in raw_mapping)
 
     dataset = build_dataset(cfg.data, split="eval")
     _validate_eval_frontend_dims(
@@ -108,6 +114,8 @@ def evaluate_checkpoint(
     probabilities: list[float] | list[list[float]] = []
     predictions: list[int] = []
     targets: list[int] = []
+    branch_binary_probabilities: list[list[float]] = []
+    branch_binary_targets: list[int] = []
     prediction_rows: list[PredictionRow] = []
     diagnostics: list[dict] = []
 
@@ -119,6 +127,25 @@ def evaluate_checkpoint(
             probabilities.extend(batch_probs.cpu().tolist())
             predictions.extend(batch_preds.cpu().tolist())
             targets.extend(batch.labels.cpu().to(torch.long).tolist())
+            binary_targets_for_batch = None
+            if (
+                output.branch_binary_logits is not None
+                and main_index_to_binary_target is not None
+            ):
+                mapping = torch.tensor(
+                    main_index_to_binary_target,
+                    device=batch.labels.device,
+                    dtype=torch.long,
+                )
+                binary_targets_for_batch = mapping[
+                    batch.labels.to(device=batch.labels.device, dtype=torch.long)
+                ]
+                branch_binary_targets.extend(
+                    binary_targets_for_batch.detach().cpu().to(torch.long).tolist()
+                )
+                branch_binary_probabilities.extend(
+                    torch.sigmoid(output.branch_binary_logits.detach()).cpu().tolist()
+                )
 
             if return_predictions or return_diagnostics:
                 for index, audio_path in enumerate(batch.audio_paths):
@@ -149,13 +176,34 @@ def evaluate_checkpoint(
                         probabilities=batch_probs.cpu(),
                         predicted_labels=batch_preds.cpu(),
                         analysis=cfg.analysis.outputs,
+                        binary_auxiliary_targets=(
+                            binary_targets_for_batch.detach().cpu()
+                            if binary_targets_for_batch is not None
+                            else None
+                        ),
                     )
                 )
 
     y_true = np.asarray(targets, dtype=np.int64)
     y_pred = np.asarray(predictions, dtype=np.int64)
     y_prob = np.asarray(probabilities, dtype=np.float64)
-    baseline_metrics = MetricsComputer.compute(y_true, y_pred, y_prob)
+    branch_binary_prob_arr = (
+        np.asarray(branch_binary_probabilities, dtype=np.float64)
+        if branch_binary_probabilities
+        else None
+    )
+    branch_binary_target_arr = (
+        np.asarray(branch_binary_targets, dtype=np.int64)
+        if branch_binary_targets
+        else None
+    )
+    baseline_metrics = MetricsComputer.compute(
+        y_true,
+        y_pred,
+        y_prob,
+        branch_binary_probabilities=branch_binary_prob_arr,
+        branch_binary_targets=branch_binary_target_arr,
+    )
     if y_prob.ndim == 1 and cfg.threshold_optimization.enabled:
         threshold_optimization = load_checkpoint_threshold_optimization(
             checkpoint.get("val_threshold_optimization"),

@@ -334,6 +334,13 @@ def test_repo_example_configs_load() -> None:
     multiclass_cfg = JsonConfigLoader.load_training(
         ROOT / "configs/training_multiclass.json"
     )
+    pretrain_4class_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_4class_pretrain_weighted_ce_branch_bin_aux.json"
+    )
+    pretrain_4class_cosine_cfg = JsonConfigLoader.load_training(
+        ROOT
+        / "configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030.json"
+    )
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
@@ -562,6 +569,56 @@ def test_repo_example_configs_load() -> None:
     )
     assert training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert multiclass_cfg.train.loss.type == "cross_entropy"
+    assert pretrain_4class_cfg.data.label_to_index == {
+        "normal": 0,
+        "crackle": 1,
+        "wheeze": 2,
+        "rhonchi": 3,
+    }
+    assert pretrain_4class_cfg.train.epochs == 120
+    assert pretrain_4class_cfg.train.loss.class_weighting.enabled is True
+    assert pretrain_4class_cfg.train.loss.branch_auxiliary.enabled is False
+    assert pretrain_4class_cfg.train.loss.branch_binary_auxiliary.enabled is True
+    assert pretrain_4class_cfg.train.loss.branch_binary_auxiliary.weight == 0.3
+    assert (
+        pretrain_4class_cfg.train.loss.branch_binary_auxiliary.label_to_index["normal"]
+        == 0
+    )
+    assert (
+        pretrain_4class_cfg.model.encoder.architecture.evidence_pooling.type
+        == "branch_gated"
+    )
+    assert pretrain_4class_cfg.train.early_stopping.enabled is False
+    assert pretrain_4class_cfg.checkpointing is not None
+    assert [monitor.name for monitor in pretrain_4class_cfg.checkpointing.monitors] == [
+        "val_macro_f1",
+        "val_macro_recall",
+        "val_loss",
+        "last",
+    ]
+    assert pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.enabled is True
+    assert (
+        pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.schedule.enabled
+        is True
+    )
+    assert (
+        pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.schedule.type
+        == "cosine_floor"
+    )
+    assert (
+        pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.monitor.loss_weight
+        == 0.3
+    )
+    assert pretrain_4class_cosine_cfg.checkpointing is not None
+    assert [
+        (monitor.name, monitor.mode, monitor.top_k, monitor.filename_prefix)
+        for monitor in pretrain_4class_cosine_cfg.checkpointing.monitors
+    ] == [
+        ("val_macro_f1", "max", 3, "best_macro_f1"),
+        ("val_macro_recall", "max", 3, "best_macro_recall"),
+        ("val_loss_total_monitor", "min", 3, "best_loss"),
+        ("last", "last", 3, "last"),
+    ]
     assert cv_cfg.folds[0].name == "fold_0"
     assert eval_cfg.threshold_optimization.metric == "f1"
 
@@ -645,6 +702,253 @@ def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) 
 
     assert len(cfg.data.label_to_index) == 3
     assert cfg.train.loss.type == "cross_entropy"
+
+
+def _fourclass_branch_binary_payload() -> dict:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {
+        "normal": 0,
+        "crackle": 1,
+        "wheeze": 2,
+        "rhonchi": 3,
+    }
+    payload["train"]["loss"] = {
+        "type": "cross_entropy",
+        "auto_pos_weight": False,
+        "pos_weight": None,
+        "gamma": 2.0,
+        "class_weighting": {
+            "enabled": True,
+            "type": "sqrt_inverse_frequency",
+            "normalize": "mean_one",
+            "source": "train",
+        },
+        "branch_auxiliary": {
+            "enabled": False,
+            "weight": 0.3,
+            "aggregation": "mean",
+        },
+        "branch_binary_auxiliary": {
+            "enabled": True,
+            "weight": 0.3,
+            "label_to_index": {
+                "normal": 0,
+                "crackle": 1,
+                "wheeze": 1,
+                "rhonchi": 1,
+            },
+            "pos_weight": {
+                "enabled": True,
+                "type": "sqrt_normal_over_abnormal",
+                "source": "train",
+            },
+            "aggregation": "mean",
+        },
+    }
+    return payload
+
+
+def test_valid_branch_binary_auxiliary_config_loads(tmp_path: Path) -> None:
+    config_path = _write_json(
+        tmp_path / "branch_binary.json",
+        _fourclass_branch_binary_payload(),
+    )
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.class_weighting.enabled is True
+    assert cfg.train.loss.branch_binary_auxiliary.enabled is True
+    assert cfg.train.loss.branch_binary_auxiliary.label_to_index == {
+        "normal": 0,
+        "crackle": 1,
+        "wheeze": 1,
+        "rhonchi": 1,
+    }
+
+
+def test_valid_branch_binary_cosine_schedule_config_loads(tmp_path: Path) -> None:
+    payload = _fourclass_branch_binary_payload()
+    branch_binary = payload["train"]["loss"]["branch_binary_auxiliary"]
+    branch_binary["schedule"] = {
+        "enabled": True,
+        "type": "cosine_floor",
+        "max_weight": 0.4,
+        "min_weight": 0.1,
+        "total_epochs": 120,
+    }
+    branch_binary["monitor"] = {"loss_weight": 0.3}
+    payload["checkpointing"] = {
+        "monitors": [
+            {
+                "name": "val_loss_total_monitor",
+                "mode": "min",
+                "keep_top_k": 3,
+                "filename_prefix": "best_loss",
+            },
+            {
+                "name": "last",
+                "mode": "last",
+                "keep_top_k": 3,
+                "filename_prefix": "last",
+            },
+        ]
+    }
+    config_path = _write_json(tmp_path / "branch_binary_cosine.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.branch_binary_auxiliary.schedule.enabled is True
+    assert cfg.train.loss.branch_binary_auxiliary.schedule.max_weight == 0.4
+    assert cfg.train.loss.branch_binary_auxiliary.schedule.min_weight == 0.1
+    assert cfg.train.loss.branch_binary_auxiliary.schedule.total_epochs == 120
+    assert cfg.train.loss.branch_binary_auxiliary.monitor.loss_weight == 0.3
+    assert cfg.checkpointing is not None
+    assert cfg.checkpointing.monitors[0].name == "val_loss_total_monitor"
+    assert cfg.checkpointing.monitors[0].top_k == 3
+    assert cfg.checkpointing.monitors[0].filename_prefix == "best_loss"
+    assert cfg.checkpointing.monitors[1].mode == "last"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("type", "linear", "schedule.type"),
+        ("max_weight", 0.0, "schedule.max_weight"),
+        ("min_weight", -0.1, "schedule.min_weight"),
+        ("total_epochs", 0, "schedule.total_epochs"),
+    ],
+)
+def test_invalid_branch_binary_schedule_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    schedule = {
+        "enabled": True,
+        "type": "cosine_floor",
+        "max_weight": 0.4,
+        "min_weight": 0.1,
+        "total_epochs": 120,
+    }
+    schedule[field] = value
+    payload["train"]["loss"]["branch_binary_auxiliary"]["schedule"] = schedule
+    config_path = _write_json(tmp_path / "bad_branch_binary_schedule.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_branch_binary_schedule_weight_order_is_rejected(
+    tmp_path: Path,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["branch_binary_auxiliary"]["schedule"] = {
+        "enabled": True,
+        "type": "cosine_floor",
+        "max_weight": 0.1,
+        "min_weight": 0.4,
+        "total_epochs": 120,
+    }
+    config_path = _write_json(
+        tmp_path / "bad_branch_binary_schedule_order.json", payload
+    )
+
+    with pytest.raises(ValueError, match="schedule.max_weight"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_branch_binary_monitor_config_is_rejected(tmp_path: Path) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["branch_binary_auxiliary"]["monitor"] = {
+        "loss_weight": -0.1
+    }
+    config_path = _write_json(tmp_path / "bad_branch_binary_monitor.json", payload)
+
+    with pytest.raises(ValueError, match="monitor.loss_weight"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("label_map", "error"),
+    [
+        (
+            {"normal": 2, "crackle": 1, "wheeze": 1, "rhonchi": 1},
+            "values must be 0 or 1",
+        ),
+        (
+            {"normal": 0, "crackle": 0, "wheeze": 0, "rhonchi": 0},
+            "at least one abnormal label",
+        ),
+        (
+            {"normal": 1, "crackle": 1, "wheeze": 1, "rhonchi": 1},
+            "at least one normal label",
+        ),
+        (
+            {"normal": 0, "crackle": 1, "wheeze": 1},
+            "missing=\\['rhonchi'\\]",
+        ),
+        (
+            {"normal": 0, "crackle": 1, "wheeze": 1, "rhonchi": 1, "extra": 1},
+            "extra=\\['extra'\\]",
+        ),
+    ],
+)
+def test_invalid_branch_binary_label_maps_are_rejected(
+    tmp_path: Path,
+    label_map: dict[str, int],
+    error: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["branch_binary_auxiliary"]["label_to_index"] = label_map
+    config_path = _write_json(tmp_path / "bad_branch_binary.json", payload)
+
+    with pytest.raises(ValueError, match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("type", "inverse", "class_weighting.type"),
+        ("normalize", "sum_one", "class_weighting.normalize"),
+        ("source", "val", "class_weighting.source"),
+    ],
+)
+def test_invalid_class_weighting_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    error: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["class_weighting"][field] = value
+    config_path = _write_json(tmp_path / "bad_class_weighting.json", payload)
+
+    with pytest.raises(ValueError, match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("type", "normal_over_abnormal", "pos_weight.type"),
+        ("source", "val", "pos_weight.source"),
+    ],
+)
+def test_invalid_branch_binary_pos_weight_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    error: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["branch_binary_auxiliary"]["pos_weight"][field] = value
+    config_path = _write_json(tmp_path / "bad_binary_pos_weight.json", payload)
+
+    with pytest.raises(ValueError, match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 def test_valid_disabled_rdt_ignores_steps_value(tmp_path: Path) -> None:

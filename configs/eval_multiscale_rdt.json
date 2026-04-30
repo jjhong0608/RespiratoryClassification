@@ -1,7 +1,7 @@
 {
   "experiment": {
     "name": "respiratory_multiscale_rdt_ast_eval",
-    "task": "normal_vs_abnormal",
+    "task": "normal_vs_crackle_vs_wheeze_vs_rhonchi",
     "mode": "clip",
     "seed": 42,
     "device": "mps",
@@ -12,11 +12,13 @@
     "train_dirs": [],
     "val_dirs": [],
     "eval_dirs": [
-      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/5_folds/test/"
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/ALL_CNUH_DATA/folds/fold_0/"
     ],
     "label_to_index": {
       "normal": 0,
-      "abnormal": 1
+      "crackle": 1,
+      "wheeze": 2,
+      "rhonchi": 3
     },
     "batch_size": 4,
     "num_workers": 0,

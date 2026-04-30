@@ -15,6 +15,7 @@ from src.training.imbalance import (
     build_weighted_sampler,
     collect_targets,
     resolve_imbalance,
+    resolve_loss_weights,
 )
 from src.training.initialization import initialize_from_checkpoint
 from src.training.trainer import Trainer, TrainerConfig
@@ -96,6 +97,12 @@ def main() -> None:
     )
 
     train_targets = collect_targets(train_dataset)
+    resolved_loss_weights = resolve_loss_weights(
+        targets=train_targets,
+        num_classes=num_classes,
+        label_to_index=cfg.data.label_to_index,
+        loss_cfg=cfg.train.loss,
+    )
     imbalance = resolve_imbalance(
         targets=train_targets,
         num_classes=num_classes,
@@ -104,6 +111,21 @@ def main() -> None:
         weighted_random=cfg.train.sampler.weighted_random,
     )
     logger.info("Train class counts: %s", dict(imbalance.class_counts))
+    logger.info(
+        "Train loss weights | class_counts=%s | class_weights=%s | "
+        "main_to_binary=%s | binary_counts=%s | branch_binary_pos_weight=%s",
+        list(resolved_loss_weights.class_counts),
+        list(resolved_loss_weights.class_weights)
+        if resolved_loss_weights.class_weights is not None
+        else None,
+        list(resolved_loss_weights.main_index_to_binary_target)
+        if resolved_loss_weights.main_index_to_binary_target is not None
+        else None,
+        dict(resolved_loss_weights.binary_counts)
+        if resolved_loss_weights.binary_counts is not None
+        else None,
+        resolved_loss_weights.branch_binary_pos_weight,
+    )
     if imbalance.pos_weight is not None:
         if cfg.train.loss.auto_pos_weight:
             logger.info(
@@ -190,10 +212,17 @@ def main() -> None:
             loss_type=cfg.train.loss.type,
             gamma=cfg.train.loss.gamma,
             pos_weight=imbalance.pos_weight,
+            class_weights=resolved_loss_weights.class_weights,
             branch_auxiliary=cfg.train.loss.branch_auxiliary,
+            branch_binary_auxiliary=cfg.train.loss.branch_binary_auxiliary,
+            branch_binary_pos_weight=(resolved_loss_weights.branch_binary_pos_weight),
+            main_index_to_binary_target=(
+                resolved_loss_weights.main_index_to_binary_target
+            ),
             attention_entropy=cfg.train.loss.attention_entropy,
             analysis=cfg.analysis,
             early_stopping=cfg.train.early_stopping,
+            checkpointing=cfg.checkpointing,
         )
     )
     trainer.fit(
@@ -209,6 +238,7 @@ def main() -> None:
             "adaptation_summary": asdict(adaptation_summary),
             "optimizer_summary": asdict(optimizer_summary),
             "initialization_summary": asdict(initialization_summary),
+            "loss_weight_summary": asdict(resolved_loss_weights),
         },
     )
 

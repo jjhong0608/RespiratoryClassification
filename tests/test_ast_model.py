@@ -123,6 +123,8 @@ def test_binary_model_returns_expected_event_mil_outputs() -> None:
     assert output.pooled_embedding.shape == (2, 32)
     assert output.branch_logits is not None
     assert output.branch_logits.shape == (2, 4)
+    assert output.branch_binary_logits is not None
+    assert output.branch_binary_logits.shape == (2, 4)
     assert output.selected_evidence_tokens is not None
     assert output.selected_evidence_tokens.shape == (2, 8, 32)
     assert output.selected_evidence_indices is not None
@@ -156,6 +158,8 @@ def test_multiclass_model_returns_expected_event_mil_outputs() -> None:
     assert output.pooled_embedding.shape == (2, 32)
     assert output.branch_logits is not None
     assert output.branch_logits.shape == (2, 4, 3)
+    assert output.branch_binary_logits is not None
+    assert output.branch_binary_logits.shape == (2, 4)
     assert output.selected_evidence_tokens is not None
     assert output.selected_evidence_tokens.shape == (2, 8, 32)
     assert output.selected_evidence_indices is not None
@@ -533,6 +537,8 @@ def test_three_scale_top2_forward_uses_dynamic_selected_evidence_length() -> Non
     assert output.selected_evidence_tokens.shape == (1, 6, 32)
     assert output.branch_logits is not None
     assert output.branch_logits.shape == (1, 3)
+    assert output.branch_binary_logits is not None
+    assert output.branch_binary_logits.shape == (1, 3)
     assert output.selected_evidence_indices is not None
     assert output.selected_evidence_indices.shape == (1, 6)
     assert output.selected_evidence_branch_ids is not None
@@ -654,6 +660,8 @@ def test_three_scale_geometry_and_forward_use_dynamic_evidence_length() -> None:
     assert output.selected_evidence_tokens.shape == (1, 6, 32)
     assert output.branch_logits is not None
     assert output.branch_logits.shape == (1, 3)
+    assert output.branch_binary_logits is not None
+    assert output.branch_binary_logits.shape == (1, 3)
     assert output.selected_evidence_indices is not None
     assert output.selected_evidence_indices.shape == (1, 6)
     assert output.selected_evidence_branch_ids is not None

@@ -143,6 +143,7 @@ class AstModelOutput:
     logits: Tensor
     pooled_embedding: Tensor
     branch_logits: Tensor | None = None
+    branch_binary_logits: Tensor | None = None
     branch_attention_weights: tuple[Tensor, ...] | None = None
     selected_evidence_tokens: Tensor | None = None
     selected_evidence_indices: Tensor | None = None
@@ -839,6 +840,7 @@ class MultiScaleRdtAstModel(nn.Module):
             )
             for _ in architecture.patch_branches
         )
+        self.branch_binary_head = nn.Linear(architecture.hidden_size, 1)
         branch_event_dropout_cfg = architecture.token_augmentation.branch_event_dropout
         self.branch_event_dropout = (
             BranchEventTokenDropout(branch_event_dropout_cfg)
@@ -890,7 +892,7 @@ class MultiScaleRdtAstModel(nn.Module):
             raise ValueError(f"Unsupported classifier type: {cfg.classifier.type}")
 
     def encoder_side_modules(self) -> tuple[nn.Module, ...]:
-        return (self.encoder, self.branch_mil_heads)
+        return (self.encoder, self.branch_mil_heads, self.branch_binary_head)
 
     def head_side_modules(self) -> tuple[nn.Module, ...]:
         modules: list[nn.Module] = [
@@ -929,6 +931,7 @@ class MultiScaleRdtAstModel(nn.Module):
 
         encoder_output = self.encoder(input_values.unsqueeze(1))
         branch_logits: list[Tensor] = []
+        branch_binary_logits: list[Tensor] = []
         branch_embeddings: list[Tensor] = []
         branch_attention_weights: list[Tensor] = []
         selected_tokens: list[Tensor] = []
@@ -957,6 +960,9 @@ class MultiScaleRdtAstModel(nn.Module):
                 branch_head(branch_tokens, token_mask=branch_token_mask),
             )
             branch_logits.append(mil_output.logits)
+            branch_binary_logits.append(
+                self.branch_binary_head(mil_output.embedding).squeeze(-1)
+            )
             branch_embeddings.append(mil_output.embedding)
             branch_attention_weights.append(mil_output.attention_weights)
             if branch_index in excluded_branches:
@@ -978,6 +984,7 @@ class MultiScaleRdtAstModel(nn.Module):
             )
 
         stacked_branch_logits = self._stack_branch_logits(branch_logits)
+        stacked_branch_binary_logits = torch.stack(branch_binary_logits, dim=1)
         if not selected_tokens:
             raise ValueError("At least one branch must contribute selected evidence")
         selected_evidence_tokens = torch.cat(selected_tokens, dim=1)
@@ -1026,6 +1033,7 @@ class MultiScaleRdtAstModel(nn.Module):
             logits=logits,
             pooled_embedding=pooled_embedding,
             branch_logits=stacked_branch_logits,
+            branch_binary_logits=stacked_branch_binary_logits,
             branch_attention_weights=tuple(branch_attention_weights),
             selected_evidence_tokens=selected_evidence_tokens,
             selected_evidence_indices=selected_evidence_indices,

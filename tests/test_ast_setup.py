@@ -175,10 +175,12 @@ def test_grouped_optimizer_uses_event_mil_encoder_and_head_groups() -> None:
     }
     frequency_score = cast(nn.Linear, model.encoder.frequency_poolers[0].score)
     branch_logit_proj = cast(nn.Linear, model.branch_mil_heads[0].logit_proj)
+    branch_binary_head = model.branch_binary_head
     fusion_layer = model.fusion_projector[0]
     assert isinstance(fusion_layer, nn.Linear)
     assert id(frequency_score.weight) in encoder_param_ids
     assert id(branch_logit_proj.weight) in encoder_param_ids
+    assert id(branch_binary_head.weight) in encoder_param_ids
     assert id(fusion_layer.weight) in head_param_ids
     assert id(fusion_layer.weight) not in encoder_param_ids
 

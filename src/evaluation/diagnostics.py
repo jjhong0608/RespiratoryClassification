@@ -18,6 +18,7 @@ def build_diagnostic_rows(
     probabilities: torch.Tensor,
     predicted_labels: torch.Tensor,
     analysis: AnalysisOutputConfig,
+    binary_auxiliary_targets: torch.Tensor | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     logits = output.logits.detach().cpu()
@@ -26,6 +27,21 @@ def build_diagnostic_rows(
     branch_logits = (
         output.branch_logits.detach().cpu()
         if output.branch_logits is not None
+        else None
+    )
+    branch_binary_logits = (
+        output.branch_binary_logits.detach().cpu()
+        if output.branch_binary_logits is not None
+        else None
+    )
+    branch_binary_probabilities = (
+        torch.sigmoid(branch_binary_logits)
+        if branch_binary_logits is not None
+        else None
+    )
+    binary_auxiliary_targets_cpu = (
+        binary_auxiliary_targets.detach().cpu()
+        if binary_auxiliary_targets is not None
         else None
     )
     selected_evidence_tokens = (
@@ -96,6 +112,16 @@ def build_diagnostic_rows(
                 row["logits"] = logits[index].tolist()
             if branch_logits is not None:
                 row["branch_logits"] = branch_logits[index].tolist()
+            if branch_binary_logits is not None:
+                row["branch_binary_logits"] = branch_binary_logits[index].tolist()
+                assert branch_binary_probabilities is not None
+                row["branch_binary_probabilities"] = branch_binary_probabilities[
+                    index
+                ].tolist()
+            if binary_auxiliary_targets_cpu is not None:
+                row["binary_auxiliary_target"] = int(
+                    binary_auxiliary_targets_cpu[index].item()
+                )
         if analysis.save_probabilities:
             row["probabilities"] = probability_payload
         if selected_evidence_indices is not None:

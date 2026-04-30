@@ -194,13 +194,63 @@ class AttentionEntropyLossConfig:
 
 
 @dataclass(frozen=True)
+class ClassWeightingConfig:
+    enabled: bool = False
+    type: Literal["sqrt_inverse_frequency"] = "sqrt_inverse_frequency"
+    normalize: Literal["mean_one"] = "mean_one"
+    source: Literal["train"] = "train"
+
+
+@dataclass(frozen=True)
+class BranchBinaryPosWeightConfig:
+    enabled: bool = False
+    type: Literal["sqrt_normal_over_abnormal"] = "sqrt_normal_over_abnormal"
+    source: Literal["train"] = "train"
+
+
+@dataclass(frozen=True)
+class BranchBinaryAuxiliaryScheduleConfig:
+    enabled: bool = False
+    type: Literal["none", "cosine_floor"] = "none"
+    max_weight: float = 0.4
+    min_weight: float = 0.1
+    total_epochs: int | None = None
+
+
+@dataclass(frozen=True)
+class BranchBinaryAuxiliaryMonitorConfig:
+    loss_weight: float = 0.3
+
+
+@dataclass(frozen=True)
+class BranchBinaryAuxiliaryLossConfig:
+    enabled: bool = False
+    weight: float = 0.3
+    label_to_index: Mapping[str, int] = field(default_factory=dict)
+    pos_weight: BranchBinaryPosWeightConfig = field(
+        default_factory=BranchBinaryPosWeightConfig
+    )
+    schedule: BranchBinaryAuxiliaryScheduleConfig = field(
+        default_factory=BranchBinaryAuxiliaryScheduleConfig
+    )
+    monitor: BranchBinaryAuxiliaryMonitorConfig = field(
+        default_factory=BranchBinaryAuxiliaryMonitorConfig
+    )
+    aggregation: Literal["mean"] = "mean"
+
+
+@dataclass(frozen=True)
 class LossConfig:
     type: Literal["bce", "focal", "cross_entropy"] = "bce"
     auto_pos_weight: bool = False
     pos_weight: float | None = None
     gamma: float = 2.0
+    class_weighting: ClassWeightingConfig = field(default_factory=ClassWeightingConfig)
     branch_auxiliary: BranchAuxiliaryLossConfig = field(
         default_factory=BranchAuxiliaryLossConfig
+    )
+    branch_binary_auxiliary: BranchBinaryAuxiliaryLossConfig = field(
+        default_factory=BranchBinaryAuxiliaryLossConfig
     )
     attention_entropy: AttentionEntropyLossConfig = field(
         default_factory=AttentionEntropyLossConfig
@@ -226,6 +276,37 @@ class TrainingInitializationConfig:
     load_model_state: bool = True
     strict: bool = False
     load_optimizer_state: bool = False
+
+
+@dataclass(frozen=True)
+class ValidationLossConfig:
+    use_train_loss_config: bool = True
+    class_weight_source: Literal["train"] = "train"
+    binary_pos_weight_source: Literal["train"] = "train"
+
+
+@dataclass(frozen=True)
+class ValidationConfig:
+    loss: ValidationLossConfig = field(default_factory=ValidationLossConfig)
+
+
+@dataclass(frozen=True)
+class CheckpointMonitorConfig:
+    name: Literal[
+        "val_macro_f1",
+        "val_macro_recall",
+        "val_loss",
+        "val_loss_total_monitor",
+        "last",
+    ]
+    mode: Literal["max", "min", "latest", "last"]
+    top_k: int = 3
+    filename_prefix: str | None = None
+
+
+@dataclass(frozen=True)
+class CheckpointingConfig:
+    monitors: tuple[CheckpointMonitorConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -263,6 +344,8 @@ class TrainingRunConfig:
     model: ModelConfig
     train: TrainConfig
     analysis: AnalysisConfig
+    val: ValidationConfig = field(default_factory=ValidationConfig)
+    checkpointing: CheckpointingConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -291,6 +374,8 @@ class CvRunConfig:
     train: TrainConfig
     analysis: AnalysisConfig
     folds: list[CvFoldConfig]
+    val: ValidationConfig = field(default_factory=ValidationConfig)
+    checkpointing: CheckpointingConfig | None = None
 
 
 class JsonConfigLoader:
@@ -307,6 +392,18 @@ class JsonConfigLoader:
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
     _BRANCH_EVENT_DROPOUT_MODES = {"zero_mask"}
     _SELECTED_EVIDENCE_DROPOUT_MODES = {"zero"}
+    _CLASS_WEIGHTING_TYPES = {"sqrt_inverse_frequency"}
+    _CLASS_WEIGHTING_NORMALIZERS = {"mean_one"}
+    _LOSS_WEIGHT_SOURCES = {"train"}
+    _BRANCH_BINARY_POS_WEIGHT_TYPES = {"sqrt_normal_over_abnormal"}
+    _BRANCH_BINARY_AUXILIARY_SCHEDULE_TYPES = {"none", "cosine_floor"}
+    _CHECKPOINT_MONITORS = {
+        "val_macro_f1": {"max"},
+        "val_macro_recall": {"max"},
+        "val_loss": {"min"},
+        "val_loss_total_monitor": {"min"},
+        "last": {"latest", "last"},
+    }
 
     @staticmethod
     def _validate_probability(value: float, *, field_name: str) -> None:
@@ -735,6 +832,7 @@ class JsonConfigLoader:
         *,
         num_classes: int,
         num_branches: int,
+        label_to_index: Mapping[str, int],
     ) -> None:
         if cfg.epochs <= 0:
             raise ValueError("train.epochs must be greater than zero")
@@ -804,6 +902,30 @@ class JsonConfigLoader:
             raise ValueError(
                 "train.loss.attention_entropy.weight must be greater than zero when enabled"
             )
+        if not isinstance(cfg.loss.class_weighting.enabled, bool):
+            raise ValueError("train.loss.class_weighting.enabled must be a boolean")
+        if cfg.loss.class_weighting.type not in JsonConfigLoader._CLASS_WEIGHTING_TYPES:
+            raise ValueError(
+                "train.loss.class_weighting.type must be 'sqrt_inverse_frequency'"
+            )
+        if (
+            cfg.loss.class_weighting.normalize
+            not in JsonConfigLoader._CLASS_WEIGHTING_NORMALIZERS
+        ):
+            raise ValueError("train.loss.class_weighting.normalize must be 'mean_one'")
+        if cfg.loss.class_weighting.source not in JsonConfigLoader._LOSS_WEIGHT_SOURCES:
+            raise ValueError("train.loss.class_weighting.source must be 'train'")
+        if cfg.loss.class_weighting.enabled and (
+            num_classes <= 2 or cfg.loss.type != "cross_entropy"
+        ):
+            raise ValueError(
+                "train.loss.class_weighting is supported only for multiclass "
+                "cross_entropy runs"
+            )
+        JsonConfigLoader._validate_branch_binary_auxiliary(
+            cfg.loss.branch_binary_auxiliary,
+            label_to_index=label_to_index,
+        )
         if num_classes == 2:
             if cfg.loss.type not in {"bce", "focal"}:
                 raise ValueError(
@@ -828,6 +950,153 @@ class JsonConfigLoader:
             raise ValueError(
                 "train.loss.pos_weight is only supported for binary classification"
             )
+
+    @staticmethod
+    def _validate_branch_binary_auxiliary(
+        cfg: BranchBinaryAuxiliaryLossConfig,
+        *,
+        label_to_index: Mapping[str, int],
+    ) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.enabled must be a boolean"
+            )
+        if cfg.aggregation != "mean":
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.aggregation must be 'mean'"
+            )
+        if cfg.weight <= 0:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.weight must be greater than zero"
+            )
+        if not isinstance(cfg.schedule.enabled, bool):
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.schedule.enabled must be a boolean"
+            )
+        if (
+            cfg.schedule.type
+            not in JsonConfigLoader._BRANCH_BINARY_AUXILIARY_SCHEDULE_TYPES
+        ):
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.schedule.type must be "
+                "'none' or 'cosine_floor'"
+            )
+        if cfg.schedule.enabled and cfg.schedule.type != "cosine_floor":
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.schedule.type must be "
+                "'cosine_floor' when schedule is enabled"
+            )
+        if cfg.schedule.max_weight <= 0:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.schedule.max_weight must be "
+                "greater than zero"
+            )
+        if cfg.schedule.min_weight < 0:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.schedule.min_weight must be "
+                "greater than or equal to zero"
+            )
+        if cfg.schedule.max_weight < cfg.schedule.min_weight:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.schedule.max_weight must be "
+                "greater than or equal to min_weight"
+            )
+        if cfg.schedule.total_epochs is not None and cfg.schedule.total_epochs <= 0:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.schedule.total_epochs must be "
+                "greater than zero when provided"
+            )
+        if cfg.monitor.loss_weight < 0:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.monitor.loss_weight must be "
+                "greater than or equal to zero"
+            )
+        if not isinstance(cfg.pos_weight.enabled, bool):
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.pos_weight.enabled must be a boolean"
+            )
+        if cfg.pos_weight.type not in JsonConfigLoader._BRANCH_BINARY_POS_WEIGHT_TYPES:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.pos_weight.type must be "
+                "'sqrt_normal_over_abnormal'"
+            )
+        if cfg.pos_weight.source not in JsonConfigLoader._LOSS_WEIGHT_SOURCES:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.pos_weight.source must be 'train'"
+            )
+        if not cfg.enabled:
+            return
+        configured_labels = set(cfg.label_to_index.keys())
+        expected_labels = set(label_to_index.keys())
+        missing = sorted(expected_labels - configured_labels)
+        extra = sorted(configured_labels - expected_labels)
+        if missing or extra:
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.label_to_index must contain "
+                "exactly the same labels as data.label_to_index; "
+                f"missing={missing} extra={extra}"
+            )
+        values = [int(value) for value in cfg.label_to_index.values()]
+        if any(value not in {0, 1} for value in values):
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.label_to_index values must be 0 or 1"
+            )
+        if all(value == 0 for value in values):
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.label_to_index must include at least one abnormal label"
+            )
+        if all(value == 1 for value in values):
+            raise ValueError(
+                "train.loss.branch_binary_auxiliary.label_to_index must include at least one normal label"
+            )
+
+    @staticmethod
+    def _validate_val(cfg: ValidationConfig) -> None:
+        if not isinstance(cfg.loss.use_train_loss_config, bool):
+            raise ValueError("val.loss.use_train_loss_config must be a boolean")
+        if not cfg.loss.use_train_loss_config:
+            raise ValueError(
+                "val.loss.use_train_loss_config=false is not supported; validation "
+                "loss uses train-derived weighting semantics"
+            )
+        if cfg.loss.class_weight_source != "train":
+            raise ValueError("val.loss.class_weight_source must be 'train'")
+        if cfg.loss.binary_pos_weight_source != "train":
+            raise ValueError("val.loss.binary_pos_weight_source must be 'train'")
+
+    @staticmethod
+    def _validate_checkpointing(cfg: CheckpointingConfig | None) -> None:
+        if cfg is None:
+            return
+        seen: set[str] = set()
+        for monitor in cfg.monitors:
+            if monitor.name not in JsonConfigLoader._CHECKPOINT_MONITORS:
+                raise ValueError(
+                    "checkpointing.monitors.name must be one of "
+                    f"{sorted(JsonConfigLoader._CHECKPOINT_MONITORS)}"
+                )
+            if monitor.name in seen:
+                raise ValueError(
+                    "checkpointing.monitors must not contain duplicate monitor names"
+                )
+            seen.add(monitor.name)
+            allowed_modes = JsonConfigLoader._CHECKPOINT_MONITORS[monitor.name]
+            if monitor.mode not in allowed_modes:
+                raise ValueError(
+                    f"checkpointing monitor {monitor.name} requires mode one of "
+                    f"{sorted(allowed_modes)}"
+                )
+            if monitor.top_k <= 0:
+                raise ValueError(
+                    "checkpointing.monitors.top_k must be greater than zero"
+                )
+            if (
+                monitor.filename_prefix is not None
+                and not monitor.filename_prefix.strip()
+            ):
+                raise ValueError(
+                    "checkpointing.monitors.filename_prefix must not be empty"
+                )
 
     @staticmethod
     def _parse_experiment(raw: Mapping[str, Any]) -> ExperimentConfig:
@@ -1004,6 +1273,9 @@ class JsonConfigLoader:
         kwargs["optimizer"] = OptimizerConfig(**dict(raw["optimizer"]))
         kwargs["scheduler"] = SchedulerConfig(**dict(raw.get("scheduler", {})))
         loss = dict(raw.get("loss", {}))
+        loss["class_weighting"] = ClassWeightingConfig(
+            **dict(loss.get("class_weighting", {}))
+        )
         branch_auxiliary = dict(loss.get("branch_auxiliary", {}))
         if "weights" in branch_auxiliary and branch_auxiliary["weights"] is not None:
             branch_auxiliary["weights"] = JsonConfigLoader._coerce_float_tuple(
@@ -1011,6 +1283,22 @@ class JsonConfigLoader:
                 field_name="train.loss.branch_auxiliary.weights",
             )
         loss["branch_auxiliary"] = BranchAuxiliaryLossConfig(**branch_auxiliary)
+        branch_binary_auxiliary = dict(loss.get("branch_binary_auxiliary", {}))
+        branch_binary_auxiliary["label_to_index"] = dict(
+            branch_binary_auxiliary.get("label_to_index", {})
+        )
+        branch_binary_auxiliary["pos_weight"] = BranchBinaryPosWeightConfig(
+            **dict(branch_binary_auxiliary.get("pos_weight", {}))
+        )
+        branch_binary_auxiliary["schedule"] = BranchBinaryAuxiliaryScheduleConfig(
+            **dict(branch_binary_auxiliary.get("schedule", {}))
+        )
+        branch_binary_auxiliary["monitor"] = BranchBinaryAuxiliaryMonitorConfig(
+            **dict(branch_binary_auxiliary.get("monitor", {}))
+        )
+        loss["branch_binary_auxiliary"] = BranchBinaryAuxiliaryLossConfig(
+            **branch_binary_auxiliary
+        )
         loss["attention_entropy"] = AttentionEntropyLossConfig(
             **dict(loss.get("attention_entropy", {}))
         )
@@ -1023,6 +1311,43 @@ class JsonConfigLoader:
             **dict(raw.get("initialization", {}))
         )
         return TrainConfig(**kwargs)
+
+    @staticmethod
+    def _parse_val(raw: Mapping[str, Any] | None) -> ValidationConfig:
+        if raw is None:
+            return ValidationConfig()
+        kwargs = dict(raw)
+        kwargs["loss"] = ValidationLossConfig(**dict(raw.get("loss", {})))
+        cfg = ValidationConfig(**kwargs)
+        JsonConfigLoader._validate_val(cfg)
+        return cfg
+
+    @staticmethod
+    def _parse_checkpointing(
+        raw: Mapping[str, Any] | None,
+    ) -> CheckpointingConfig | None:
+        if raw is None:
+            return None
+        monitors_raw = raw.get("monitors", ())
+        if not isinstance(monitors_raw, Sequence) or isinstance(
+            monitors_raw, (str, bytes)
+        ):
+            raise TypeError("checkpointing.monitors must be a list")
+        monitors: list[CheckpointMonitorConfig] = []
+        for monitor_raw in monitors_raw:
+            monitor_kwargs = dict(monitor_raw)
+            keep_top_k = monitor_kwargs.pop("keep_top_k", None)
+            if keep_top_k is not None:
+                if "top_k" in monitor_kwargs and monitor_kwargs["top_k"] != keep_top_k:
+                    raise ValueError(
+                        "checkpointing.monitors.keep_top_k and top_k must match "
+                        "when both are provided"
+                    )
+                monitor_kwargs["top_k"] = keep_top_k
+            monitors.append(CheckpointMonitorConfig(**monitor_kwargs))
+        cfg = CheckpointingConfig(monitors=tuple(monitors))
+        JsonConfigLoader._validate_checkpointing(cfg)
+        return cfg
 
     @staticmethod
     def _parse_analysis(raw: Mapping[str, Any] | None) -> AnalysisConfig:
@@ -1055,12 +1380,19 @@ class JsonConfigLoader:
             model=model_cfg,
             train=JsonConfigLoader._parse_train(raw["train"]),
             analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
+            val=JsonConfigLoader._parse_val(raw.get("val")),
+            checkpointing=JsonConfigLoader._parse_checkpointing(
+                raw.get("checkpointing")
+            ),
         )
         JsonConfigLoader._validate_train(
             cfg.train,
             num_classes=len(cfg.data.label_to_index),
             num_branches=len(cfg.model.encoder.architecture.patch_branches),
+            label_to_index=cfg.data.label_to_index,
         )
+        JsonConfigLoader._validate_val(cfg.val)
+        JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
         return cfg
 
     @staticmethod
@@ -1096,10 +1428,17 @@ class JsonConfigLoader:
             train=JsonConfigLoader._parse_train(raw["train"]),
             analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
             folds=[JsonConfigLoader._parse_fold(item) for item in raw["folds"]],
+            val=JsonConfigLoader._parse_val(raw.get("val")),
+            checkpointing=JsonConfigLoader._parse_checkpointing(
+                raw.get("checkpointing")
+            ),
         )
         JsonConfigLoader._validate_train(
             cfg.train,
             num_classes=len(cfg.data.label_to_index),
             num_branches=len(cfg.model.encoder.architecture.patch_branches),
+            label_to_index=cfg.data.label_to_index,
         )
+        JsonConfigLoader._validate_val(cfg.val)
+        JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
         return cfg
