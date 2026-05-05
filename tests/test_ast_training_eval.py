@@ -45,6 +45,7 @@ from src.utils.config import (
     EncoderAdaptationConfig,
     EvalConfig,
     ExperimentConfig,
+    LabelSmoothingConfig,
     ModelConfig,
     ModelEncoderConfig,
     MultiScaleRdtArchitectureConfig,
@@ -207,6 +208,7 @@ def _trainer_cfg(
     branch_binary_pos_weight: float | None = None,
     main_index_to_binary_target: tuple[int, ...] | None = None,
     class_weights: tuple[float, ...] | None = None,
+    label_smoothing: LabelSmoothingConfig | None = None,
     attention_entropy_enabled: bool = False,
     attention_entropy_weight: float = 0.0,
 ) -> TrainerConfig:
@@ -225,6 +227,7 @@ def _trainer_cfg(
         gamma=gamma,
         pos_weight=pos_weight,
         class_weights=class_weights,
+        label_smoothing=label_smoothing or LabelSmoothingConfig(),
         branch_auxiliary=BranchAuxiliaryLossConfig(
             enabled=branch_auxiliary_enabled,
             weight=branch_auxiliary_weight,
@@ -617,6 +620,71 @@ def test_trainer_raises_when_branch_auxiliary_enabled_without_branch_logits() ->
 
     with pytest.raises(ValueError, match="branch auxiliary loss enabled"):
         trainer._compute_total_loss(criterion, output, labels)
+
+
+def test_cross_entropy_label_smoothing_matches_torch_loss() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=4,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            label_smoothing=LabelSmoothingConfig(enabled=True, value=0.2),
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    expected = torch.nn.CrossEntropyLoss(label_smoothing=0.2)
+    logits = torch.tensor(
+        [[2.0, 0.1, -0.3, 0.0], [0.0, 0.2, 1.5, -0.4]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([0, 2], dtype=torch.long)
+
+    assert torch.isclose(criterion(logits, labels), expected(logits, labels))
+
+
+def test_weighted_cross_entropy_label_smoothing_matches_torch_loss() -> None:
+    class_weights = torch.tensor([0.5, 1.0, 1.25, 1.25], dtype=torch.float32)
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=4,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=tuple(float(value.item()) for value in class_weights),
+            label_smoothing=LabelSmoothingConfig(enabled=True, value=0.05),
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    expected = torch.nn.CrossEntropyLoss(
+        weight=class_weights,
+        label_smoothing=0.05,
+    )
+    logits = torch.tensor(
+        [[2.0, 0.1, -0.3, 0.0], [0.0, 0.2, 1.5, -0.4]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([0, 2], dtype=torch.long)
+
+    assert torch.isclose(criterion(logits, labels), expected(logits, labels))
+
+
+def test_cross_entropy_label_smoothing_disabled_uses_zero() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=4,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            label_smoothing=LabelSmoothingConfig(enabled=False, value=0.2),
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    expected = torch.nn.CrossEntropyLoss(label_smoothing=0.0)
+    logits = torch.tensor(
+        [[2.0, 0.1, -0.3, 0.0], [0.0, 0.2, 1.5, -0.4]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([0, 2], dtype=torch.long)
+
+    assert torch.isclose(criterion(logits, labels), expected(logits, labels))
 
 
 def test_trainer_total_loss_includes_weighted_ce_and_branch_binary_auxiliary() -> None:

@@ -30,6 +30,7 @@ from src.utils.config import (
     BranchBinaryAuxiliaryLossConfig,
     CheckpointingConfig,
     EarlyStoppingConfig,
+    LabelSmoothingConfig,
 )
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
@@ -51,6 +52,7 @@ class TrainerConfig:
     gamma: float = 2.0
     pos_weight: float | None = None
     class_weights: tuple[float, ...] | None = None
+    label_smoothing: LabelSmoothingConfig = field(default_factory=LabelSmoothingConfig)
     branch_auxiliary: BranchAuxiliaryLossConfig = field(
         default_factory=BranchAuxiliaryLossConfig
     )
@@ -349,6 +351,11 @@ class Trainer(LoggingMixin):
                 pos_weight=self.cfg.pos_weight,
             ).to(device)
         if self.cfg.loss_type == "cross_entropy":
+            label_smoothing = (
+                float(self.cfg.label_smoothing.value)
+                if self.cfg.label_smoothing.enabled
+                else 0.0
+            )
             if self.cfg.class_weights is not None:
                 return nn.CrossEntropyLoss(
                     weight=torch.tensor(
@@ -356,9 +363,9 @@ class Trainer(LoggingMixin):
                         device=device,
                         dtype=torch.float32,
                     ),
-                    label_smoothing=0.05
+                    label_smoothing=label_smoothing,
                 ).to(device)
-            return nn.CrossEntropyLoss().to(device)
+            return nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
         raise ValueError(f"Unknown loss type: {self.cfg.loss_type}")
 
     def _branch_binary_criterion_on(self, device: torch.device) -> nn.Module:

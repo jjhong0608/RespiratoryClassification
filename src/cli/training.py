@@ -250,6 +250,7 @@ def main() -> None:
             gamma=cfg.train.loss.gamma,
             pos_weight=imbalance.pos_weight,
             class_weights=resolved_loss_weights.class_weights,
+            label_smoothing=cfg.train.loss.label_smoothing,
             branch_auxiliary=cfg.train.loss.branch_auxiliary,
             branch_binary_auxiliary=cfg.train.loss.branch_binary_auxiliary,
             branch_binary_pos_weight=(resolved_loss_weights.branch_binary_pos_weight),

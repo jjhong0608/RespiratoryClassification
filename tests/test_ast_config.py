@@ -581,6 +581,8 @@ def test_repo_example_configs_load() -> None:
     }
     assert pretrain_4class_cfg.train.epochs == 120
     assert pretrain_4class_cfg.train.loss.class_weighting.enabled is True
+    assert pretrain_4class_cfg.train.loss.label_smoothing.enabled is True
+    assert pretrain_4class_cfg.train.loss.label_smoothing.value == 0.05
     assert pretrain_4class_cfg.train.loss.branch_auxiliary.enabled is False
     assert pretrain_4class_cfg.train.loss.branch_binary_auxiliary.enabled is True
     assert pretrain_4class_cfg.train.loss.branch_binary_auxiliary.weight == 0.3
@@ -601,6 +603,8 @@ def test_repo_example_configs_load() -> None:
         "last",
     ]
     assert pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.enabled is True
+    assert pretrain_4class_cosine_cfg.train.loss.label_smoothing.enabled is True
+    assert pretrain_4class_cosine_cfg.train.loss.label_smoothing.value == 0.05
     assert (
         pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.schedule.enabled
         is True
@@ -624,6 +628,8 @@ def test_repo_example_configs_load() -> None:
         ("last", "last", 3, "last"),
     ]
     assert pretrain_4class_sqrt_sampler_cfg.train.sampler.enabled is True
+    assert pretrain_4class_sqrt_sampler_cfg.train.loss.label_smoothing.enabled is True
+    assert pretrain_4class_sqrt_sampler_cfg.train.loss.label_smoothing.value == 0.05
     assert pretrain_4class_sqrt_sampler_cfg.train.sampler.type == "sqrt_inverse_class"
     assert pretrain_4class_sqrt_sampler_cfg.train.sampler.replacement is True
     assert pretrain_4class_sqrt_sampler_cfg.train.sampler.num_samples == "dataset_size"
@@ -680,6 +686,8 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.data.augmentation.policy.type == "independent"
     assert cfg.data.augmentation.waveform.enabled is False
     assert cfg.data.augmentation.fbank.enabled is False
+    assert cfg.train.loss.label_smoothing.enabled is False
+    assert cfg.train.loss.label_smoothing.value == 0.0
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.sampler.weighted_random is True
     assert cfg.train.sampler.enabled is False
@@ -789,6 +797,46 @@ def test_valid_branch_binary_auxiliary_config_loads(tmp_path: Path) -> None:
         "wheeze": 1,
         "rhonchi": 1,
     }
+
+
+def test_valid_label_smoothing_config_loads(tmp_path: Path) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["label_smoothing"] = {
+        "enabled": True,
+        "value": 0.05,
+    }
+    config_path = _write_json(tmp_path / "label_smoothing.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.label_smoothing.enabled is True
+    assert cfg.train.loss.label_smoothing.value == 0.05
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "label_smoothing.enabled"),
+        ("value", -0.1, "label_smoothing.value"),
+        ("value", 1.0, "label_smoothing.value"),
+    ],
+)
+def test_invalid_label_smoothing_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["label_smoothing"] = {
+        "enabled": True,
+        "value": 0.05,
+    }
+    payload["train"]["loss"]["label_smoothing"][field] = value
+    config_path = _write_json(tmp_path / "bad_label_smoothing.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 def test_valid_branch_binary_cosine_schedule_config_loads(tmp_path: Path) -> None:

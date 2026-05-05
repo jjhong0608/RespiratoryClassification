@@ -202,6 +202,12 @@ class ClassWeightingConfig:
 
 
 @dataclass(frozen=True)
+class LabelSmoothingConfig:
+    enabled: bool = False
+    value: float = 0.0
+
+
+@dataclass(frozen=True)
 class BranchBinaryPosWeightConfig:
     enabled: bool = False
     type: Literal["sqrt_normal_over_abnormal"] = "sqrt_normal_over_abnormal"
@@ -246,6 +252,7 @@ class LossConfig:
     pos_weight: float | None = None
     gamma: float = 2.0
     class_weighting: ClassWeightingConfig = field(default_factory=ClassWeightingConfig)
+    label_smoothing: LabelSmoothingConfig = field(default_factory=LabelSmoothingConfig)
     branch_auxiliary: BranchAuxiliaryLossConfig = field(
         default_factory=BranchAuxiliaryLossConfig
     )
@@ -929,6 +936,10 @@ class JsonConfigLoader:
                 "train.loss.class_weighting is supported only for multiclass "
                 "cross_entropy runs"
             )
+        if not isinstance(cfg.loss.label_smoothing.enabled, bool):
+            raise ValueError("train.loss.label_smoothing.enabled must be a boolean")
+        if not (0.0 <= cfg.loss.label_smoothing.value < 1.0):
+            raise ValueError("train.loss.label_smoothing.value must be within [0, 1)")
         JsonConfigLoader._validate_branch_binary_auxiliary(
             cfg.loss.branch_binary_auxiliary,
             label_to_index=label_to_index,
@@ -1321,6 +1332,9 @@ class JsonConfigLoader:
         loss = dict(raw.get("loss", {}))
         loss["class_weighting"] = ClassWeightingConfig(
             **dict(loss.get("class_weighting", {}))
+        )
+        loss["label_smoothing"] = LabelSmoothingConfig(
+            **dict(loss.get("label_smoothing", {}))
         )
         branch_auxiliary = dict(loss.get("branch_auxiliary", {}))
         if "weights" in branch_auxiliary and branch_auxiliary["weights"] is not None:

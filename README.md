@@ -562,6 +562,10 @@ The active schema is:
         "normalize": "mean_one",
         "source": "train"
       },
+      "label_smoothing": {
+        "enabled": false,
+        "value": 0.0
+      },
       "branch_binary_auxiliary": {
         "enabled": false,
         "weight": 0.3,
@@ -624,6 +628,8 @@ Additional experiment knobs:
   `branch_auxiliary.weight` with normalized per-branch weighting
 - `train.loss.class_weighting.enabled = true` adds train-derived
   sqrt-inverse-frequency CE weights for multiclass pretraining
+- `train.loss.label_smoothing.enabled = true` adds configurable label smoothing
+  to cross-entropy only
 - `train.loss.branch_binary_auxiliary.enabled = true` adds branch-level
   normal-vs-abnormal BCE using its own binary label map
 - `train.loss.branch_binary_auxiliary.schedule.enabled = true` supports the
@@ -649,6 +655,8 @@ Loss behavior still depends on the number of classes:
     averages across branches
   - optional `class_weighting` uses train-only class counts and applies the
     same weights to training and validation loss
+  - optional `label_smoothing` applies only to the final cross-entropy criterion;
+    the 4-class pretraining configs explicitly use `0.05` to preserve prior behavior
   - optional `branch_binary_auxiliary` maps each main class to `0` or `1` and
     trains branch-level binary logits; this does not add a global binary output
 
