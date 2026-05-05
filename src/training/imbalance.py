@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import WeightedRandomSampler
 
 from src.data.dataset import RespiratoryClipDataset
-from src.utils.config import LossConfig
+from src.utils.config import LossConfig, SamplerConfig
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,14 @@ class ResolvedLossWeights:
     main_index_to_binary_target: tuple[int, ...] | None
     binary_counts: Mapping[int, int] | None
     branch_binary_pos_weight: float | None
+
+
+@dataclass(frozen=True)
+class SqrtInverseSamplerSummary:
+    class_counts: tuple[int, ...]
+    class_weights: tuple[float, ...]
+    expected_class_probabilities: tuple[float, ...]
+    num_samples: int
 
 
 def collect_targets(dataset: RespiratoryClipDataset) -> list[int]:
@@ -200,6 +208,78 @@ def build_weighted_sampler(
         replacement=True,
         generator=generator,
     )
+
+
+def compute_sqrt_inverse_sample_weights(
+    targets: Sequence[int],
+    *,
+    num_classes: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    target_list = [int(target) for target in targets]
+    if not target_list:
+        raise ValueError("Cannot build sqrt_inverse_class sampler for empty dataset")
+    targets_tensor = torch.tensor(target_list, dtype=torch.long)
+    counts = compute_class_counts_by_index(target_list, num_classes=num_classes)
+    missing = torch.where(counts <= 0)[0].tolist()
+    if missing:
+        raise ValueError(
+            "Cannot build sqrt_inverse_class sampler because classes have zero "
+            f"samples: {missing}"
+        )
+    class_weights = torch.rsqrt(counts)
+    sample_weights = class_weights[targets_tensor].to(dtype=torch.double)
+    expected_mass = counts * class_weights
+    expected_probabilities = expected_mass / expected_mass.sum().clamp_min(1e-12)
+    return sample_weights, counts, class_weights, expected_probabilities
+
+
+def resolve_sampler_num_samples(
+    num_samples: str | int,
+    *,
+    dataset_size: int,
+) -> int:
+    if num_samples == "dataset_size":
+        return int(dataset_size)
+    if isinstance(num_samples, bool) or not isinstance(num_samples, int):
+        raise TypeError(
+            "train.sampler.num_samples must be 'dataset_size' or a positive integer"
+        )
+    if num_samples <= 0:
+        raise ValueError(
+            "train.sampler.num_samples must be 'dataset_size' or a positive integer"
+        )
+    return int(num_samples)
+
+
+def build_sqrt_inverse_class_sampler(
+    targets: Sequence[int],
+    *,
+    num_classes: int,
+    cfg: SamplerConfig,
+    generator: torch.Generator | None = None,
+) -> tuple[WeightedRandomSampler, SqrtInverseSamplerSummary]:
+    sample_weights, counts, class_weights, expected_probabilities = (
+        compute_sqrt_inverse_sample_weights(targets, num_classes=num_classes)
+    )
+    num_samples = resolve_sampler_num_samples(
+        cfg.num_samples,
+        dataset_size=len(sample_weights),
+    )
+    sampler = WeightedRandomSampler(
+        [float(value) for value in sample_weights.tolist()],
+        num_samples=num_samples,
+        replacement=cfg.replacement,
+        generator=generator,
+    )
+    summary = SqrtInverseSamplerSummary(
+        class_counts=tuple(int(value.item()) for value in counts),
+        class_weights=tuple(float(value.item()) for value in class_weights),
+        expected_class_probabilities=tuple(
+            float(value.item()) for value in expected_probabilities
+        ),
+        num_samples=num_samples,
+    )
+    return sampler, summary
 
 
 def resolve_imbalance(

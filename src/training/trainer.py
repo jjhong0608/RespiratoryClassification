@@ -355,7 +355,8 @@ class Trainer(LoggingMixin):
                         self.cfg.class_weights,
                         device=device,
                         dtype=torch.float32,
-                    )
+                    ),
+                    label_smoothing=0.05
                 ).to(device)
             return nn.CrossEntropyLoss().to(device)
         raise ValueError(f"Unknown loss type: {self.cfg.loss_type}")

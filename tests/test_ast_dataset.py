@@ -7,6 +7,7 @@ import numpy as np
 import soundfile as sf
 import torch
 from src.data.loaders import build_clip_loader, build_dataset
+from src.training.imbalance import build_sqrt_inverse_class_sampler
 from src.utils.config import (
     AstFbankConfig,
     AudioConfig,
@@ -19,8 +20,10 @@ from src.utils.config import (
     MaskConfig,
     PreprocessingConfig,
     RandomGainConfig,
+    SamplerConfig,
     WaveformAugmentationConfig,
 )
+from torch.utils.data import WeightedRandomSampler
 
 
 def _write_wav(path: Path, duration_sec: float, sample_rate: int) -> None:
@@ -246,3 +249,52 @@ def test_oneof_augmentation_is_train_only(tmp_path: Path) -> None:
     assert val_dataset.apply_augmentation is False
     assert val_dataset.root_datasets[0].waveform_augmentation_enabled is False
     assert val_dataset.root_datasets[0].fbank_augmentation_enabled is False
+
+
+def test_sqrt_inverse_sampler_is_train_loader_only(tmp_path: Path) -> None:
+    train_root = tmp_path / "train"
+    val_root = tmp_path / "val"
+    for root in [train_root, val_root]:
+        for label in ["normal", "wheeze"]:
+            label_dir = root / label
+            label_dir.mkdir(parents=True)
+            _write_wav(
+                label_dir / f"{label}.wav",
+                duration_sec=1.0,
+                sample_rate=16000,
+            )
+
+    cfg = _data_config(
+        [str(train_root)],
+        val_roots=[str(val_root)],
+    )
+    train_dataset = build_dataset(cfg, split="train")
+    val_dataset = build_dataset(cfg, split="val")
+    sampler, _ = build_sqrt_inverse_class_sampler(
+        train_dataset.targets,
+        num_classes=len(cfg.label_to_index),
+        cfg=SamplerConfig(
+            enabled=True,
+            type="sqrt_inverse_class",
+            replacement=True,
+            num_samples="dataset_size",
+            source="train",
+        ),
+    )
+
+    train_loader = build_clip_loader(
+        train_dataset,
+        batch_size=2,
+        num_workers=0,
+        shuffle=True,
+        sampler=sampler,
+    )
+    val_loader = build_clip_loader(
+        val_dataset,
+        batch_size=2,
+        num_workers=0,
+        shuffle=False,
+    )
+
+    assert isinstance(train_loader.sampler, WeightedRandomSampler)
+    assert not isinstance(val_loader.sampler, WeightedRandomSampler)

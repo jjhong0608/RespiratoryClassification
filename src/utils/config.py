@@ -260,6 +260,11 @@ class LossConfig:
 @dataclass(frozen=True)
 class SamplerConfig:
     weighted_random: bool = False
+    enabled: bool = False
+    type: Literal["none", "sqrt_inverse_class"] = "none"
+    replacement: bool = True
+    num_samples: Literal["dataset_size"] | int = "dataset_size"
+    source: Literal["train"] = "train"
 
 
 @dataclass(frozen=True)
@@ -397,6 +402,7 @@ class JsonConfigLoader:
     _LOSS_WEIGHT_SOURCES = {"train"}
     _BRANCH_BINARY_POS_WEIGHT_TYPES = {"sqrt_normal_over_abnormal"}
     _BRANCH_BINARY_AUXILIARY_SCHEDULE_TYPES = {"none", "cosine_floor"}
+    _SAMPLER_TYPES = {"none", "sqrt_inverse_class"}
     _CHECKPOINT_MONITORS = {
         "val_macro_f1": {"max"},
         "val_macro_recall": {"max"},
@@ -848,6 +854,7 @@ class JsonConfigLoader:
             raise ValueError("train.optimizer.weight_decay must be non-negative")
         if not (0.0 <= cfg.scheduler.warmup_ratio <= 1.0):
             raise ValueError("train.scheduler.warmup_ratio must be within [0, 1]")
+        JsonConfigLoader._validate_sampler(cfg.sampler)
         if cfg.early_stopping.monitor not in JsonConfigLoader._EARLY_STOPPING_MONITORS:
             raise ValueError(
                 "train.early_stopping.monitor must be one of "
@@ -949,6 +956,45 @@ class JsonConfigLoader:
         if cfg.loss.pos_weight is not None:
             raise ValueError(
                 "train.loss.pos_weight is only supported for binary classification"
+            )
+
+    @staticmethod
+    def _validate_sampler(cfg: SamplerConfig) -> None:
+        if not isinstance(cfg.weighted_random, bool):
+            raise ValueError("train.sampler.weighted_random must be a boolean")
+        if not isinstance(cfg.enabled, bool):
+            raise ValueError("train.sampler.enabled must be a boolean")
+        if cfg.type not in JsonConfigLoader._SAMPLER_TYPES:
+            raise ValueError(
+                "train.sampler.type must be one of "
+                f"{sorted(JsonConfigLoader._SAMPLER_TYPES)}"
+            )
+        if not isinstance(cfg.replacement, bool):
+            raise ValueError("train.sampler.replacement must be a boolean")
+        if cfg.source != "train":
+            raise ValueError("train.sampler.source must be 'train'")
+        if isinstance(cfg.num_samples, str):
+            if cfg.num_samples != "dataset_size":
+                raise ValueError(
+                    "train.sampler.num_samples must be 'dataset_size' or a positive integer"
+                )
+        elif isinstance(cfg.num_samples, bool) or not isinstance(cfg.num_samples, int):
+            raise TypeError(
+                "train.sampler.num_samples must be 'dataset_size' or a positive integer"
+            )
+        elif cfg.num_samples <= 0:
+            raise ValueError(
+                "train.sampler.num_samples must be 'dataset_size' or a positive integer"
+            )
+        if not cfg.enabled:
+            return
+        if cfg.type != "sqrt_inverse_class":
+            raise ValueError(
+                "train.sampler.type must be 'sqrt_inverse_class' when sampler is enabled"
+            )
+        if not cfg.replacement:
+            raise ValueError(
+                "train.sampler.replacement must be true for sqrt_inverse_class"
             )
 
     @staticmethod

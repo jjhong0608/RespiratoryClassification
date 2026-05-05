@@ -30,6 +30,8 @@ pip install -r requirements.txt
 - 4-class pretraining: `configs/training_4class_pretrain_weighted_ce_branch_bin_aux.json`
 - 4-class pretraining with cosine branch-binary schedule:
   `configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030.json`
+- 4-class pretraining with cosine schedule and sqrt-inverse sampler:
+  `configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030_sqrt_sampler.json`
 
 `training_multiscale_rdt.json`, `cv_multiscale_rdt.json`, and
 `training_multiclass.json` are the "full" event-MIL examples with branch
@@ -88,6 +90,34 @@ The config also enables monitor-based checkpoint retention:
 - `val_macro_recall`: maximize and keep top 3.
 - `val_loss` or `val_loss_total_monitor`: minimize and keep top 3.
 - `last`: keep the latest 3 epoch checkpoints while also updating `last.pt`.
+
+## Sqrt-Inverse Class Sampler
+
+`configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030_sqrt_sampler.json`
+adds train-only exposure correction to the cosine-scheduled 4-class pretraining
+setup. It keeps weighted CE, branch-binary BCE, the `0.4 -> 0.1` cosine
+schedule, and fixed monitor loss unchanged.
+
+For each training sample, the sampler weight is:
+
+```text
+s_i = 1 / sqrt(n_yi)
+```
+
+`n_yi` is the training-split count for the sample's class. Validation,
+evaluation, and test loaders never use this sampler. When the sampler is
+enabled, the train loader uses `WeightedRandomSampler` and disables shuffle.
+
+This sampler corrects input exposure imbalance, while weighted CE still
+corrects loss contribution imbalance. Using both is intentional for this
+experiment. It is less aggressive than full inverse-frequency balancing because
+expected class sampling mass is proportional to `sqrt(class_count)`, not equal
+for every class.
+
+Monitor normal false positives, normal recall, macro recall, Brier score, and
+confusion matrices. The sampler plus weighted CE strengthens minority classes,
+so calibration and normal-class specificity can move in the opposite direction
+from minority recall.
 
 ## C0-C5 Experiments
 
@@ -553,6 +583,14 @@ The active schema is:
       "load_model_state": true,
       "strict": false,
       "load_optimizer_state": false
+    },
+    "sampler": {
+      "weighted_random": false,
+      "enabled": false,
+      "type": "none",
+      "replacement": true,
+      "num_samples": "dataset_size",
+      "source": "train"
     }
   }
 }
@@ -592,6 +630,8 @@ Additional experiment knobs:
   `cosine_floor` schedule for the branch-binary loss weight
 - `train.loss.branch_binary_auxiliary.monitor.loss_weight` fixes the
   branch-binary contribution used by `val_loss_total_monitor`
+- `train.sampler.enabled = true` with `type = "sqrt_inverse_class"` enables
+  train-only sqrt-inverse sample exposure correction
 
 ## Loss Rules
 

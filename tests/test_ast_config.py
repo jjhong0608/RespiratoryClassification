@@ -341,6 +341,10 @@ def test_repo_example_configs_load() -> None:
         ROOT
         / "configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030.json"
     )
+    pretrain_4class_sqrt_sampler_cfg = JsonConfigLoader.load_training(
+        ROOT
+        / "configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030_sqrt_sampler.json"
+    )
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
@@ -619,6 +623,24 @@ def test_repo_example_configs_load() -> None:
         ("val_loss_total_monitor", "min", 3, "best_loss"),
         ("last", "last", 3, "last"),
     ]
+    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.enabled is True
+    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.type == "sqrt_inverse_class"
+    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.replacement is True
+    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.num_samples == "dataset_size"
+    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.source == "train"
+    assert (
+        pretrain_4class_sqrt_sampler_cfg.train.loss.branch_binary_auxiliary.schedule.enabled
+        is True
+    )
+    assert (
+        pretrain_4class_sqrt_sampler_cfg.train.loss.branch_binary_auxiliary.monitor.loss_weight
+        == 0.3
+    )
+    cosine_payload = asdict(pretrain_4class_cosine_cfg)
+    sqrt_sampler_payload = asdict(pretrain_4class_sqrt_sampler_cfg)
+    cosine_payload["experiment"]["name"] = sqrt_sampler_payload["experiment"]["name"]
+    cosine_payload["train"]["sampler"] = sqrt_sampler_payload["train"]["sampler"]
+    assert sqrt_sampler_payload == cosine_payload
     assert cv_cfg.folds[0].name == "fold_0"
     assert eval_cfg.threshold_optimization.metric == "f1"
 
@@ -659,6 +681,9 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.data.augmentation.waveform.enabled is False
     assert cfg.data.augmentation.fbank.enabled is False
     assert cfg.train.loss.branch_auxiliary.enabled is False
+    assert cfg.train.sampler.weighted_random is True
+    assert cfg.train.sampler.enabled is False
+    assert cfg.train.sampler.type == "none"
     assert cfg.train.initialization.checkpoint_path is None
 
 
@@ -807,6 +832,58 @@ def test_valid_branch_binary_cosine_schedule_config_loads(tmp_path: Path) -> Non
     assert cfg.checkpointing.monitors[0].top_k == 3
     assert cfg.checkpointing.monitors[0].filename_prefix == "best_loss"
     assert cfg.checkpointing.monitors[1].mode == "last"
+
+
+def test_valid_sqrt_inverse_sampler_config_loads(tmp_path: Path) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["sampler"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_class",
+        "replacement": True,
+        "num_samples": "dataset_size",
+        "source": "train",
+    }
+    config_path = _write_json(tmp_path / "sqrt_sampler.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.sampler.enabled is True
+    assert cfg.train.sampler.type == "sqrt_inverse_class"
+    assert cfg.train.sampler.replacement is True
+    assert cfg.train.sampler.num_samples == "dataset_size"
+    assert cfg.train.sampler.source == "train"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("type", "inverse_class", "train.sampler.type"),
+        ("source", "val", "train.sampler.source"),
+        ("replacement", False, "train.sampler.replacement"),
+        ("num_samples", 0, "train.sampler.num_samples"),
+        ("num_samples", "all", "train.sampler.num_samples"),
+    ],
+)
+def test_invalid_sqrt_inverse_sampler_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    sampler = {
+        "enabled": True,
+        "type": "sqrt_inverse_class",
+        "replacement": True,
+        "num_samples": "dataset_size",
+        "source": "train",
+    }
+    sampler[field] = value
+    payload["train"]["sampler"] = sampler
+    config_path = _write_json(tmp_path / "bad_sqrt_sampler.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 @pytest.mark.parametrize(

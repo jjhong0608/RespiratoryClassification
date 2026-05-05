@@ -12,6 +12,7 @@ from src.training.ast_setup import (
     summarize_model_architecture,
 )
 from src.training.imbalance import (
+    build_sqrt_inverse_class_sampler,
     build_weighted_sampler,
     collect_targets,
     resolve_imbalance,
@@ -157,13 +158,59 @@ def main() -> None:
                     imbalance.pos_weight,
                     cfg.train.loss.type,
                 )
-        sampler = (
-            build_weighted_sampler(train_targets, generator=generators.sampler)
-            if imbalance.weighted_random
-            else None
-        )
-        if sampler is not None:
-            logger.info("[%s] Using weighted random sampler", fold.name)
+        sampler = None
+        if cfg.train.sampler.enabled:
+            sampler, sampler_summary = build_sqrt_inverse_class_sampler(
+                train_targets,
+                num_classes=num_classes,
+                cfg=cfg.train.sampler,
+                generator=generators.sampler,
+            )
+            index_to_label = {
+                int(index): label_name
+                for label_name, index in cfg.data.label_to_index.items()
+            }
+            class_counts_by_label = {
+                index_to_label.get(index, str(index)): count
+                for index, count in enumerate(sampler_summary.class_counts)
+            }
+            class_weights_by_label = {
+                index_to_label.get(index, str(index)): weight
+                for index, weight in enumerate(sampler_summary.class_weights)
+            }
+            expected_probabilities_by_label = {
+                index_to_label.get(index, str(index)): probability
+                for index, probability in enumerate(
+                    sampler_summary.expected_class_probabilities
+                )
+            }
+            logger.info(
+                "[%s] Sqrt-inverse class sampler enabled | type=%s | "
+                "replacement=%s | num_samples=%d | source=%s",
+                fold.name,
+                cfg.train.sampler.type,
+                cfg.train.sampler.replacement,
+                sampler_summary.num_samples,
+                cfg.train.sampler.source,
+            )
+            logger.info(
+                "[%s] Sampler class counts: %s", fold.name, class_counts_by_label
+            )
+            logger.info(
+                "[%s] Sampler class weights: %s",
+                fold.name,
+                class_weights_by_label,
+            )
+            logger.info(
+                "[%s] Sampler expected class probabilities: %s",
+                fold.name,
+                expected_probabilities_by_label,
+            )
+        elif imbalance.weighted_random:
+            sampler = build_weighted_sampler(
+                train_targets, generator=generators.sampler
+            )
+            logger.info("[%s] Using legacy weighted random sampler", fold.name)
 
         train_loader = build_clip_loader(
             train_dataset,
