@@ -97,6 +97,35 @@ class WaveformPreprocessor:
             return F.pad(audio, (0, n_samples - audio.numel()))
         return audio
 
+    def crop_or_pad(
+        self,
+        audio: Tensor,
+        *,
+        crop_mode: Literal["first", "center", "random"] = "first",
+    ) -> Tensor:
+        if audio.ndim != 1:
+            raise ValueError(f"Expected mono waveform (T,), got {tuple(audio.shape)}")
+        n_samples = self.cfg.n_samples
+        if audio.numel() > n_samples:
+            max_start = int(audio.numel() - n_samples)
+            if crop_mode == "first":
+                start = 0
+            elif crop_mode == "center":
+                start = max_start // 2
+            elif crop_mode == "random":
+                start = int(
+                    torch.randint(
+                        low=0,
+                        high=max_start + 1,
+                        size=(1,),
+                        device=audio.device,
+                    ).item()
+                )
+            else:
+                raise ValueError(f"Unsupported crop_mode: {crop_mode}")
+            return audio[start : start + n_samples]
+        return self.pad(audio)
+
     def prepare(self, audio: Tensor) -> Tensor:
         audio = self.trim(audio)
         audio = self._apply_bandpass(audio)
@@ -104,6 +133,18 @@ class WaveformPreprocessor:
 
     def prepare_fixed_length(self, audio: Tensor) -> Tensor:
         return self.pad(self.prepare(audio))
+
+    def prepare_cropped(
+        self,
+        audio: Tensor,
+        *,
+        crop_mode: Literal["first", "center", "random"] = "first",
+    ) -> Tensor:
+        if audio.ndim != 1:
+            raise ValueError(f"Expected mono waveform (T,), got {tuple(audio.shape)}")
+        audio = self._apply_bandpass(audio)
+        audio = self._apply_source_type(audio)
+        return self.crop_or_pad(audio, crop_mode=crop_mode)
 
     def _apply_bandpass(self, audio: Tensor) -> Tensor:
         if not self.cfg.bandpass_enabled:

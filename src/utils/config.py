@@ -18,10 +18,15 @@ from src.models.model import (
     PatchBranchConfig,
     RdtConfig,
     SelectedEvidenceDropoutConfig,
+    SslDecoderConfig,
+    SslLossConfig,
+    SslMaskingConfig,
+    SslVisualizationConfig,
     TokenAugmentationConfig,
     compute_token_count,
     compute_token_grid,
 )
+from src.models.ssl import MaskedFbankSSLConfig
 
 
 @dataclass(frozen=True)
@@ -153,8 +158,30 @@ class DataConfig:
 
 
 @dataclass(frozen=True)
+class Fsd50kDataConfig:
+    dataset: Literal["fsd50k"]
+    mode: Literal["ssl", "supervised"]
+    root: str
+    dev_audio_dir: str
+    eval_audio_dir: str
+    ground_truth_dir: str
+    vocabulary_csv: str
+    dev_csv: str
+    eval_csv: str
+    val_ratio: float = 0.1
+    split_seed: int = 42
+    num_workers: int = 0
+    audio: AudioConfig = field(
+        default_factory=lambda: AudioConfig(sample_rate=16000, clip_duration_sec=30.0)
+    )
+    preprocessing: PreprocessingConfig = field(default_factory=PreprocessingConfig)
+    augmentation: DataAugmentationConfig = field(default_factory=DataAugmentationConfig)
+
+
+@dataclass(frozen=True)
 class ModelEncoderConfig:
     type: Literal["multiscale_rdt_ast"] = "multiscale_rdt_ast"
+    init_from: str | None = None
     adaptation: EncoderAdaptationConfig = field(default_factory=EncoderAdaptationConfig)
     architecture: MultiScaleRdtArchitectureConfig = field(
         default_factory=MultiScaleRdtArchitectureConfig
@@ -309,6 +336,9 @@ class CheckpointMonitorConfig:
         "val_macro_recall",
         "val_loss",
         "val_loss_total_monitor",
+        "val_ssl_loss",
+        "val_macro_AP",
+        "val_micro_AP",
         "last",
     ]
     mode: Literal["max", "min", "latest", "last"]
@@ -319,6 +349,88 @@ class CheckpointMonitorConfig:
 @dataclass(frozen=True)
 class CheckpointingConfig:
     monitors: tuple[CheckpointMonitorConfig, ...] = ()
+
+
+@dataclass(frozen=True)
+class Fsd50kSchedulerConfig:
+    type: Literal["linear_warmup_cosine"] = "linear_warmup_cosine"
+    warmup_ratio: float = 0.05
+
+
+@dataclass(frozen=True)
+class Fsd50kSslOptimizerConfig:
+    lr: float = 3e-4
+    weight_decay: float = 0.01
+
+
+@dataclass(frozen=True)
+class Fsd50kSslTrainConfig:
+    epochs: int = 200
+    batch_size: int = 32
+    optimizer: Fsd50kSslOptimizerConfig = field(
+        default_factory=Fsd50kSslOptimizerConfig
+    )
+    scheduler: Fsd50kSchedulerConfig = field(default_factory=Fsd50kSchedulerConfig)
+    max_grad_norm: float = 1.0
+
+
+@dataclass(frozen=True)
+class MultiLabelPosWeightConfig:
+    type: Literal["sqrt_negative_over_positive"] = "sqrt_negative_over_positive"
+    cap: float = 10.0
+    source: Literal["train"] = "train"
+    save_to_checkpoint_metadata: bool = True
+
+
+@dataclass(frozen=True)
+class Fsd50kSupervisedLossConfig:
+    type: Literal["bce_with_logits"] = "bce_with_logits"
+    pos_weight: MultiLabelPosWeightConfig = field(
+        default_factory=MultiLabelPosWeightConfig
+    )
+    branch_auxiliary: BranchAuxiliaryLossConfig = field(
+        default_factory=BranchAuxiliaryLossConfig
+    )
+    branch_binary_auxiliary: BranchBinaryAuxiliaryLossConfig = field(
+        default_factory=BranchBinaryAuxiliaryLossConfig
+    )
+
+
+@dataclass(frozen=True)
+class Fsd50kSupervisedOptimizerConfig:
+    encoder_lr: float = 1e-5
+    body_lr: float = 3e-5
+    head_lr: float = 3e-4
+    weight_decay: float = 0.01
+
+
+@dataclass(frozen=True)
+class GradientClippingConfig:
+    enabled: bool = False
+    max_norm: float = 1.0
+
+
+@dataclass(frozen=True)
+class Fsd50kSupervisedTrainConfig:
+    epochs: int = 120
+    batch_size: int = 32
+    optimizer: Fsd50kSupervisedOptimizerConfig = field(
+        default_factory=Fsd50kSupervisedOptimizerConfig
+    )
+    scheduler: Fsd50kSchedulerConfig = field(default_factory=Fsd50kSchedulerConfig)
+    gradient_clipping: GradientClippingConfig = field(
+        default_factory=GradientClippingConfig
+    )
+    loss: Fsd50kSupervisedLossConfig = field(default_factory=Fsd50kSupervisedLossConfig)
+
+
+@dataclass(frozen=True)
+class Fsd50kMetricsConfig:
+    primary: Literal["macro_AP"] = "macro_AP"
+    secondary: Literal["micro_AP"] = "micro_AP"
+    f1_threshold: float = 0.5
+    save_per_class_AP: bool = True
+    zero_positive_class_policy: Literal["exclude_with_warning"] = "exclude_with_warning"
 
 
 @dataclass(frozen=True)
@@ -358,6 +470,58 @@ class TrainingRunConfig:
     analysis: AnalysisConfig
     val: ValidationConfig = field(default_factory=ValidationConfig)
     checkpointing: CheckpointingConfig | None = None
+
+
+@dataclass(frozen=True)
+class Fsd50kSslRunConfig:
+    task: str
+    experiment: ExperimentConfig
+    data: Fsd50kDataConfig
+    model: ModelConfig
+    train: Fsd50kSslTrainConfig
+    ssl: MaskedFbankSSLConfig
+    checkpointing: CheckpointingConfig | None = None
+
+
+@dataclass(frozen=True)
+class Fsd50kSupervisedRunConfig:
+    task: str
+    experiment: ExperimentConfig
+    data: Fsd50kDataConfig
+    model: ModelConfig
+    train: Fsd50kSupervisedTrainConfig
+    metrics: Fsd50kMetricsConfig = field(default_factory=Fsd50kMetricsConfig)
+    checkpointing: CheckpointingConfig | None = None
+
+
+@dataclass(frozen=True)
+class CnuhTransferConfig:
+    checkpoint_path: str
+    reset_classifier: bool = True
+    freeze_encoder: bool = True
+    strict: bool = False
+    freeze_modules: tuple[str, ...] = (
+        "patch_tokenizers",
+        "position_embeddings",
+        "scale_embeddings",
+        "shared_stem",
+        "scale_specific_adapters",
+        "frequency_attention_poolers",
+    )
+
+
+@dataclass(frozen=True)
+class CnuhTransferOptimizerConfig:
+    frozen_encoder_lr: float = 0.0
+    body_lr: float = 1e-5
+    head_lr: float = 3e-4
+
+
+@dataclass(frozen=True)
+class CnuhTransferTemplateConfig:
+    task: Literal["cnuh_4class"]
+    transfer: CnuhTransferConfig
+    optimizer: CnuhTransferOptimizerConfig
 
 
 @dataclass(frozen=True)
@@ -415,6 +579,9 @@ class JsonConfigLoader:
         "val_macro_recall": {"max"},
         "val_loss": {"min"},
         "val_loss_total_monitor": {"min"},
+        "val_ssl_loss": {"min"},
+        "val_macro_AP": {"max"},
+        "val_micro_AP": {"max"},
         "last": {"latest", "last"},
     }
 
@@ -1204,6 +1371,116 @@ class JsonConfigLoader:
         return cfg
 
     @staticmethod
+    def _parse_fsd50k_data(
+        raw: Mapping[str, Any],
+        *,
+        expected_mode: Literal["ssl", "supervised"],
+    ) -> Fsd50kDataConfig:
+        kwargs = dict(raw)
+        if kwargs.get("dataset") != "fsd50k":
+            raise ValueError("data.dataset must be 'fsd50k'")
+        if kwargs.get("mode") != expected_mode:
+            raise ValueError(f"data.mode must be '{expected_mode}'")
+        kwargs["audio"] = AudioConfig(**dict(raw.get("audio", {})))
+        preprocessing = dict(raw.get("preprocessing", {}))
+        preprocessing["bandpass"] = BandPassConfig(**preprocessing.get("bandpass", {}))
+        preprocessing["ast_fbank"] = AstFbankConfig(
+            **dict(preprocessing.get("ast_fbank", {}))
+        )
+        kwargs["preprocessing"] = PreprocessingConfig(**preprocessing)
+        augmentation = dict(raw.get("augmentation", {}))
+        policy = dict(augmentation.get("policy", {}))
+        policy_choices = policy.get("choices", ())
+        if policy_choices:
+            if not isinstance(policy_choices, Sequence) or isinstance(
+                policy_choices, (str, bytes)
+            ):
+                raise TypeError("data.augmentation.policy.choices must be a list")
+            policy["choices"] = tuple(
+                AugmentationPolicyChoiceConfig(**dict(choice_raw))
+                for choice_raw in policy_choices
+            )
+        else:
+            policy["choices"] = ()
+        augmentation["policy"] = AugmentationPolicyConfig(**policy)
+        waveform = dict(augmentation.get("waveform", {}))
+        waveform["gain"] = RandomGainConfig(**dict(waveform.get("gain", {})))
+        waveform["noise"] = AdditiveNoiseConfig(**dict(waveform.get("noise", {})))
+        waveform["time_shift"] = TimeShiftConfig(**dict(waveform.get("time_shift", {})))
+        augmentation["waveform"] = WaveformAugmentationConfig(**waveform)
+        fbank = dict(augmentation.get("fbank", {}))
+        fbank["time_mask"] = MaskConfig(**dict(fbank.get("time_mask", {})))
+        fbank["freq_mask"] = MaskConfig(**dict(fbank.get("freq_mask", {})))
+        augmentation["fbank"] = FbankAugmentationConfig(**fbank)
+        kwargs["augmentation"] = DataAugmentationConfig(**augmentation)
+        cfg = Fsd50kDataConfig(**kwargs)
+        if not (0.0 < cfg.val_ratio < 1.0):
+            raise ValueError("data.val_ratio must be within (0, 1)")
+        if cfg.num_workers < 0:
+            raise ValueError("data.num_workers must be non-negative")
+        JsonConfigLoader._validate_audio(cfg.audio)
+        JsonConfigLoader._validate_preprocessing(
+            cfg.preprocessing,
+            cfg.audio.sample_rate,
+        )
+        JsonConfigLoader._validate_augmentation(cfg.augmentation)
+        return cfg
+
+    @staticmethod
+    def _compat_data_config_for_fsd50k(cfg: Fsd50kDataConfig) -> DataConfig:
+        return DataConfig(
+            train_dirs=[],
+            val_dirs=[],
+            eval_dirs=[],
+            label_to_index={"negative": 0, "positive": 1},
+            batch_size=1,
+            num_workers=cfg.num_workers,
+            audio=cfg.audio,
+            preprocessing=cfg.preprocessing,
+            augmentation=cfg.augmentation,
+        )
+
+    @staticmethod
+    def _parse_ssl_config(raw: Mapping[str, Any] | None) -> MaskedFbankSSLConfig:
+        kwargs = dict(raw or {})
+        kwargs["masking"] = SslMaskingConfig(**dict(kwargs.get("masking", {})))
+        kwargs["decoder"] = SslDecoderConfig(**dict(kwargs.get("decoder", {})))
+        kwargs["loss"] = SslLossConfig(**dict(kwargs.get("loss", {})))
+        kwargs["visualization"] = SslVisualizationConfig(
+            **dict(kwargs.get("visualization", {}))
+        )
+        cfg = MaskedFbankSSLConfig(**kwargs)
+        if cfg.target != "normalized_fbank":
+            raise ValueError("ssl.target must be 'normalized_fbank'")
+        if cfg.masking.type != "branch_specific_token_grid_input_patch":
+            raise ValueError(
+                "ssl.masking.type must be 'branch_specific_token_grid_input_patch'"
+            )
+        if cfg.masking.sampling != "random":
+            raise ValueError("ssl.masking.sampling must be 'random'")
+        if not (0.0 <= cfg.masking.token_mask_ratio <= 1.0):
+            raise ValueError("ssl.masking.token_mask_ratio must be within [0, 1]")
+        if cfg.masking.actual_mask_ratio_warning_threshold <= 0:
+            raise ValueError(
+                "ssl.masking.actual_mask_ratio_warning_threshold must be positive"
+            )
+        if cfg.decoder.type != "branch_conv1d":
+            raise ValueError("ssl.decoder.type must be 'branch_conv1d'")
+        if cfg.decoder.sharing != "separate":
+            raise ValueError("ssl.decoder.sharing must be 'separate'")
+        if cfg.decoder.channels <= 0:
+            raise ValueError("ssl.decoder.channels must be greater than zero")
+        if cfg.decoder.kernel_size <= 0:
+            raise ValueError("ssl.decoder.kernel_size must be greater than zero")
+        if cfg.decoder.num_layers <= 0:
+            raise ValueError("ssl.decoder.num_layers must be greater than zero")
+        if not (0.0 <= cfg.decoder.dropout < 1.0):
+            raise ValueError("ssl.decoder.dropout must be within [0, 1)")
+        if cfg.loss.type != "mean_branch_masked_mse":
+            raise ValueError("ssl.loss.type must be 'mean_branch_masked_mse'")
+        return cfg
+
+    @staticmethod
     def _coerce_pair(
         values: Sequence[object],
         *,
@@ -1373,6 +1650,120 @@ class JsonConfigLoader:
         return TrainConfig(**kwargs)
 
     @staticmethod
+    def _parse_fsd50k_ssl_train(raw: Mapping[str, Any]) -> Fsd50kSslTrainConfig:
+        kwargs = dict(raw)
+        kwargs["optimizer"] = Fsd50kSslOptimizerConfig(**dict(raw.get("optimizer", {})))
+        kwargs["scheduler"] = Fsd50kSchedulerConfig(**dict(raw.get("scheduler", {})))
+        cfg = Fsd50kSslTrainConfig(**kwargs)
+        if cfg.epochs <= 0:
+            raise ValueError("train.epochs must be greater than zero")
+        if cfg.batch_size <= 0:
+            raise ValueError("train.batch_size must be greater than zero")
+        if cfg.optimizer.lr <= 0:
+            raise ValueError("train.optimizer.lr must be greater than zero")
+        if cfg.optimizer.weight_decay < 0:
+            raise ValueError("train.optimizer.weight_decay must be non-negative")
+        if cfg.scheduler.type != "linear_warmup_cosine":
+            raise ValueError("train.scheduler.type must be 'linear_warmup_cosine'")
+        if not (0.0 <= cfg.scheduler.warmup_ratio <= 1.0):
+            raise ValueError("train.scheduler.warmup_ratio must be within [0, 1]")
+        if cfg.max_grad_norm <= 0:
+            raise ValueError("train.max_grad_norm must be greater than zero")
+        return cfg
+
+    @staticmethod
+    def _parse_fsd50k_supervised_train(
+        raw: Mapping[str, Any],
+    ) -> Fsd50kSupervisedTrainConfig:
+        kwargs = dict(raw)
+        kwargs["optimizer"] = Fsd50kSupervisedOptimizerConfig(
+            **dict(raw.get("optimizer", {}))
+        )
+        kwargs["scheduler"] = Fsd50kSchedulerConfig(**dict(raw.get("scheduler", {})))
+        kwargs["gradient_clipping"] = GradientClippingConfig(
+            **dict(raw.get("gradient_clipping", {}))
+        )
+        loss = dict(raw.get("loss", {}))
+        loss["pos_weight"] = MultiLabelPosWeightConfig(
+            **dict(loss.get("pos_weight", {}))
+        )
+        loss["branch_auxiliary"] = BranchAuxiliaryLossConfig(
+            **dict(loss.get("branch_auxiliary", {}))
+        )
+        branch_binary = dict(loss.get("branch_binary_auxiliary", {}))
+        branch_binary["label_to_index"] = dict(branch_binary.get("label_to_index", {}))
+        branch_binary["pos_weight"] = BranchBinaryPosWeightConfig(
+            **dict(branch_binary.get("pos_weight", {}))
+        )
+        branch_binary["schedule"] = BranchBinaryAuxiliaryScheduleConfig(
+            **dict(branch_binary.get("schedule", {}))
+        )
+        branch_binary["monitor"] = BranchBinaryAuxiliaryMonitorConfig(
+            **dict(branch_binary.get("monitor", {}))
+        )
+        loss["branch_binary_auxiliary"] = BranchBinaryAuxiliaryLossConfig(
+            **branch_binary
+        )
+        kwargs["loss"] = Fsd50kSupervisedLossConfig(**loss)
+        cfg = Fsd50kSupervisedTrainConfig(**kwargs)
+        if cfg.epochs <= 0:
+            raise ValueError("train.epochs must be greater than zero")
+        if cfg.batch_size <= 0:
+            raise ValueError("train.batch_size must be greater than zero")
+        if cfg.optimizer.encoder_lr <= 0:
+            raise ValueError("train.optimizer.encoder_lr must be greater than zero")
+        if cfg.optimizer.body_lr <= 0:
+            raise ValueError("train.optimizer.body_lr must be greater than zero")
+        if cfg.optimizer.head_lr <= 0:
+            raise ValueError("train.optimizer.head_lr must be greater than zero")
+        if cfg.optimizer.weight_decay < 0:
+            raise ValueError("train.optimizer.weight_decay must be non-negative")
+        if cfg.scheduler.type != "linear_warmup_cosine":
+            raise ValueError("train.scheduler.type must be 'linear_warmup_cosine'")
+        if not (0.0 <= cfg.scheduler.warmup_ratio <= 1.0):
+            raise ValueError("train.scheduler.warmup_ratio must be within [0, 1]")
+        if not isinstance(cfg.gradient_clipping.enabled, bool):
+            raise ValueError("train.gradient_clipping.enabled must be a boolean")
+        if cfg.gradient_clipping.max_norm <= 0:
+            raise ValueError(
+                "train.gradient_clipping.max_norm must be greater than zero"
+            )
+        if cfg.loss.type != "bce_with_logits":
+            raise ValueError("train.loss.type must be 'bce_with_logits'")
+        if cfg.loss.pos_weight.type != "sqrt_negative_over_positive":
+            raise ValueError(
+                "train.loss.pos_weight.type must be 'sqrt_negative_over_positive'"
+            )
+        if cfg.loss.pos_weight.cap <= 0:
+            raise ValueError("train.loss.pos_weight.cap must be greater than zero")
+        if cfg.loss.pos_weight.source != "train":
+            raise ValueError("train.loss.pos_weight.source must be 'train'")
+        if cfg.loss.branch_auxiliary.enabled:
+            raise ValueError(
+                "FSD50K supervised training requires branch_auxiliary.enabled=false"
+            )
+        if cfg.loss.branch_binary_auxiliary.enabled:
+            raise ValueError(
+                "FSD50K supervised training requires branch_binary_auxiliary.enabled=false"
+            )
+        return cfg
+
+    @staticmethod
+    def _parse_fsd50k_metrics(raw: Mapping[str, Any] | None) -> Fsd50kMetricsConfig:
+        cfg = Fsd50kMetricsConfig(**dict(raw or {}))
+        if cfg.primary != "macro_AP":
+            raise ValueError("metrics.primary must be 'macro_AP'")
+        if cfg.secondary != "micro_AP":
+            raise ValueError("metrics.secondary must be 'micro_AP'")
+        if not (0.0 < cfg.f1_threshold < 1.0):
+            raise ValueError("metrics.f1_threshold must be within (0, 1)")
+        if cfg.zero_positive_class_policy != "exclude_with_warning":
+            raise ValueError(
+                "metrics.zero_positive_class_policy must be 'exclude_with_warning'"
+            )
+        return cfg
+
+    @staticmethod
     def _parse_val(raw: Mapping[str, Any] | None) -> ValidationConfig:
         if raw is None:
             return ValidationConfig()
@@ -1453,6 +1844,118 @@ class JsonConfigLoader:
         )
         JsonConfigLoader._validate_val(cfg.val)
         JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
+        return cfg
+
+    @staticmethod
+    def _parse_experiment_or_default(
+        raw: Mapping[str, Any],
+        *,
+        task: str,
+        seed: int,
+    ) -> ExperimentConfig:
+        experiment_raw = raw.get("experiment")
+        if experiment_raw is not None:
+            return JsonConfigLoader._parse_experiment(dict(experiment_raw))
+        return ExperimentConfig(
+            name=task,
+            task=task,
+            mode="clip",
+            seed=seed,
+            device="cpu",
+            output_dir="checkpoints",
+        )
+
+    @staticmethod
+    def load_fsd50k_ssl(path: str | Path) -> Fsd50kSslRunConfig:
+        raw = JsonConfigLoader.load_json(path)
+        data_cfg = JsonConfigLoader._parse_fsd50k_data(
+            raw["data"],
+            expected_mode="ssl",
+        )
+        model_cfg = JsonConfigLoader._parse_model(
+            raw["model"],
+            JsonConfigLoader._compat_data_config_for_fsd50k(data_cfg),
+        )
+        task = str(raw.get("task", "fsd50k_masked_fbank_ssl"))
+        cfg = Fsd50kSslRunConfig(
+            task=task,
+            experiment=JsonConfigLoader._parse_experiment_or_default(
+                raw,
+                task=task,
+                seed=data_cfg.split_seed,
+            ),
+            data=data_cfg,
+            model=model_cfg,
+            train=JsonConfigLoader._parse_fsd50k_ssl_train(raw["train"]),
+            ssl=JsonConfigLoader._parse_ssl_config(raw.get("ssl")),
+            checkpointing=JsonConfigLoader._parse_checkpointing(
+                raw.get("checkpointing")
+            ),
+        )
+        JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
+        return cfg
+
+    @staticmethod
+    def load_fsd50k_supervised(path: str | Path) -> Fsd50kSupervisedRunConfig:
+        raw = JsonConfigLoader.load_json(path)
+        data_cfg = JsonConfigLoader._parse_fsd50k_data(
+            raw["data"],
+            expected_mode="supervised",
+        )
+        model_cfg = JsonConfigLoader._parse_model(
+            raw["model"],
+            JsonConfigLoader._compat_data_config_for_fsd50k(data_cfg),
+        )
+        task = str(raw.get("task", "fsd50k_multilabel"))
+        cfg = Fsd50kSupervisedRunConfig(
+            task=task,
+            experiment=JsonConfigLoader._parse_experiment_or_default(
+                raw,
+                task=task,
+                seed=data_cfg.split_seed,
+            ),
+            data=data_cfg,
+            model=model_cfg,
+            train=JsonConfigLoader._parse_fsd50k_supervised_train(raw["train"]),
+            metrics=JsonConfigLoader._parse_fsd50k_metrics(raw.get("metrics")),
+            checkpointing=JsonConfigLoader._parse_checkpointing(
+                raw.get("checkpointing")
+            ),
+        )
+        JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
+        return cfg
+
+    @staticmethod
+    def load_cnuh_transfer_template(path: str | Path) -> CnuhTransferTemplateConfig:
+        raw = JsonConfigLoader.load_json(path)
+        transfer = dict(raw["transfer"])
+        freeze_modules_raw = transfer.get("freeze_modules")
+        if freeze_modules_raw is not None:
+            if not isinstance(freeze_modules_raw, Sequence) or isinstance(
+                freeze_modules_raw,
+                (str, bytes),
+            ):
+                raise TypeError("transfer.freeze_modules must be a list of strings")
+            transfer["freeze_modules"] = tuple(str(item) for item in freeze_modules_raw)
+        cfg = CnuhTransferTemplateConfig(
+            task=raw.get("task", "cnuh_4class"),
+            transfer=CnuhTransferConfig(**transfer),
+            optimizer=CnuhTransferOptimizerConfig(**dict(raw.get("optimizer", {}))),
+        )
+        if not cfg.transfer.checkpoint_path:
+            raise ValueError("transfer.checkpoint_path must not be empty")
+        if not isinstance(cfg.transfer.reset_classifier, bool):
+            raise ValueError("transfer.reset_classifier must be a boolean")
+        if not isinstance(cfg.transfer.freeze_encoder, bool):
+            raise ValueError("transfer.freeze_encoder must be a boolean")
+        if not isinstance(cfg.transfer.strict, bool):
+            raise ValueError("transfer.strict must be a boolean")
+        if cfg.optimizer.frozen_encoder_lr < 0:
+            raise ValueError("optimizer.frozen_encoder_lr must be non-negative")
+        if cfg.optimizer.body_lr <= 0:
+            raise ValueError("optimizer.body_lr must be greater than zero")
+        if cfg.optimizer.head_lr <= 0:
+            raise ValueError("optimizer.head_lr must be greater than zero")
         return cfg
 
     @staticmethod

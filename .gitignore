@@ -29,4 +29,3 @@ src/plots/*
 !src/plots/export.py
 checkpoints*/
 configs/*
-codex*.md

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
@@ -706,35 +707,58 @@ class MultiScalePatchStemAdapterEncoder(nn.Module):
             nn.init.normal_(position_embedding, std=PATCH_INIT_STD)
         nn.init.normal_(self.scale_embeddings, std=PATCH_INIT_STD)
 
-    def forward(self, x: Tensor) -> MultiScaleEncoderOutput:
-        branch_event_outputs: list[Tensor] = []
+    def _encode_branch(self, branch_index: int, x: Tensor) -> Tensor:
         batch_size = x.shape[0]
-        for branch_index, tokenizer in enumerate(self.patch_tokenizers):
-            branch_tokens = tokenizer(x)
-            branch_tokens = (
-                branch_tokens
-                + self.position_embeddings[branch_index]
-                + self.scale_embeddings[branch_index].view(1, 1, -1)
-            )
-            for block in self.shared_stem:
-                branch_tokens = block(branch_tokens)
-            branch_adapter = cast(nn.ModuleList, self.adapters[branch_index])
-            for block in branch_adapter:
-                branch_tokens = block(branch_tokens)
+        tokenizer = cast(PatchTokenizer, self.patch_tokenizers[branch_index])
+        branch_tokens = tokenizer(x)
+        branch_tokens = (
+            branch_tokens
+            + self.position_embeddings[branch_index]
+            + self.scale_embeddings[branch_index].view(1, 1, -1)
+        )
+        for block in self.shared_stem:
+            branch_tokens = block(branch_tokens)
+        branch_adapter = cast(nn.ModuleList, self.adapters[branch_index])
+        for block in branch_adapter:
+            branch_tokens = block(branch_tokens)
 
-            time_steps, freq_steps = self.branch_token_grids[branch_index]
-            branch_grid = branch_tokens.reshape(
-                batch_size,
-                time_steps,
-                freq_steps,
-                branch_tokens.shape[-1],
+        time_steps, freq_steps = self.branch_token_grids[branch_index]
+        branch_grid = branch_tokens.reshape(
+            batch_size,
+            time_steps,
+            freq_steps,
+            branch_tokens.shape[-1],
+        )
+        frequency_pooler = cast(
+            FrequencyAttentionPooler,
+            self.frequency_poolers[branch_index],
+        )
+        branch_event_tokens = frequency_pooler(branch_grid)
+        return self.output_norm(branch_event_tokens)
+
+    def forward_branch_inputs(
+        self, branch_inputs: Sequence[Tensor]
+    ) -> tuple[Tensor, ...]:
+        if len(branch_inputs) != len(self.patch_tokenizers):
+            raise ValueError(
+                "branch_inputs length must match patch branch count; "
+                f"got {len(branch_inputs)} expected {len(self.patch_tokenizers)}"
             )
-            frequency_pooler = cast(
-                FrequencyAttentionPooler,
-                self.frequency_poolers[branch_index],
-            )
-            branch_event_tokens = frequency_pooler(branch_grid)
-            branch_event_outputs.append(self.output_norm(branch_event_tokens))
+        branch_event_outputs: list[Tensor] = []
+        for branch_index, branch_input in enumerate(branch_inputs):
+            if branch_input.ndim != 4:
+                raise ValueError(
+                    "branch_inputs entries must have shape (B, 1, T, F), "
+                    f"got {tuple(branch_input.shape)}"
+                )
+            branch_event_outputs.append(self._encode_branch(branch_index, branch_input))
+        return tuple(branch_event_outputs)
+
+    def forward(self, x: Tensor) -> MultiScaleEncoderOutput:
+        branch_event_outputs = [
+            self._encode_branch(branch_index, x)
+            for branch_index in range(len(self.patch_tokenizers))
+        ]
 
         context_tokens = torch.cat(branch_event_outputs, dim=1)
         return MultiScaleEncoderOutput(
@@ -911,6 +935,32 @@ class MultiScaleRdtAstModel(nn.Module):
         if self.cfg.num_classes == 2:
             return torch.stack(branch_logits, dim=1)
         return torch.stack(branch_logits, dim=1)
+
+    def forward_branches_for_ssl(self, branch_inputs: list[Tensor]) -> list[Tensor]:
+        expected_shape = (
+            self.cfg.encoder.feature_dims.max_length,
+            self.cfg.encoder.feature_dims.num_mel_bins,
+        )
+        prepared_inputs: list[Tensor] = []
+        batch_size: int | None = None
+        for branch_input in branch_inputs:
+            if branch_input.ndim != 3:
+                raise ValueError(
+                    "SSL branch inputs must have shape (B, max_length, num_mel_bins), "
+                    f"got {tuple(branch_input.shape)}"
+                )
+            actual_shape = (int(branch_input.shape[1]), int(branch_input.shape[2]))
+            if actual_shape != expected_shape:
+                raise ValueError(
+                    "SSL branch input feature dims do not match model feature dims. "
+                    f"expected {expected_shape}, got {actual_shape}"
+                )
+            if batch_size is None:
+                batch_size = int(branch_input.shape[0])
+            elif int(branch_input.shape[0]) != batch_size:
+                raise ValueError("All SSL branch inputs must share the same batch size")
+            prepared_inputs.append(branch_input.unsqueeze(1))
+        return list(self.encoder.forward_branch_inputs(prepared_inputs))
 
     def forward(self, input_values: Tensor) -> AstModelOutput:
         if input_values.ndim != 3:

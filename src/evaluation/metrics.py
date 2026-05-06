@@ -63,6 +63,89 @@ class EvalMetrics:
         }
 
 
+@dataclass(frozen=True)
+class MultiLabelMetrics:
+    macro_AP: float
+    micro_AP: float
+    macro_f1_at_0_5: float
+    micro_f1_at_0_5: float
+    macro_recall_at_0_5: float
+    micro_recall_at_0_5: float
+    per_class_AP: list[float]
+    valid_ap_class_indices: list[int]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "macro_AP": self.macro_AP,
+            "micro_AP": self.micro_AP,
+            "macro_f1_at_0.5": self.macro_f1_at_0_5,
+            "micro_f1_at_0.5": self.micro_f1_at_0_5,
+            "macro_recall_at_0.5": self.macro_recall_at_0_5,
+            "micro_recall_at_0.5": self.micro_recall_at_0_5,
+            "per_class_AP": self.per_class_AP,
+            "valid_ap_class_indices": self.valid_ap_class_indices,
+        }
+
+
+class MultiLabelMetricsComputer:
+    @staticmethod
+    def compute(
+        y_true: np.ndarray,
+        y_prob: np.ndarray,
+        *,
+        threshold: float = 0.5,
+    ) -> MultiLabelMetrics:
+        if y_true.ndim != 2 or y_prob.ndim != 2:
+            raise ValueError("multi-label targets and probabilities must be 2D")
+        if y_true.shape != y_prob.shape:
+            raise ValueError(
+                "multi-label targets and probabilities must share shape; "
+                f"got y_true={y_true.shape} y_prob={y_prob.shape}"
+            )
+        per_class_ap: list[float] = []
+        valid_class_indices: list[int] = []
+        for class_index in range(y_true.shape[1]):
+            class_targets = y_true[:, class_index]
+            if float(class_targets.sum()) <= 0.0:
+                logger.warning(
+                    "Skipping class=%d for macro AP because validation has zero positives",
+                    class_index,
+                )
+                per_class_ap.append(float("nan"))
+                continue
+            per_class_ap.append(
+                float(average_precision_score(class_targets, y_prob[:, class_index]))
+            )
+            valid_class_indices.append(class_index)
+        if valid_class_indices:
+            macro_ap = float(np.nanmean(np.asarray(per_class_ap, dtype=np.float64)))
+        else:
+            macro_ap = float("nan")
+        try:
+            micro_ap = float(average_precision_score(y_true.ravel(), y_prob.ravel()))
+        except ValueError:
+            micro_ap = float("nan")
+        y_pred = (y_prob >= threshold).astype(np.int64)
+        return MultiLabelMetrics(
+            macro_AP=macro_ap,
+            micro_AP=micro_ap,
+            macro_f1_at_0_5=float(
+                f1_score(y_true, y_pred, average="macro", zero_division=0)
+            ),
+            micro_f1_at_0_5=float(
+                f1_score(y_true, y_pred, average="micro", zero_division=0)
+            ),
+            macro_recall_at_0_5=float(
+                recall_score(y_true, y_pred, average="macro", zero_division=0)
+            ),
+            micro_recall_at_0_5=float(
+                recall_score(y_true, y_pred, average="micro", zero_division=0)
+            ),
+            per_class_AP=per_class_ap,
+            valid_ap_class_indices=valid_class_indices,
+        )
+
+
 class MetricsComputer:
     @staticmethod
     def compute(

@@ -743,6 +743,53 @@ needed. Suffixes may be passed with or without a leading dot, matching is
 case-insensitive, and copied files overwrite existing target files with the same
 relative path.
 
+## FSD50K SSL and Supervised Pretraining
+
+This branch also supports a three-stage FSD50K-to-CNUH transfer workflow without
+changing the existing CNUH supervised entrypoints:
+
+1. FSD50K masked fbank SSL pretraining.
+2. FSD50K supervised multi-label fine-tuning.
+3. CNUH 4-class transfer with classifier reset.
+
+Stage 1 uses `configs/fsd50k_ssl_masked_fbank_pretrain.json`:
+
+```bash
+python -m src.cli.fsd50k_ssl_pretrain --config configs/fsd50k_ssl_masked_fbank_pretrain.json
+```
+
+The SSL path wraps the existing `multiscale_rdt_ast` model instead of changing
+`model.forward(...)`. Each branch samples masks on its own tokenizer grid,
+projects those selected token cells back to input-space fbank patches, and feeds
+that branch a branch-specific masked fbank. The decoder is a separate shallow
+Conv1d fbank decoder per branch. The SSL objective is only mean branch masked
+MSE; averaged reconstructions are available for debugging but are not used in
+the loss.
+
+Stage 2 uses `configs/fsd50k_supervised_multilabel_finetune.json`:
+
+```bash
+python -m src.cli.fsd50k_supervised_finetune --config configs/fsd50k_supervised_multilabel_finetune.json
+```
+
+The FSD50K supervised dataset is metadata-driven from `vocabulary.csv`,
+`dev.csv`, `eval.csv`, and configurable audio directories. It returns multi-hot
+targets and trains the full H0-style Event-MIL model with a `[B, 200]`
+multi-label head. Branch auxiliary and branch binary auxiliary losses are
+disabled for FSD50K supervised training. The loss is `BCEWithLogitsLoss` with
+train-derived `pos_weight = sqrt(negative / positive)` capped at `10`, and the
+checkpoint metadata stores the resolved weights and class labels. Validation
+monitors macro AP, micro AP, and loss; zero-positive validation classes are
+excluded from macro AP with a warning and retain `nan` per-class AP entries.
+
+Stage 3 starts from `configs/cnuh_4class_from_fsd50k_transfer_template.json`.
+The transfer utility loads an FSD50K supervised checkpoint with `strict=false`,
+filters the FSD50K classifier head when `reset_classifier=true`, and freezes the
+early encoder by default: patch tokenizers, position/scale embeddings, shared
+stem, scale-specific adapters, and frequency-attention poolers. Branch MIL,
+RDT, branch-aware gated evidence pooling, fusion, and the new CNUH classifier
+remain trainable.
+
 ## Notes
 
 - `src.cli.plot_mels` remains available as a utility.
