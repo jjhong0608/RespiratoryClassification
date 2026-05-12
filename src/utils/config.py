@@ -10,6 +10,7 @@ from src.evaluation.thresholds import ThresholdOptimizationConfig
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassifierBiasInitConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -425,10 +426,19 @@ class Fsd50kSupervisedTrainConfig:
 
 
 @dataclass(frozen=True)
+class Fsd50kTopKMetricsConfig:
+    enabled: bool = True
+    ks: tuple[int, ...] = (5, 10)
+    save_label_frequency: bool = True
+    top_n_frequency: int = 20
+
+
+@dataclass(frozen=True)
 class Fsd50kMetricsConfig:
     primary: Literal["macro_AP"] = "macro_AP"
     secondary: Literal["micro_AP"] = "micro_AP"
     f1_threshold: float = 0.5
+    topk: Fsd50kTopKMetricsConfig = field(default_factory=Fsd50kTopKMetricsConfig)
     save_per_class_AP: bool = True
     zero_positive_class_policy: Literal["exclude_with_warning"] = "exclude_with_warning"
 
@@ -585,6 +595,7 @@ class JsonConfigLoader:
     _BRANCH_BINARY_POS_WEIGHT_TYPES = {"sqrt_normal_over_abnormal"}
     _BRANCH_BINARY_AUXILIARY_SCHEDULE_TYPES = {"none", "cosine_floor"}
     _SAMPLER_TYPES = {"none", "sqrt_inverse_class"}
+    _CLASSIFIER_BIAS_INIT_TYPES = {"none", "prior", "weighted_prior"}
     _CHECKPOINT_MONITORS = {
         "val_macro_f1": {"max"},
         "val_macro_recall": {"max"},
@@ -1010,6 +1021,26 @@ class JsonConfigLoader:
         if cfg.pooling != "latent_mean":
             raise ValueError(
                 "model.classifier.pooling must be 'latent_mean' for this branch"
+            )
+        if not isinstance(cfg.bias_init.enabled, bool):
+            raise ValueError("model.classifier.bias_init.enabled must be a boolean")
+        if cfg.bias_init.type not in JsonConfigLoader._CLASSIFIER_BIAS_INIT_TYPES:
+            raise ValueError(
+                "model.classifier.bias_init.type must be one of "
+                f"{sorted(JsonConfigLoader._CLASSIFIER_BIAS_INIT_TYPES)}"
+            )
+        if cfg.bias_init.source != "train":
+            raise ValueError("model.classifier.bias_init.source must be 'train'")
+        if cfg.bias_init.eps <= 0:
+            raise ValueError("model.classifier.bias_init.eps must be greater than zero")
+        if cfg.bias_init.clamp_min >= cfg.bias_init.clamp_max:
+            raise ValueError(
+                "model.classifier.bias_init.clamp_min must be less than clamp_max"
+            )
+        if cfg.bias_init.enabled and cfg.bias_init.type == "none":
+            raise ValueError(
+                "model.classifier.bias_init.type must be 'prior' or "
+                "'weighted_prior' when enabled"
             )
 
     @staticmethod
@@ -1607,7 +1638,11 @@ class JsonConfigLoader:
         )
         encoder["architecture"] = MultiScaleRdtArchitectureConfig(**architecture)
         kwargs["encoder"] = ModelEncoderConfig(**encoder)
-        kwargs["classifier"] = ClassifierConfig(**dict(raw["classifier"]))
+        classifier = dict(raw["classifier"])
+        classifier["bias_init"] = ClassifierBiasInitConfig(
+            **dict(classifier.get("bias_init", {}))
+        )
+        kwargs["classifier"] = ClassifierConfig(**classifier)
         cfg = ModelConfig(**kwargs)
         JsonConfigLoader._validate_model(cfg, data_cfg)
         return cfg
@@ -1761,13 +1796,35 @@ class JsonConfigLoader:
 
     @staticmethod
     def _parse_fsd50k_metrics(raw: Mapping[str, Any] | None) -> Fsd50kMetricsConfig:
-        cfg = Fsd50kMetricsConfig(**dict(raw or {}))
+        kwargs = dict(raw or {})
+        topk_raw = kwargs.get("topk", {})
+        if not isinstance(topk_raw, Mapping):
+            raise ValueError("metrics.topk must be an object")
+        topk_kwargs = dict(topk_raw)
+        if "ks" in topk_kwargs:
+            raw_ks = topk_kwargs["ks"]
+            if not isinstance(raw_ks, (list, tuple)):
+                raise ValueError("metrics.topk.ks must be a list of positive integers")
+            topk_kwargs["ks"] = tuple(raw_ks)
+        kwargs["topk"] = Fsd50kTopKMetricsConfig(**topk_kwargs)
+        cfg = Fsd50kMetricsConfig(**kwargs)
         if cfg.primary != "macro_AP":
             raise ValueError("metrics.primary must be 'macro_AP'")
         if cfg.secondary != "micro_AP":
             raise ValueError("metrics.secondary must be 'micro_AP'")
         if not (0.0 < cfg.f1_threshold < 1.0):
             raise ValueError("metrics.f1_threshold must be within (0, 1)")
+        if type(cfg.topk.enabled) is not bool:
+            raise ValueError("metrics.topk.enabled must be a boolean")
+        if type(cfg.topk.save_label_frequency) is not bool:
+            raise ValueError("metrics.topk.save_label_frequency must be a boolean")
+        if not cfg.topk.ks:
+            raise ValueError("metrics.topk.ks must contain at least one value")
+        for k in cfg.topk.ks:
+            if type(k) is not int or k <= 0:
+                raise ValueError("metrics.topk.ks must contain positive integers")
+        if type(cfg.topk.top_n_frequency) is not int or cfg.topk.top_n_frequency <= 0:
+            raise ValueError("metrics.topk.top_n_frequency must be a positive integer")
         if cfg.zero_positive_class_policy != "exclude_with_warning":
             raise ValueError(
                 "metrics.zero_positive_class_policy must be 'exclude_with_warning'"

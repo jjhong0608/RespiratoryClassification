@@ -7,6 +7,7 @@ import torch
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassifierBiasInitConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -146,6 +147,13 @@ def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
             adaptation=EncoderAdaptationConfig(**dict(adaptation_raw)),
             architecture=MultiScaleRdtArchitectureConfig(**architecture_kwargs),
         ),
-        classifier=ClassifierConfig(**dict(classifier_raw)),
+        classifier=ClassifierConfig(
+            **{
+                **dict(classifier_raw),
+                "bias_init": ClassifierBiasInitConfig(
+                    **dict(classifier_raw.get("bias_init", {}))
+                ),
+            }
+        ),
         num_classes=num_classes_raw,
     )

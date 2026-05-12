@@ -680,6 +680,8 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.data.preprocessing.ast_fbank.max_length == 32
     assert cfg.model.encoder.type == "multiscale_rdt_ast"
     assert cfg.model.classifier.pooling == "latent_mean"
+    assert cfg.model.classifier.bias_init.enabled is False
+    assert cfg.model.classifier.bias_init.type == "none"
     assert cfg.model.encoder.architecture.rdt.enabled is True
     assert cfg.model.encoder.architecture.evidence_pooling.type == "mean"
     assert cfg.data.augmentation.enabled is False
@@ -727,6 +729,32 @@ def test_invalid_terminal_width_is_rejected(tmp_path: Path, width: object) -> No
     config_path = _write_json(tmp_path / "bad_terminal_width.json", payload)
 
     with pytest.raises(ValueError, match="terminal.width"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("bias_init", "match"),
+    [
+        ({"enabled": True, "type": "none"}, "bias_init.type"),
+        ({"enabled": True, "type": "unknown"}, "bias_init.type"),
+        ({"enabled": True, "source": "val"}, "bias_init.source"),
+        ({"enabled": True, "eps": 0.0}, "bias_init.eps"),
+        (
+            {"enabled": True, "clamp_min": 1.0, "clamp_max": 1.0},
+            "bias_init.clamp_min",
+        ),
+    ],
+)
+def test_invalid_classifier_bias_init_config_is_rejected(
+    tmp_path: Path,
+    bias_init: dict,
+    match: str,
+) -> None:
+    payload = _base_payload()
+    payload["model"]["classifier"]["bias_init"] = bias_init
+    config_path = _write_json(tmp_path / "bad_classifier_bias_init.json", payload)
+
+    with pytest.raises(ValueError, match=match):
         JsonConfigLoader.load_training(config_path)
 
 

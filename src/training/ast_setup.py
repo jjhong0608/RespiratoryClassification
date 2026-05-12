@@ -6,6 +6,7 @@ from torch.optim import AdamW
 
 from src.models.model import (
     AstFeatureDims,
+    ClassifierBiasInitConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     MultiScaleRdtArchitectureConfig,
@@ -92,6 +93,14 @@ def build_ast_model(
             hidden_dim=cfg.classifier.hidden_dim,
             dropout=cfg.classifier.dropout,
             pooling=cfg.classifier.pooling,
+            bias_init=ClassifierBiasInitConfig(
+                enabled=cfg.classifier.bias_init.enabled,
+                type=cfg.classifier.bias_init.type,
+                source=cfg.classifier.bias_init.source,
+                eps=cfg.classifier.bias_init.eps,
+                clamp_min=cfg.classifier.bias_init.clamp_min,
+                clamp_max=cfg.classifier.bias_init.clamp_max,
+            ),
         ),
         num_classes=num_classes,
     )

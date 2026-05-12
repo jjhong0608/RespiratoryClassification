@@ -14,10 +14,17 @@ from src.data.fsd50k_dataset import (
     build_fsd50k_dataset,
     parse_fsd50k_vocabulary,
 )
-from src.evaluation.metrics import MultiLabelMetricsComputer
+from src.evaluation.metrics import (
+    MultiLabelMetricsComputer,
+    multilabel_topk_metrics,
+    topk_label_frequency,
+    true_label_frequency,
+)
+from src.models.classifier import ClassifierDims, LinearClassifier, MlpClassifier
 from src.models.model import (
     AstFeatureDims,
     AstModelOutput,
+    ClassifierBiasInitConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -38,11 +45,17 @@ from src.models.ssl import (
     sample_token_mask,
     token_grid_to_fbank_mask,
 )
+from src.training.classifier_bias_init import (
+    apply_classifier_bias_init,
+    compute_classifier_bias_init,
+    find_final_classifier_linear,
+)
 from src.training.multilabel_trainer import (
     MultiLabelTrainer,
     MultiLabelTrainerConfig,
     compute_multilabel_probability_stats,
     compute_multilabel_target_stats,
+    compute_multilabel_topk_summary,
     compute_pos_weight_stats,
     compute_sqrt_neg_pos_multilabel_pos_weight,
 )
@@ -59,6 +72,7 @@ from src.utils.config import (
     AudioConfig,
     DataAugmentationConfig,
     Fsd50kDataConfig,
+    Fsd50kTopKMetricsConfig,
     JsonConfigLoader,
     PreprocessingConfig,
 )
@@ -333,6 +347,131 @@ def test_multilabel_model_and_pos_weight() -> None:
     assert torch.allclose(pos_weight, expected)
 
 
+def _targets_from_counts(
+    positive_counts: list[int],
+    *,
+    total_samples: int,
+) -> torch.Tensor:
+    targets = torch.zeros(total_samples, len(positive_counts), dtype=torch.float32)
+    for class_index, count in enumerate(positive_counts):
+        targets[:count, class_index] = 1.0
+    return targets
+
+
+def test_classifier_bias_init_formulas_and_clamping() -> None:
+    train_targets = _targets_from_counts([100, 1000], total_samples=10000)
+    pos_weight = torch.tensor([10.0, 3.0])
+    cfg = ClassifierBiasInitConfig(
+        enabled=True,
+        type="weighted_prior",
+        eps=1e-6,
+        clamp_min=-100.0,
+        clamp_max=100.0,
+    )
+
+    bias, metadata = compute_classifier_bias_init(
+        train_targets=train_targets,
+        pos_weight=pos_weight,
+        cfg=cfg,
+        class_names=("rare", "common"),
+    )
+
+    expected = torch.log(
+        (pos_weight * torch.tensor([100.0, 1000.0]) + cfg.eps)
+        / (torch.tensor([9900.0, 9000.0]) + cfg.eps)
+    )
+    assert torch.allclose(bias, expected)
+    assert metadata["type"] == "weighted_prior"
+    assert metadata["class_examples"][0]["class_name"] == "rare"
+
+    prior_cfg = ClassifierBiasInitConfig(
+        enabled=True,
+        type="prior",
+        eps=1e-6,
+        clamp_min=-100.0,
+        clamp_max=100.0,
+    )
+    prior_bias, _ = compute_classifier_bias_init(
+        train_targets=train_targets,
+        pos_weight=pos_weight,
+        cfg=prior_cfg,
+    )
+    prior_expected = torch.log(
+        (torch.tensor([100.0, 1000.0]) + prior_cfg.eps)
+        / (torch.tensor([9900.0, 9000.0]) + prior_cfg.eps)
+    )
+    assert torch.allclose(prior_bias, prior_expected)
+
+    clamped_cfg = ClassifierBiasInitConfig(
+        enabled=True,
+        type="prior",
+        eps=1e-6,
+        clamp_min=-1.0,
+        clamp_max=1.0,
+    )
+    clamped_bias, clamped_metadata = compute_classifier_bias_init(
+        train_targets=_targets_from_counts([1, 9999], total_samples=10000),
+        pos_weight=pos_weight,
+        cfg=clamped_cfg,
+    )
+    assert torch.all(clamped_bias >= -1.0)
+    assert torch.all(clamped_bias <= 1.0)
+    assert clamped_metadata["num_clamped_min"] == 1
+    assert clamped_metadata["num_clamped_max"] == 1
+
+
+def test_classifier_bias_init_applies_only_to_final_classifier_layer() -> None:
+    bias = torch.linspace(-2.0, 2.0, steps=200)
+    linear_classifier = LinearClassifier(
+        ClassifierDims(in_dim=16, num_classes=200, hidden_dim=16)
+    )
+    assert linear_classifier.proj.bias is not None
+    linear_weight_before = linear_classifier.proj.weight.detach().clone()
+
+    target_name = apply_classifier_bias_init(
+        linear_classifier,
+        bias=bias,
+        num_classes=200,
+    )
+
+    assert target_name == "proj"
+    assert torch.allclose(linear_classifier.proj.bias, bias)
+    assert torch.allclose(linear_classifier.proj.weight, linear_weight_before)
+
+    mlp_classifier = MlpClassifier(
+        ClassifierDims(in_dim=16, num_classes=200, hidden_dim=32)
+    )
+    first_linear = mlp_classifier.net[0]
+    assert isinstance(first_linear, nn.Linear)
+    assert first_linear.bias is not None
+    first_weight_before = first_linear.weight.detach().clone()
+    first_bias_before = first_linear.bias.detach().clone()
+
+    target_name = apply_classifier_bias_init(
+        mlp_classifier,
+        bias=bias,
+        num_classes=200,
+    )
+
+    assert target_name == "net.3"
+    final_linear = mlp_classifier.net[3]
+    assert isinstance(final_linear, nn.Linear)
+    assert final_linear.bias is not None
+    assert torch.allclose(final_linear.bias, bias)
+    assert torch.allclose(first_linear.weight, first_weight_before)
+    assert torch.allclose(first_linear.bias, first_bias_before)
+
+
+def test_classifier_bias_init_rejects_ambiguous_final_classifier() -> None:
+    classifier = nn.Sequential(
+        nn.Linear(8, 200),
+        nn.Linear(200, 200),
+    )
+
+    with pytest.raises(ValueError, match="Expected exactly one"):
+        find_final_classifier_linear(classifier, num_classes=200)
+
+
 def test_multilabel_monitoring_stats_helpers() -> None:
     train_targets = torch.tensor(
         [
@@ -417,6 +556,80 @@ def test_multilabel_metrics_exclude_zero_positive_classes(
     assert "zero positives" in caplog.text
 
 
+def test_multilabel_topk_metrics_correctness_and_validation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    y_true = torch.tensor(
+        [
+            [1, 0, 1, 0, 0],
+            [0, 1, 0, 0, 1],
+        ],
+        dtype=torch.float32,
+    )
+    y_score = torch.tensor(
+        [
+            [0.9, 0.8, 0.7, 0.1, 0.0],
+            [0.6, 0.5, 0.4, 0.3, 0.2],
+        ],
+        dtype=torch.float32,
+    )
+
+    metrics = multilabel_topk_metrics(y_true, y_score, ks=(1, 3, 10))
+
+    assert metrics["hit_at_1"] == pytest.approx(0.5)
+    assert metrics["recall_at_1"] == pytest.approx(0.25)
+    assert metrics["hit_at_3"] == pytest.approx(1.0)
+    assert metrics["recall_at_3"] == pytest.approx(0.75)
+    assert metrics["hit_at_10"] == pytest.approx(1.0)
+    assert metrics["recall_at_10"] == pytest.approx(1.0)
+
+    with pytest.raises(ValueError, match="shape"):
+        multilabel_topk_metrics(y_true[0], y_score[0])
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        multilabel_topk_metrics(y_true, y_score[:, :4])
+
+    with_empty = torch.cat([y_true, torch.zeros(1, 5)], dim=0)
+    scores_with_empty = torch.cat([y_score, torch.ones(1, 5)], dim=0)
+    empty_metrics = multilabel_topk_metrics(with_empty, scores_with_empty, ks=(1,))
+    assert empty_metrics["hit_at_1"] == pytest.approx(0.5)
+    assert "empty-label samples" in caplog.text
+
+
+def test_topk_label_frequency_helpers_attach_class_names() -> None:
+    y_score = torch.tensor(
+        [
+            [0.9, 0.8, 0.1, 0.0],
+            [0.7, 0.2, 0.6, 0.1],
+        ],
+        dtype=torch.float32,
+    )
+    y_true = torch.tensor(
+        [
+            [1, 0, 1, 0],
+            [0, 0, 1, 1],
+        ],
+        dtype=torch.float32,
+    )
+    class_names = ("a", "b", "c", "d")
+
+    top1 = topk_label_frequency(y_score, class_names, k=1, top_n=3)
+    assert top1 == [{"class_index": 0, "class_name": "a", "count": 2}]
+
+    true_top = true_label_frequency(y_true, class_names, top_n=2)
+    assert true_top[0] == {"class_index": 2, "class_name": "c", "count": 2}
+    assert true_top[1]["count"] == 1
+
+    summary = compute_multilabel_topk_summary(
+        y_score.numpy(),
+        y_true.numpy(),
+        cfg=Fsd50kTopKMetricsConfig(ks=(1, 3), top_n_frequency=2),
+        class_names=class_names,
+    )
+    assert summary["topk_metrics"]["hit_at_1"] == pytest.approx(0.5)
+    assert "top5_label_frequency" in summary
+    assert "true_label_frequency_top20" in summary
+
+
 def test_ssl_checkpoint_loads_into_supervised_model_and_transfer_freezes(
     tmp_path: Path,
 ) -> None:
@@ -497,12 +710,65 @@ def test_new_fsd50k_configs_parse() -> None:
     assert ssl_cfg.terminal.width is None
     assert supervised_cfg.train.loss.branch_auxiliary.enabled is False
     assert supervised_cfg.train.loss.branch_binary_auxiliary.enabled is False
-    assert supervised_cfg.terminal.width is None
-    assert supervised_cfg.analysis.outputs.save_logits is False
-    assert supervised_cfg.analysis.outputs.save_probabilities is False
+    assert supervised_cfg.model.classifier.bias_init.enabled is True
+    assert supervised_cfg.model.classifier.bias_init.type == "weighted_prior"
+    assert supervised_cfg.metrics.topk.enabled is True
+    assert supervised_cfg.metrics.topk.ks == (5, 10)
+    assert supervised_cfg.metrics.topk.save_label_frequency is True
+    assert supervised_cfg.metrics.topk.top_n_frequency == 20
+    assert supervised_cfg.terminal.width == 250
+    assert supervised_cfg.analysis.outputs.save_logits is True
+    assert supervised_cfg.analysis.outputs.save_probabilities is True
     assert supervised_cfg.analysis.outputs.save_embeddings is False
     assert supervised_cfg.analysis.outputs.save_clip_metadata is True
     assert transfer_cfg.transfer.reset_classifier is True
+
+
+@pytest.mark.parametrize(
+    ("topk_payload", "match"),
+    [
+        ({"enabled": "yes"}, "metrics.topk.enabled"),
+        ({"ks": []}, "metrics.topk.ks"),
+        ({"ks": [5, 0]}, "metrics.topk.ks"),
+        ({"ks": [5, True]}, "metrics.topk.ks"),
+        ({"save_label_frequency": 1}, "metrics.topk.save_label_frequency"),
+        ({"top_n_frequency": 0}, "metrics.topk.top_n_frequency"),
+    ],
+)
+def test_invalid_fsd50k_topk_metrics_config_is_rejected(
+    tmp_path: Path,
+    topk_payload: dict,
+    match: str,
+) -> None:
+    payload = json.loads(
+        Path("configs/fsd50k_supervised_multilabel_finetune.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    payload["metrics"]["topk"] = topk_payload
+    config_path = tmp_path / "bad_fsd50k_topk.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        JsonConfigLoader.load_fsd50k_supervised(config_path)
+
+
+def test_fsd50k_topk_metrics_config_defaults_when_omitted(tmp_path: Path) -> None:
+    payload = json.loads(
+        Path("configs/fsd50k_supervised_multilabel_finetune.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    del payload["metrics"]["topk"]
+    config_path = tmp_path / "fsd50k_without_topk.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    cfg = JsonConfigLoader.load_fsd50k_supervised(config_path)
+
+    assert cfg.metrics.topk.enabled is True
+    assert cfg.metrics.topk.ks == (5, 10)
+    assert cfg.metrics.topk.save_label_frequency is True
+    assert cfg.metrics.topk.top_n_frequency == 20
 
 
 def _multilabel_batch() -> Fsd50kBatch:
@@ -552,10 +818,19 @@ def test_multilabel_trainer_writes_validation_diagnostics(tmp_path: Path) -> Non
         _single_batch_loader(),
         _single_batch_loader(),
         optimizer,
+        extra_state={
+            "classifier_bias_init": {
+                "enabled": True,
+                "type": "weighted_prior",
+                "values": [0.0, 0.1, 0.2],
+            }
+        },
     )
 
     diagnostics_path = tmp_path / "diagnostics" / "val_epoch_001.jsonl"
+    diagnostics_summary_path = tmp_path / "diagnostics" / "val_epoch_001_summary.json"
     assert diagnostics_path.exists()
+    assert diagnostics_summary_path.exists()
     rows = [
         json.loads(line)
         for line in diagnostics_path.read_text(encoding="utf-8").splitlines()
@@ -565,6 +840,13 @@ def test_multilabel_trainer_writes_validation_diagnostics(tmp_path: Path) -> Non
     assert "top5_label_names" in rows[0]
     assert "logits" not in rows[0]
     assert "probabilities" not in rows[0]
+    summary = json.loads(diagnostics_summary_path.read_text(encoding="utf-8"))
+    assert summary["record_type"] == "summary"
+    assert summary["epoch"] == 1
+    assert "hit_at_5" in summary["topk_metrics"]
+    assert "top5_label_frequency" in summary
+    assert "top10_label_frequency" in summary
+    assert "true_label_frequency_top20" in summary
     checkpoint = torch.load(
         tmp_path / "last.pt", map_location="cpu", weights_only=False
     )
@@ -573,6 +855,12 @@ def test_multilabel_trainer_writes_validation_diagnostics(tmp_path: Path) -> Non
     assert (
         "mean_predicted_positives_at_0_5" in checkpoint["current_val_probability_stats"]
     )
+    assert "hit_at_5" in checkpoint["val_metrics"][0]
+    assert "val_hit_at_5" in checkpoint
+    assert len(checkpoint["val_topk_summaries"]) == 1
+    assert checkpoint["current_val_topk_summary"]["topk_metrics"]["hit_at_5"] == 1.0
+    assert checkpoint["diagnostics_summary_path"] == str(diagnostics_summary_path)
+    assert checkpoint["classifier_bias_init"]["type"] == "weighted_prior"
 
 
 def test_multilabel_trainer_skips_diagnostics_when_outputs_disabled(
@@ -609,3 +897,8 @@ def test_multilabel_trainer_skips_diagnostics_when_outputs_disabled(
     )
 
     assert not (tmp_path / "diagnostics").exists()
+    checkpoint = torch.load(
+        tmp_path / "last.pt", map_location="cpu", weights_only=False
+    )
+    assert "hit_at_5" in checkpoint["current_val_topk_summary"]["topk_metrics"]
+    assert checkpoint["diagnostics_summary_path"] is None

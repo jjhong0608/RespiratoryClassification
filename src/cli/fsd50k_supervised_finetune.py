@@ -3,9 +3,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from src.data.fsd50k_dataset import build_fsd50k_dataset, build_fsd50k_loader
 from src.training.ast_setup import build_ast_model, summarize_model_architecture
+from src.training.classifier_bias_init import (
+    apply_classifier_bias_init,
+    compute_classifier_bias_init,
+)
 from src.training.multilabel_trainer import (
     MultiLabelTrainer,
     MultiLabelTrainerConfig,
@@ -123,6 +128,55 @@ def main() -> None:
         pos_weight_stats["pos_weight_max"],
         pos_weight_stats["num_capped_classes"],
     )
+    classifier_bias_init_summary: dict[str, Any] = {"enabled": False}
+    if cfg.model.classifier.bias_init.enabled:
+        bias, classifier_bias_init_summary = compute_classifier_bias_init(
+            train_targets=train_targets,
+            pos_weight=pos_weight,
+            cfg=cfg.model.classifier.bias_init,
+            class_names=tuple(train_dataset.vocabulary.index_to_label),
+        )
+        classifier_layer_name = apply_classifier_bias_init(
+            model.classifier,
+            bias=bias,
+            num_classes=train_dataset.num_classes,
+        )
+        classifier_bias_init_summary["target_module"] = (
+            f"classifier.{classifier_layer_name}"
+            if classifier_layer_name
+            else "classifier"
+        )
+        if classifier_bias_init_summary["num_zero_positive_classes"] > 0:
+            logger.warning(
+                "FSD50K classifier bias init found %d train classes with zero positives",
+                classifier_bias_init_summary["num_zero_positive_classes"],
+            )
+        logger.info(
+            "FSD50K classifier bias init | enabled=%s | type=%s | source=%s | "
+            "eps=%.8g | clamp=[%.4f, %.4f] | target=%s",
+            classifier_bias_init_summary["enabled"],
+            classifier_bias_init_summary["type"],
+            classifier_bias_init_summary["source"],
+            classifier_bias_init_summary["eps"],
+            classifier_bias_init_summary["clamp_min"],
+            classifier_bias_init_summary["clamp_max"],
+            classifier_bias_init_summary["target_module"],
+        )
+        logger.info(
+            "FSD50K classifier bias init stats | positive_counts=%s | "
+            "negative_counts=%s | pos_weight=%s | bias=%s | "
+            "num_clamped_min=%d | num_clamped_max=%d",
+            classifier_bias_init_summary["positive_count_stats"],
+            classifier_bias_init_summary["negative_count_stats"],
+            classifier_bias_init_summary["pos_weight_stats"],
+            classifier_bias_init_summary["bias_stats"],
+            classifier_bias_init_summary["num_clamped_min"],
+            classifier_bias_init_summary["num_clamped_max"],
+        )
+        logger.info(
+            "FSD50K classifier bias init examples | %s",
+            classifier_bias_init_summary["class_examples"],
+        )
     optimizer, optimizer_summary = build_fsd50k_multilabel_optimizer(
         model,
         encoder_lr=cfg.train.optimizer.encoder_lr,
@@ -153,6 +207,7 @@ def main() -> None:
             threshold=cfg.metrics.f1_threshold,
             analysis=cfg.analysis,
             class_names=tuple(train_dataset.vocabulary.index_to_label),
+            topk=cfg.metrics.topk,
             checkpointing=cfg.checkpointing,
             terminal_width=cfg.terminal.width,
         ),
@@ -178,6 +233,7 @@ def main() -> None:
             "pos_weight": pos_weight.cpu().tolist(),
             "pos_weight_stats": pos_weight_stats,
             "target_stats": target_stats,
+            "classifier_bias_init": classifier_bias_init_summary,
             "class_positive_counts": train_targets.sum(dim=0).cpu().tolist(),
         },
     )

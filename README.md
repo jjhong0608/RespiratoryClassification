@@ -810,6 +810,20 @@ checkpoint metadata stores the resolved weights and class labels. Validation
 monitors macro AP, micro AP, and loss; zero-positive validation classes are
 excluded from macro AP with a warning and retain `nan` per-class AP entries.
 
+The FSD50K supervised config also enables final-classifier bias initialization
+with `model.classifier.bias_init.type="weighted_prior"`. This is applied only to
+the final `[B, 200]` classifier head after SSL-compatible weights are loaded and
+before optimizer construction. It uses train-split positive/negative counts and
+the same `pos_weight` tensor passed to `BCEWithLogitsLoss`:
+
+```text
+b_c = log((pos_weight_c * positive_count_c + eps) / (negative_count_c + eps))
+```
+
+The initialized bias is clamped by the configured bounds and saved in checkpoint
+metadata. This should reduce the initial multi-label probability collapse near
+`0.5`; it is not expected to make first-epoch `F1@0.5` high by itself.
+
 Stage 3 starts from `configs/cnuh_4class_from_fsd50k_transfer_template.json`.
 The transfer utility loads an FSD50K supervised checkpoint with `strict=false`,
 filters the FSD50K classifier head when `reset_classifier=true`, and freezes the

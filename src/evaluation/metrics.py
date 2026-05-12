@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import torch
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -73,9 +76,13 @@ class MultiLabelMetrics:
     micro_recall_at_0_5: float
     per_class_AP: list[float]
     valid_ap_class_indices: list[int]
+    hit_at_5: float | None = None
+    hit_at_10: float | None = None
+    recall_at_5: float | None = None
+    recall_at_10: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        metrics: dict[str, Any] = {
             "macro_AP": self.macro_AP,
             "micro_AP": self.micro_AP,
             "macro_f1_at_0.5": self.macro_f1_at_0_5,
@@ -85,6 +92,124 @@ class MultiLabelMetrics:
             "per_class_AP": self.per_class_AP,
             "valid_ap_class_indices": self.valid_ap_class_indices,
         }
+        if self.hit_at_5 is not None:
+            metrics["hit_at_5"] = self.hit_at_5
+        if self.hit_at_10 is not None:
+            metrics["hit_at_10"] = self.hit_at_10
+        if self.recall_at_5 is not None:
+            metrics["recall_at_5"] = self.recall_at_5
+        if self.recall_at_10 is not None:
+            metrics["recall_at_10"] = self.recall_at_10
+        return metrics
+
+
+def multilabel_topk_metrics(
+    y_true: torch.Tensor,
+    y_score: torch.Tensor,
+    *,
+    ks: tuple[int, ...] = (5, 10),
+) -> dict[str, float]:
+    if y_true.ndim != 2 or y_score.ndim != 2:
+        raise ValueError("Expected y_true and y_score to have shape [N, C].")
+    if y_true.shape != y_score.shape:
+        raise ValueError(
+            f"Shape mismatch: y_true={tuple(y_true.shape)}, "
+            f"y_score={tuple(y_score.shape)}"
+        )
+    if any(type(k) is not int or k <= 0 for k in ks):
+        raise ValueError("top-k values must be positive integers")
+
+    y_true_bool = y_true.detach().cpu().bool()
+    scores = y_score.detach().cpu().to(dtype=torch.float32)
+    true_counts = y_true_bool.sum(dim=1)
+    valid_samples = true_counts > 0
+    if not bool(valid_samples.all()):
+        skipped = int((~valid_samples).sum().item())
+        logger.warning(
+            "Excluding %d empty-label samples from multi-label top-k metrics",
+            skipped,
+        )
+        y_true_bool = y_true_bool[valid_samples]
+        scores = scores[valid_samples]
+        true_counts = true_counts[valid_samples]
+    if y_true_bool.shape[0] == 0:
+        return {
+            key: float("nan") for k in ks for key in (f"hit_at_{k}", f"recall_at_{k}")
+        }
+
+    _, num_classes = y_true_bool.shape
+    metrics: dict[str, float] = {}
+    for k in ks:
+        k_eff = min(int(k), int(num_classes))
+        topk_idx = torch.topk(scores, k=k_eff, dim=1).indices
+        pred_topk = torch.zeros_like(y_true_bool, dtype=torch.bool)
+        pred_topk.scatter_(dim=1, index=topk_idx, value=True)
+        hits_per_sample = (pred_topk & y_true_bool).sum(dim=1)
+        metrics[f"hit_at_{k}"] = float((hits_per_sample > 0).float().mean().item())
+        metrics[f"recall_at_{k}"] = float(
+            (hits_per_sample.float() / true_counts.float().clamp_min(1.0)).mean().item()
+        )
+    return metrics
+
+
+def _label_name(index: int, index_to_label: Sequence[str] | None) -> str:
+    if index_to_label is not None and index < len(index_to_label):
+        return index_to_label[index]
+    return str(index)
+
+
+def topk_label_frequency(
+    y_score: torch.Tensor,
+    index_to_label: Sequence[str] | None,
+    *,
+    k: int = 5,
+    top_n: int = 20,
+) -> list[dict[str, Any]]:
+    if y_score.ndim != 2:
+        raise ValueError(f"y_score must have shape [N, C], got {tuple(y_score.shape)}")
+    if type(k) is not int or k <= 0:
+        raise ValueError("k must be a positive integer")
+    if type(top_n) is not int or top_n <= 0:
+        raise ValueError("top_n must be a positive integer")
+
+    _, num_classes = y_score.shape
+    k_eff = min(int(k), int(num_classes))
+    topk_idx = torch.topk(y_score.detach().cpu(), k=k_eff, dim=1).indices
+    counter: Counter[int] = Counter()
+    for row in topk_idx:
+        for index in row.tolist():
+            counter[int(index)] += 1
+    return [
+        {
+            "class_index": int(index),
+            "class_name": _label_name(int(index), index_to_label),
+            "count": int(count),
+        }
+        for index, count in counter.most_common(int(top_n))
+    ]
+
+
+def true_label_frequency(
+    y_true: torch.Tensor,
+    index_to_label: Sequence[str] | None,
+    *,
+    top_n: int = 20,
+) -> list[dict[str, Any]]:
+    if y_true.ndim != 2:
+        raise ValueError(f"y_true must have shape [N, C], got {tuple(y_true.shape)}")
+    if type(top_n) is not int or top_n <= 0:
+        raise ValueError("top_n must be a positive integer")
+
+    counts = y_true.detach().cpu().to(dtype=torch.float32).sum(dim=0)
+    sorted_indices = torch.argsort(counts, descending=True)[: int(top_n)]
+    return [
+        {
+            "class_index": int(index),
+            "class_name": _label_name(int(index), index_to_label),
+            "count": int(counts[int(index)].item()),
+        }
+        for index in sorted_indices.tolist()
+    ]
 
 
 class MultiLabelMetricsComputer:
@@ -94,6 +219,7 @@ class MultiLabelMetricsComputer:
         y_prob: np.ndarray,
         *,
         threshold: float = 0.5,
+        topk_ks: tuple[int, ...] = (5, 10),
     ) -> MultiLabelMetrics:
         if y_true.ndim != 2 or y_prob.ndim != 2:
             raise ValueError("multi-label targets and probabilities must be 2D")
@@ -126,6 +252,15 @@ class MultiLabelMetricsComputer:
         except ValueError:
             micro_ap = float("nan")
         y_pred = (y_prob >= threshold).astype(np.int64)
+        topk_metrics = (
+            multilabel_topk_metrics(
+                torch.as_tensor(y_true),
+                torch.as_tensor(y_prob),
+                ks=topk_ks,
+            )
+            if topk_ks
+            else {}
+        )
         return MultiLabelMetrics(
             macro_AP=macro_ap,
             micro_AP=micro_ap,
@@ -143,6 +278,10 @@ class MultiLabelMetricsComputer:
             ),
             per_class_AP=per_class_ap,
             valid_ap_class_indices=valid_class_indices,
+            hit_at_5=topk_metrics.get("hit_at_5"),
+            hit_at_10=topk_metrics.get("hit_at_10"),
+            recall_at_5=topk_metrics.get("recall_at_5"),
+            recall_at_10=topk_metrics.get("recall_at_10"),
         )
 
 

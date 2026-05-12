@@ -282,3 +282,12 @@ def write_diagnostics_jsonl(rows: list[dict[str, Any]], out_path: str | Path) ->
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=True) + "\n")
     return path
+
+
+def write_diagnostics_json(payload: dict[str, Any], out_path: str | Path) -> Path:
+    path = Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=True, indent=2)
+        handle.write("\n")
+    return path

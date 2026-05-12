@@ -13,13 +13,24 @@ from torch.utils.data import DataLoader
 from src.data.fsd50k_dataset import Fsd50kBatch
 from src.evaluation.diagnostics import (
     build_multilabel_diagnostic_rows,
+    write_diagnostics_json,
     write_diagnostics_jsonl,
 )
-from src.evaluation.metrics import MultiLabelMetrics, MultiLabelMetricsComputer
+from src.evaluation.metrics import (
+    MultiLabelMetrics,
+    MultiLabelMetricsComputer,
+    multilabel_topk_metrics,
+    topk_label_frequency,
+    true_label_frequency,
+)
 from src.models.model import AstModelOutput
 from src.training.scheduler import WarmupCosineScheduler
 from src.training.trainer import CheckpointManager
-from src.utils.config import AnalysisConfig, CheckpointingConfig
+from src.utils.config import (
+    AnalysisConfig,
+    CheckpointingConfig,
+    Fsd50kTopKMetricsConfig,
+)
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
 from src.utils.progress import iter_progress
@@ -35,6 +46,7 @@ class MultiLabelTrainerConfig:
     threshold: float = 0.5
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     class_names: tuple[str, ...] = ()
+    topk: Fsd50kTopKMetricsConfig = field(default_factory=Fsd50kTopKMetricsConfig)
     checkpointing: CheckpointingConfig | None = None
     terminal_width: int | None = None
 
@@ -47,6 +59,7 @@ class MultiLabelEpochResult:
     targets: np.ndarray
     diagnostics: list[dict[str, Any]]
     probability_stats: dict[str, float]
+    topk_summary: dict[str, Any]
 
 
 def compute_sqrt_neg_pos_multilabel_pos_weight(
@@ -193,6 +206,40 @@ def compute_pos_weight_stats(
     }
 
 
+def compute_multilabel_topk_summary(
+    probabilities: np.ndarray,
+    targets: np.ndarray,
+    *,
+    cfg: Fsd50kTopKMetricsConfig,
+    class_names: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    if not cfg.enabled:
+        return {}
+    prob_tensor = torch.as_tensor(probabilities, dtype=torch.float32)
+    target_tensor = torch.as_tensor(targets, dtype=torch.float32)
+    topk_metrics = multilabel_topk_metrics(target_tensor, prob_tensor, ks=cfg.ks)
+    summary: dict[str, Any] = {"topk_metrics": topk_metrics}
+    if cfg.save_label_frequency:
+        summary["top5_label_frequency"] = topk_label_frequency(
+            prob_tensor,
+            class_names,
+            k=5,
+            top_n=cfg.top_n_frequency,
+        )
+        summary["top10_label_frequency"] = topk_label_frequency(
+            prob_tensor,
+            class_names,
+            k=10,
+            top_n=cfg.top_n_frequency,
+        )
+        summary["true_label_frequency_top20"] = true_label_frequency(
+            target_tensor,
+            class_names,
+            top_n=cfg.top_n_frequency,
+        )
+    return summary
+
+
 def _analysis_outputs_enabled(cfg: AnalysisConfig) -> bool:
     outputs = cfg.outputs
     return (
@@ -275,8 +322,15 @@ class MultiLabelTrainer(LoggingMixin):
             target_arr,
             prob_arr,
             threshold=self.cfg.threshold,
+            topk_ks=self.cfg.topk.ks if self.cfg.topk.enabled else (),
         )
         probability_stats = compute_multilabel_probability_stats(prob_arr, target_arr)
+        topk_summary = compute_multilabel_topk_summary(
+            prob_arr,
+            target_arr,
+            cfg=self.cfg.topk,
+            class_names=self.cfg.class_names,
+        )
         return MultiLabelEpochResult(
             loss=total_loss / float(total_examples),
             metrics=metrics,
@@ -284,6 +338,7 @@ class MultiLabelTrainer(LoggingMixin):
             targets=target_arr,
             diagnostics=diagnostics,
             probability_stats=probability_stats,
+            topk_summary=topk_summary,
         )
 
     def fit(
@@ -305,6 +360,7 @@ class MultiLabelTrainer(LoggingMixin):
         train_metrics: list[dict[str, Any]] = []
         val_metrics: list[dict[str, Any]] = []
         val_probability_stats_history: list[dict[str, float]] = []
+        val_topk_summary_history: list[dict[str, Any]] = []
         for epoch in range(1, self.cfg.epochs + 1):
             model.train()
             train_result = self._epoch(
@@ -330,6 +386,7 @@ class MultiLabelTrainer(LoggingMixin):
             train_metrics.append(train_result.metrics.to_dict())
             val_metrics.append(val_result.metrics.to_dict())
             val_probability_stats_history.append(val_result.probability_stats)
+            val_topk_summary_history.append(val_result.topk_summary)
             self.logger.info(
                 "Epoch %d/%d | Train Loss: %.6f | Val Loss: %.6f | "
                 "Val macro AP: %.6f | Val micro AP: %.6f | Val macro F1@0.5: %.6f",
@@ -357,13 +414,56 @@ class MultiLabelTrainer(LoggingMixin):
                 val_result.probability_stats["mean_predicted_positives_at_0_1"],
                 val_result.probability_stats["mean_true_positives"],
             )
+            topk_metrics = val_result.topk_summary.get("topk_metrics", {})
+            if topk_metrics:
+                self.logger.info(
+                    "FSD50K top-k metrics | epoch=%d | hit@5=%.6f | "
+                    "hit@10=%.6f | recall@5=%.6f | recall@10=%.6f",
+                    epoch,
+                    topk_metrics.get("hit_at_5", float("nan")),
+                    topk_metrics.get("hit_at_10", float("nan")),
+                    topk_metrics.get("recall_at_5", float("nan")),
+                    topk_metrics.get("recall_at_10", float("nan")),
+                )
+            if val_result.topk_summary.get("top5_label_frequency") is not None:
+                self.logger.info(
+                    "FSD50K top5 label frequency | epoch=%d | %s",
+                    epoch,
+                    val_result.topk_summary["top5_label_frequency"],
+                )
+                self.logger.info(
+                    "FSD50K top10 label frequency | epoch=%d | %s",
+                    epoch,
+                    val_result.topk_summary["top10_label_frequency"],
+                )
+                self.logger.info(
+                    "FSD50K true label frequency top20 | epoch=%d | %s",
+                    epoch,
+                    val_result.topk_summary["true_label_frequency_top20"],
+                )
             diagnostics_path = None
+            diagnostics_summary_path = None
             if val_result.diagnostics:
                 diagnostics_path = write_diagnostics_jsonl(
                     val_result.diagnostics,
                     self.cfg.run_dir / "diagnostics" / f"val_epoch_{epoch:03d}.jsonl",
                 )
                 self.logger.info("Saved validation diagnostics: %s", diagnostics_path)
+                if val_result.topk_summary:
+                    diagnostics_summary_path = write_diagnostics_json(
+                        {
+                            "record_type": "summary",
+                            "epoch": epoch,
+                            **val_result.topk_summary,
+                        },
+                        self.cfg.run_dir
+                        / "diagnostics"
+                        / f"val_epoch_{epoch:03d}_summary.json",
+                    )
+                    self.logger.info(
+                        "Saved validation diagnostics summary: %s",
+                        diagnostics_summary_path,
+                    )
 
             state: dict[str, Any] = {
                 "epoch": epoch,
@@ -375,13 +475,20 @@ class MultiLabelTrainer(LoggingMixin):
                 "val_metrics": val_metrics,
                 "val_probability_stats": val_probability_stats_history,
                 "current_val_probability_stats": val_result.probability_stats,
+                "val_topk_summaries": val_topk_summary_history,
+                "current_val_topk_summary": val_result.topk_summary,
                 "val_loss": val_result.loss,
                 "val_macro_AP": val_result.metrics.macro_AP,
                 "val_micro_AP": val_result.metrics.micro_AP,
                 "val_per_class_AP": val_result.metrics.per_class_AP,
                 "pos_weight": self.pos_weight.cpu().tolist(),
                 "diagnostics_path": str(diagnostics_path) if diagnostics_path else None,
+                "diagnostics_summary_path": (
+                    str(diagnostics_summary_path) if diagnostics_summary_path else None
+                ),
             }
+            for metric_name, metric_value in topk_metrics.items():
+                state[f"val_{metric_name}"] = metric_value
             if extra_state:
                 state.update(extra_state)
             self.ckpt.save_last(state)

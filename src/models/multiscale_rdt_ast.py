@@ -125,11 +125,24 @@ class MultiScaleRdtEncoderConfig:
 
 
 @dataclass(frozen=True)
+class ClassifierBiasInitConfig:
+    enabled: bool = False
+    type: Literal["none", "prior", "weighted_prior"] = "none"
+    source: Literal["train"] = "train"
+    eps: float = 1e-6
+    clamp_min: float = -10.0
+    clamp_max: float = 5.0
+
+
+@dataclass(frozen=True)
 class ClassifierConfig:
     type: Literal["linear", "mlp"] = "linear"
     hidden_dim: int = 256
     dropout: float = 0.0
     pooling: Literal["latent_mean"] = "latent_mean"
+    bias_init: ClassifierBiasInitConfig = field(
+        default_factory=ClassifierBiasInitConfig
+    )
 
 
 @dataclass(frozen=True)
