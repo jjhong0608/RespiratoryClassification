@@ -21,7 +21,7 @@ from src.models.model import MultiScaleRdtAstModel
 from src.utils.checkpoint import load_checkpoint, parse_model_cfg
 from src.utils.config import EvalConfig, JsonConfigLoader
 from src.utils.fs import Fs
-from src.utils.logging import enable_file_logging, logger
+from src.utils.logging import configure_terminal_width, enable_file_logging, logger
 
 
 @dataclass(frozen=True)
@@ -280,6 +280,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = JsonConfigLoader.load_eval(args.config)
+    configure_terminal_width(cfg.terminal.width)
     out_dir = Fs.ensure_dir(Path(cfg.checkpoint_path).parent)
     enable_file_logging(out_dir / "eval.log", mode="w")
 

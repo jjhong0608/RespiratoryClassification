@@ -693,6 +693,41 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.sampler.enabled is False
     assert cfg.train.sampler.type == "none"
     assert cfg.train.initialization.checkpoint_path is None
+    assert cfg.terminal.width is None
+
+
+def test_terminal_width_config_loads_for_training_cv_and_eval(tmp_path: Path) -> None:
+    train_payload = _base_payload()
+    train_payload["terminal"] = {"width": 120}
+    train_cfg = JsonConfigLoader.load_training(
+        _write_json(tmp_path / "train_terminal.json", train_payload)
+    )
+
+    cv_payload = _cv_payload()
+    cv_payload["terminal"] = {"width": 120}
+    cv_cfg = JsonConfigLoader.load_cv(
+        _write_json(tmp_path / "cv_terminal.json", cv_payload)
+    )
+
+    eval_payload = _eval_payload()
+    eval_payload["terminal"] = {"width": 120}
+    eval_cfg = JsonConfigLoader.load_eval(
+        _write_json(tmp_path / "eval_terminal.json", eval_payload)
+    )
+
+    assert train_cfg.terminal.width == 120
+    assert cv_cfg.terminal.width == 120
+    assert eval_cfg.terminal.width == 120
+
+
+@pytest.mark.parametrize("width", [0, -1, True, 120.5, "120"])
+def test_invalid_terminal_width_is_rejected(tmp_path: Path, width: object) -> None:
+    payload = _base_payload()
+    payload["terminal"] = {"width": width}
+    config_path = _write_json(tmp_path / "bad_terminal_width.json", payload)
+
+    with pytest.raises(ValueError, match="terminal.width"):
+        JsonConfigLoader.load_training(config_path)
 
 
 def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:

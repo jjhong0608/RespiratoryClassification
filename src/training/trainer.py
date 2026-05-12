@@ -11,7 +11,6 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 from src.data.loaders import ClipBatch
 from src.evaluation.diagnostics import build_diagnostic_rows, write_diagnostics_jsonl
@@ -34,6 +33,7 @@ from src.utils.config import (
 )
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
+from src.utils.progress import iter_progress
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,7 @@ class TrainerConfig:
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
     checkpointing: CheckpointingConfig | None = None
+    terminal_width: int | None = None
 
 
 @dataclass(frozen=True)
@@ -646,7 +647,11 @@ class Trainer(LoggingMixin):
         branch_binary_targets: list[int] = []
         diagnostics: list[dict[str, Any]] = []
 
-        for batch in tqdm(loader, leave=False):
+        for batch in iter_progress(
+            loader,
+            terminal_width=self.cfg.terminal_width,
+            leave=False,
+        ):
             batch = batch.to(device)
             output = model(batch.input_values)
             if not isinstance(output, AstModelOutput):

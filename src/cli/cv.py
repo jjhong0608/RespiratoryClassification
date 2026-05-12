@@ -21,7 +21,7 @@ from src.training.imbalance import (
 from src.training.trainer import Trainer, TrainerConfig
 from src.utils.config import JsonConfigLoader
 from src.utils.fs import Fs
-from src.utils.logging import enable_file_logging, logger
+from src.utils.logging import configure_terminal_width, enable_file_logging, logger
 from src.utils.reproducibility import Reproducibility
 
 
@@ -31,6 +31,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = JsonConfigLoader.load_cv(args.config)
+    configure_terminal_width(cfg.terminal.width)
     Reproducibility.seed_everything(cfg.experiment.seed)
 
     base_dir = Fs.ensure_dir(Path(cfg.experiment.output_dir) / cfg.experiment.name)
@@ -278,6 +279,7 @@ def main() -> None:
                 analysis=cfg.analysis,
                 early_stopping=cfg.train.early_stopping,
                 checkpointing=cfg.checkpointing,
+                terminal_width=cfg.terminal.width,
             )
         )
         trainer.fit(

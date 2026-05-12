@@ -200,8 +200,44 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in reader]
 
 
+_VOCABULARY_INDEX_COLUMNS = ("index", "idx", "id")
+_VOCABULARY_LABEL_COLUMNS = ("display_name", "label", "name", "class")
+_VOCABULARY_MID_COLUMNS = ("mid", "mids", "audioset_mid")
+
+
+def _has_vocabulary_header(row: Sequence[str]) -> bool:
+    normalized = {cell.strip().lower() for cell in row if cell.strip()}
+    known_columns = {
+        *[column.lower() for column in _VOCABULARY_INDEX_COLUMNS],
+        *[column.lower() for column in _VOCABULARY_LABEL_COLUMNS],
+        *[column.lower() for column in _VOCABULARY_MID_COLUMNS],
+    }
+    return bool(normalized & known_columns)
+
+
+def _read_vocabulary_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = [row for row in csv.reader(handle) if any(cell.strip() for cell in row)]
+    if not rows:
+        return []
+    if _has_vocabulary_header(rows[0]):
+        header = rows[0]
+        return [
+            {header[index]: value for index, value in enumerate(row)}
+            for row in rows[1:]
+        ]
+    return [
+        {
+            "index": row[0].strip() if len(row) > 0 else "",
+            "display_name": row[1].strip() if len(row) > 1 else "",
+            "mid": row[2].strip() if len(row) > 2 else "",
+        }
+        for row in rows
+    ]
+
+
 def parse_fsd50k_vocabulary(path: Path) -> Fsd50kVocabulary:
-    rows = _read_csv_rows(path)
+    rows = _read_vocabulary_rows(path)
     if not rows:
         raise ValueError(f"FSD50K vocabulary is empty: {path}")
     label_to_index: dict[str, int] = {}
@@ -209,10 +245,10 @@ def parse_fsd50k_vocabulary(path: Path) -> Fsd50kVocabulary:
     index_to_label: list[str] = []
     index_to_mid: list[str] = []
     for fallback_index, row in enumerate(rows):
-        raw_index = _first_present(row, ("index", "idx", "id"))
+        raw_index = _first_present(row, _VOCABULARY_INDEX_COLUMNS)
         index = fallback_index if raw_index is None else int(raw_index)
-        label = _first_present(row, ("display_name", "label", "name", "class"))
-        mid = _first_present(row, ("mid", "mids", "audioset_mid"))
+        label = _first_present(row, _VOCABULARY_LABEL_COLUMNS)
+        mid = _first_present(row, _VOCABULARY_MID_COLUMNS)
         if label is None and mid is None:
             raise ValueError(f"Vocabulary row has no label or MID: {row}")
         while len(index_to_label) <= index:

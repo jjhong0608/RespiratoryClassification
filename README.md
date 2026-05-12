@@ -17,6 +17,23 @@ mamba activate respiratory
 pip install -r requirements.txt
 ```
 
+## Terminal Output Width
+
+Rich terminal logs and `tqdm` progress bars use automatic terminal-width
+detection by default. Add an optional top-level `terminal` block to any
+training, CV, evaluation, FSD50K SSL, or FSD50K supervised config to force a
+fixed display width:
+
+```json
+"terminal": {
+  "width": 120
+}
+```
+
+Set `"width": null` or omit the `terminal` block to keep auto-width behavior.
+The fixed width affects terminal rendering only; file logs such as `run.log`
+remain plain text and are not width-truncated.
+
 ## Canonical Configs
 
 - Binary B0: `configs/training_event_mil_b0.json`
@@ -698,11 +715,15 @@ Diagnostics are controlled by `analysis.outputs`:
 }
 ```
 
-Training saves validation diagnostics under:
+Supervised training saves validation diagnostics under:
 
 ```text
 <run_dir>/diagnostics/val_epoch_XXX.jsonl
 ```
+
+This applies to the CNUH single-label trainer and the FSD50K supervised
+multi-label trainer. FSD50K SSL pretraining does not emit diagnostics JSONL
+files because it is reconstruction-only and logs/checkpoints SSL losses instead.
 
 Evaluation writes:
 
@@ -728,6 +749,13 @@ When enabled, diagnostics now include:
 
 Full branch attention maps stay in the model output for training and tests, but
 they are not dumped into JSONL by default because they are large.
+
+FSD50K supervised diagnostics use compact multi-label rows by default:
+`clip_id`, `audio_path`, true/predicted label indices, top-5 label indices,
+top-5 probabilities, threshold, and label names when
+`save_clip_metadata=true`. Full 200-class logits and probabilities are written
+only when `save_logits=true` or `save_probabilities=true`; pooled embeddings and
+selected evidence token embeddings are written only when `save_embeddings=true`.
 
 ## Directory Copy Utility
 

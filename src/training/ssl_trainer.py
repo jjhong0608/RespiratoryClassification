@@ -7,7 +7,6 @@ from typing import Any
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 from src.data.fsd50k_dataset import Fsd50kBatch
 from src.models.ssl import MaskedFbankSSLOutput, MaskedFbankSSLWrapper
@@ -16,6 +15,7 @@ from src.training.trainer import CheckpointManager
 from src.utils.config import CheckpointingConfig
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
+from src.utils.progress import iter_progress
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,7 @@ class SslTrainerConfig:
     max_grad_norm: float
     run_dir: Path
     checkpointing: CheckpointingConfig | None = None
+    terminal_width: int | None = None
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,11 @@ class SslTrainer(LoggingMixin):
         branch_totals: torch.Tensor | None = None
         actual_ratio_totals: torch.Tensor | None = None
         token_ratio_totals: torch.Tensor | None = None
-        for batch in tqdm(loader, leave=False):
+        for batch in iter_progress(
+            loader,
+            terminal_width=self.cfg.terminal_width,
+            leave=False,
+        ):
             batch = batch.to(device)
             output = model(batch.input_values)
             if not isinstance(output, MaskedFbankSSLOutput):

@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
 import soundfile as sf
 import torch
-from src.data.fsd50k_dataset import build_fsd50k_dataset
+from src.data.fsd50k_dataset import (
+    Fsd50kBatch,
+    build_fsd50k_dataset,
+    parse_fsd50k_vocabulary,
+)
 from src.evaluation.metrics import MultiLabelMetricsComputer
 from src.models.model import (
     AstFeatureDims,
+    AstModelOutput,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -31,7 +38,14 @@ from src.models.ssl import (
     sample_token_mask,
     token_grid_to_fbank_mask,
 )
-from src.training.multilabel_trainer import compute_sqrt_neg_pos_multilabel_pos_weight
+from src.training.multilabel_trainer import (
+    MultiLabelTrainer,
+    MultiLabelTrainerConfig,
+    compute_multilabel_probability_stats,
+    compute_multilabel_target_stats,
+    compute_pos_weight_stats,
+    compute_sqrt_neg_pos_multilabel_pos_weight,
+)
 from src.training.transfer import (
     apply_cnuh_transfer_freeze,
     build_cnuh_transfer_optimizer,
@@ -39,6 +53,8 @@ from src.training.transfer import (
     load_compatible_model_state,
 )
 from src.utils.config import (
+    AnalysisConfig,
+    AnalysisOutputConfig,
     AstFbankConfig,
     AudioConfig,
     DataAugmentationConfig,
@@ -46,6 +62,8 @@ from src.utils.config import (
     JsonConfigLoader,
     PreprocessingConfig,
 )
+from torch import nn
+from torch.utils.data import DataLoader
 
 from conftest import small_patch_branches
 
@@ -65,13 +83,25 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) ->
         writer.writerows(rows)
 
 
-def _fsd_fixture(tmp_path: Path, *, unknown_label: bool = False) -> Fsd50kDataConfig:
+def _write_headerless_vocabulary(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        for row in rows:
+            writer.writerow([row["index"], row["display_name"], row["mid"]])
+
+
+def _fsd_fixture(
+    tmp_path: Path,
+    *,
+    unknown_label: bool = False,
+    headerless_vocabulary: bool = False,
+) -> Fsd50kDataConfig:
     dev_audio = tmp_path / "dev_audio"
     eval_audio = tmp_path / "eval_audio"
     gt = tmp_path / "ground_truth"
-    dev_audio.mkdir()
-    eval_audio.mkdir()
-    gt.mkdir()
+    dev_audio.mkdir(parents=True)
+    eval_audio.mkdir(parents=True)
+    gt.mkdir(parents=True)
     for clip_id in ["clip_train", "clip_val", "clip_eval"]:
         _write_wav(
             (dev_audio if clip_id != "clip_eval" else eval_audio) / f"{clip_id}.wav"
@@ -84,7 +114,10 @@ def _fsd_fixture(tmp_path: Path, *, unknown_label: bool = False) -> Fsd50kDataCo
         }
         for index in range(200)
     ]
-    _write_csv(gt / "vocabulary.csv", ["index", "mid", "display_name"], vocab_rows)
+    if headerless_vocabulary:
+        _write_headerless_vocabulary(gt / "vocabulary.csv", vocab_rows)
+    else:
+        _write_csv(gt / "vocabulary.csv", ["index", "mid", "display_name"], vocab_rows)
     dev_rows = [
         {"fname": "clip_train", "mids": "/m/000,/m/001", "split": "train"},
         {
@@ -121,6 +154,26 @@ def _fsd_fixture(tmp_path: Path, *, unknown_label: bool = False) -> Fsd50kDataCo
     )
 
 
+def test_fsd50k_vocabulary_parses_headered_and_headerless_formats(
+    tmp_path: Path,
+) -> None:
+    headered_cfg = _fsd_fixture(tmp_path / "headered")
+    headered = parse_fsd50k_vocabulary(Path(headered_cfg.vocabulary_csv))
+    assert len(headered.index_to_label) == 200
+    assert headered.label_to_index["label_000"] == 0
+    assert headered.mid_to_index["/m/199"] == 199
+
+    headerless_cfg = _fsd_fixture(
+        tmp_path / "headerless",
+        headerless_vocabulary=True,
+    )
+    headerless = parse_fsd50k_vocabulary(Path(headerless_cfg.vocabulary_csv))
+    assert len(headerless.index_to_label) == 200
+    assert headerless.index_to_label[1] == "label_001"
+    assert headerless.index_to_mid[1] == "/m/001"
+    assert headerless.mid_to_index["/m/199"] == 199
+
+
 def _small_model(num_classes: int = 2) -> MultiScaleRdtAstModel:
     return MultiScaleRdtAstModel(
         MultiScaleRdtAstModelConfig(
@@ -146,6 +199,17 @@ def _small_model(num_classes: int = 2) -> MultiScaleRdtAstModel:
     )
 
 
+class _TinyMultiLabelModel(nn.Module):
+    def __init__(self, num_classes: int) -> None:
+        super().__init__()
+        self.linear = nn.Linear(1, num_classes)
+
+    def forward(self, input_values: torch.Tensor) -> AstModelOutput:
+        features = input_values.mean(dim=(1, 2), keepdim=False).unsqueeze(-1)
+        logits = self.linear(features)
+        return AstModelOutput(logits=logits, pooled_embedding=logits)
+
+
 def test_fsd50k_ssl_and_supervised_dataset_outputs(tmp_path: Path) -> None:
     cfg = _fsd_fixture(tmp_path)
     supervised = build_fsd50k_dataset(cfg, split="train")
@@ -160,6 +224,21 @@ def test_fsd50k_ssl_and_supervised_dataset_outputs(tmp_path: Path) -> None:
     ssl_dataset = build_fsd50k_dataset(ssl_cfg, split="train")
     ssl_sample = ssl_dataset[0]
     assert ssl_sample.input_values.shape == (48, 32)
+    assert ssl_sample.labels is None
+    assert ssl_sample.clip_id == "clip_train"
+
+
+def test_fsd50k_headerless_vocabulary_dataset_outputs(tmp_path: Path) -> None:
+    cfg = _fsd_fixture(tmp_path, headerless_vocabulary=True)
+    supervised = build_fsd50k_dataset(cfg, split="train")
+    supervised_sample = supervised[0]
+    assert supervised_sample.labels is not None
+    assert supervised_sample.labels[0] == 1
+    assert supervised_sample.labels[1] == 1
+
+    ssl_cfg = Fsd50kDataConfig(**{**cfg.__dict__, "mode": "ssl"})
+    ssl_dataset = build_fsd50k_dataset(ssl_cfg, split="train")
+    ssl_sample = ssl_dataset[0]
     assert ssl_sample.labels is None
     assert ssl_sample.clip_id == "clip_train"
 
@@ -254,6 +333,78 @@ def test_multilabel_model_and_pos_weight() -> None:
     assert torch.allclose(pos_weight, expected)
 
 
+def test_multilabel_monitoring_stats_helpers() -> None:
+    train_targets = torch.tensor(
+        [
+            [1.0, 0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    val_targets = torch.tensor(
+        [
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0, 0.0],
+        ]
+    )
+    target_stats = compute_multilabel_target_stats(
+        train_targets,
+        val_targets,
+        class_names=("a", "b", "c", "d"),
+    )
+    assert target_stats["train_samples"] == 3
+    assert target_stats["val_samples"] == 2
+    assert target_stats["num_classes"] == 4
+    assert target_stats["train_mean_labels_per_sample"] == pytest.approx(5 / 3)
+    assert target_stats["train_min_labels_per_sample"] == pytest.approx(1.0)
+    assert target_stats["train_max_labels_per_sample"] == pytest.approx(2.0)
+    assert target_stats["val_mean_labels_per_sample"] == pytest.approx(1.5)
+    assert target_stats["train_num_classes_with_positive_count"] == 3
+    assert target_stats["val_num_classes_with_positive_count"] == 3
+    assert target_stats["top10_positive_class_counts"][0] == {
+        "class_index": 0,
+        "count": 3,
+        "class_name": "a",
+    }
+    assert target_stats["bottom10_nonzero_positive_class_counts"][0]["count"] == 1
+
+    probabilities = np.asarray(
+        [
+            [0.9, 0.2, 0.4],
+            [0.1, 0.8, 0.6],
+        ],
+        dtype=np.float64,
+    )
+    targets = np.asarray(
+        [
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    prob_stats = compute_multilabel_probability_stats(probabilities, targets)
+    assert prob_stats["prob_mean"] == pytest.approx(float(probabilities.mean()))
+    assert prob_stats["prob_std"] == pytest.approx(float(probabilities.std()))
+    assert prob_stats["prob_max_mean"] == pytest.approx(0.85)
+    assert prob_stats["prob_max_p95"] == pytest.approx(
+        float(np.percentile([0.9, 0.8], 95))
+    )
+    assert prob_stats["mean_predicted_positives_at_0_5"] == pytest.approx(1.5)
+    assert prob_stats["mean_predicted_positives_at_0_3"] == pytest.approx(2.0)
+    assert prob_stats["mean_predicted_positives_at_0_1"] == pytest.approx(3.0)
+    assert prob_stats["mean_true_positives"] == pytest.approx(1.5)
+
+    pos_weight_stats = compute_pos_weight_stats(
+        torch.tensor([1.0, 2.0, 10.0, 10.0]),
+        cap=10.0,
+    )
+    assert pos_weight_stats["pos_weight_min"] == pytest.approx(1.0)
+    assert pos_weight_stats["pos_weight_mean"] == pytest.approx(5.75)
+    assert pos_weight_stats["pos_weight_median"] == pytest.approx(6.0)
+    assert pos_weight_stats["pos_weight_max"] == pytest.approx(10.0)
+    assert pos_weight_stats["num_capped_classes"] == 2
+
+
 def test_multilabel_metrics_exclude_zero_positive_classes(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -342,6 +493,119 @@ def test_new_fsd50k_configs_parse() -> None:
         "configs/cnuh_4class_from_fsd50k_transfer_template.json"
     )
     assert ssl_cfg.ssl.masking.token_mask_ratio == 0.4
+    assert not hasattr(ssl_cfg, "analysis")
+    assert ssl_cfg.terminal.width is None
     assert supervised_cfg.train.loss.branch_auxiliary.enabled is False
     assert supervised_cfg.train.loss.branch_binary_auxiliary.enabled is False
+    assert supervised_cfg.terminal.width is None
+    assert supervised_cfg.analysis.outputs.save_logits is False
+    assert supervised_cfg.analysis.outputs.save_probabilities is False
+    assert supervised_cfg.analysis.outputs.save_embeddings is False
+    assert supervised_cfg.analysis.outputs.save_clip_metadata is True
     assert transfer_cfg.transfer.reset_classifier is True
+
+
+def _multilabel_batch() -> Fsd50kBatch:
+    return Fsd50kBatch(
+        input_values=torch.randn(2, 8, 8),
+        labels=torch.tensor(
+            [
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ]
+        ),
+        clip_ids=("clip_train", "clip_val"),
+        audio_paths=("clip_train.wav", "clip_val.wav"),
+    )
+
+
+def _single_batch_loader() -> DataLoader[Fsd50kBatch]:
+    return cast(DataLoader[Fsd50kBatch], [_multilabel_batch()])
+
+
+def test_multilabel_trainer_writes_validation_diagnostics(tmp_path: Path) -> None:
+    model = _TinyMultiLabelModel(num_classes=3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    trainer = MultiLabelTrainer(
+        MultiLabelTrainerConfig(
+            device="cpu",
+            epochs=1,
+            warmup_ratio=0.0,
+            max_grad_norm=None,
+            run_dir=tmp_path,
+            threshold=0.5,
+            analysis=AnalysisConfig(
+                outputs=AnalysisOutputConfig(
+                    save_logits=False,
+                    save_probabilities=False,
+                    save_embeddings=False,
+                    save_clip_metadata=True,
+                )
+            ),
+            class_names=("label_a", "label_b", "label_c"),
+        ),
+        pos_weight=torch.ones(3),
+    )
+
+    trainer.fit(
+        model,
+        _single_batch_loader(),
+        _single_batch_loader(),
+        optimizer,
+    )
+
+    diagnostics_path = tmp_path / "diagnostics" / "val_epoch_001.jsonl"
+    assert diagnostics_path.exists()
+    rows = [
+        json.loads(line)
+        for line in diagnostics_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["clip_id"] == "clip_train"
+    assert "true_label_names" in rows[0]
+    assert "top5_label_names" in rows[0]
+    assert "logits" not in rows[0]
+    assert "probabilities" not in rows[0]
+    checkpoint = torch.load(
+        tmp_path / "last.pt", map_location="cpu", weights_only=False
+    )
+    assert len(checkpoint["val_probability_stats"]) == 1
+    assert "prob_mean" in checkpoint["val_probability_stats"][0]
+    assert (
+        "mean_predicted_positives_at_0_5" in checkpoint["current_val_probability_stats"]
+    )
+
+
+def test_multilabel_trainer_skips_diagnostics_when_outputs_disabled(
+    tmp_path: Path,
+) -> None:
+    model = _TinyMultiLabelModel(num_classes=3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    trainer = MultiLabelTrainer(
+        MultiLabelTrainerConfig(
+            device="cpu",
+            epochs=1,
+            warmup_ratio=0.0,
+            max_grad_norm=None,
+            run_dir=tmp_path,
+            threshold=0.5,
+            analysis=AnalysisConfig(
+                outputs=AnalysisOutputConfig(
+                    save_logits=False,
+                    save_probabilities=False,
+                    save_embeddings=False,
+                    save_clip_metadata=False,
+                )
+            ),
+            class_names=("label_a", "label_b", "label_c"),
+        ),
+        pos_weight=torch.ones(3),
+    )
+
+    trainer.fit(
+        model,
+        _single_batch_loader(),
+        _single_batch_loader(),
+        optimizer,
+    )
+
+    assert not (tmp_path / "diagnostics").exists()

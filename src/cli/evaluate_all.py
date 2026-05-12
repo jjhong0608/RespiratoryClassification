@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.cli.evaluate import evaluate_checkpoint
 from src.utils.config import JsonConfigLoader
-from src.utils.logging import enable_file_logging, logger
+from src.utils.logging import configure_terminal_width, enable_file_logging, logger
 
 
 def main() -> None:
@@ -25,6 +25,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = JsonConfigLoader.load_eval(args.config)
+    configure_terminal_width(cfg.terminal.width)
     root = Path(args.root)
     if not root.exists():
         raise FileNotFoundError(f"Root directory not found: {root}")

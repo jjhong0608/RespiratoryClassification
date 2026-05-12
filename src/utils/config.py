@@ -462,6 +462,11 @@ class AnalysisConfig:
 
 
 @dataclass(frozen=True)
+class TerminalConfig:
+    width: int | None = None
+
+
+@dataclass(frozen=True)
 class TrainingRunConfig:
     experiment: ExperimentConfig
     data: DataConfig
@@ -470,6 +475,7 @@ class TrainingRunConfig:
     analysis: AnalysisConfig
     val: ValidationConfig = field(default_factory=ValidationConfig)
     checkpointing: CheckpointingConfig | None = None
+    terminal: TerminalConfig = field(default_factory=TerminalConfig)
 
 
 @dataclass(frozen=True)
@@ -481,6 +487,7 @@ class Fsd50kSslRunConfig:
     train: Fsd50kSslTrainConfig
     ssl: MaskedFbankSSLConfig
     checkpointing: CheckpointingConfig | None = None
+    terminal: TerminalConfig = field(default_factory=TerminalConfig)
 
 
 @dataclass(frozen=True)
@@ -490,8 +497,10 @@ class Fsd50kSupervisedRunConfig:
     data: Fsd50kDataConfig
     model: ModelConfig
     train: Fsd50kSupervisedTrainConfig
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     metrics: Fsd50kMetricsConfig = field(default_factory=Fsd50kMetricsConfig)
     checkpointing: CheckpointingConfig | None = None
+    terminal: TerminalConfig = field(default_factory=TerminalConfig)
 
 
 @dataclass(frozen=True)
@@ -533,6 +542,7 @@ class EvalConfig:
     threshold_optimization: ThresholdOptimizationConfig = field(
         default_factory=ThresholdOptimizationConfig
     )
+    terminal: TerminalConfig = field(default_factory=TerminalConfig)
 
 
 @dataclass(frozen=True)
@@ -552,6 +562,7 @@ class CvRunConfig:
     folds: list[CvFoldConfig]
     val: ValidationConfig = field(default_factory=ValidationConfig)
     checkpointing: CheckpointingConfig | None = None
+    terminal: TerminalConfig = field(default_factory=TerminalConfig)
 
 
 class JsonConfigLoader:
@@ -1809,6 +1820,21 @@ class JsonConfigLoader:
         return AnalysisConfig(**kwargs)
 
     @staticmethod
+    def _parse_terminal(raw: Mapping[str, Any] | None) -> TerminalConfig:
+        if raw is None:
+            return TerminalConfig()
+        if not isinstance(raw, Mapping):
+            raise ValueError("terminal must be a JSON object")
+        cfg = TerminalConfig(**dict(raw))
+        if cfg.width is None:
+            return cfg
+        if isinstance(cfg.width, bool) or not isinstance(cfg.width, int):
+            raise ValueError("terminal.width must be a positive integer or null")
+        if cfg.width <= 0:
+            raise ValueError("terminal.width must be a positive integer or null")
+        return cfg
+
+    @staticmethod
     def _parse_threshold_optimization(
         raw: Mapping[str, Any] | None,
     ) -> ThresholdOptimizationConfig:
@@ -1835,6 +1861,7 @@ class JsonConfigLoader:
             checkpointing=JsonConfigLoader._parse_checkpointing(
                 raw.get("checkpointing")
             ),
+            terminal=JsonConfigLoader._parse_terminal(raw.get("terminal")),
         )
         JsonConfigLoader._validate_train(
             cfg.train,
@@ -1891,6 +1918,7 @@ class JsonConfigLoader:
             checkpointing=JsonConfigLoader._parse_checkpointing(
                 raw.get("checkpointing")
             ),
+            terminal=JsonConfigLoader._parse_terminal(raw.get("terminal")),
         )
         JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
         return cfg
@@ -1917,10 +1945,12 @@ class JsonConfigLoader:
             data=data_cfg,
             model=model_cfg,
             train=JsonConfigLoader._parse_fsd50k_supervised_train(raw["train"]),
+            analysis=JsonConfigLoader._parse_analysis(raw.get("analysis")),
             metrics=JsonConfigLoader._parse_fsd50k_metrics(raw.get("metrics")),
             checkpointing=JsonConfigLoader._parse_checkpointing(
                 raw.get("checkpointing")
             ),
+            terminal=JsonConfigLoader._parse_terminal(raw.get("terminal")),
         )
         JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
         return cfg
@@ -1970,6 +2000,7 @@ class JsonConfigLoader:
             threshold_optimization=JsonConfigLoader._parse_threshold_optimization(
                 raw.get("threshold_optimization")
             ),
+            terminal=JsonConfigLoader._parse_terminal(raw.get("terminal")),
         )
 
     @staticmethod
@@ -1995,6 +2026,7 @@ class JsonConfigLoader:
             checkpointing=JsonConfigLoader._parse_checkpointing(
                 raw.get("checkpointing")
             ),
+            terminal=JsonConfigLoader._parse_terminal(raw.get("terminal")),
         )
         JsonConfigLoader._validate_train(
             cfg.train,
