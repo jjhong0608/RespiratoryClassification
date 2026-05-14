@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 import torch
+from src.cli.cnuh_transfer_train import prepare_cnuh_transfer_model_and_optimizer
 from src.data.fsd50k_dataset import (
     Fsd50kBatch,
     build_fsd50k_dataset,
@@ -45,6 +46,7 @@ from src.models.ssl import (
     sample_token_mask,
     token_grid_to_fbank_mask,
 )
+from src.training.ast_setup import build_ast_model
 from src.training.classifier_bias_init import (
     apply_classifier_bias_init,
     compute_classifier_bias_init,
@@ -70,10 +72,14 @@ from src.utils.config import (
     AnalysisOutputConfig,
     AstFbankConfig,
     AudioConfig,
+    CnuhTransferConfig,
+    CnuhTransferOptimizerConfig,
     DataAugmentationConfig,
     Fsd50kDataConfig,
     Fsd50kTopKMetricsConfig,
     JsonConfigLoader,
+    ModelConfig,
+    ModelEncoderConfig,
     PreprocessingConfig,
 )
 from torch import nn
@@ -210,6 +216,28 @@ def _small_model(num_classes: int = 2) -> MultiScaleRdtAstModel:
             classifier=ClassifierConfig(type="linear", hidden_dim=16, dropout=0.0),
             num_classes=num_classes,
         )
+    )
+
+
+def _transfer_model_cfg() -> ModelConfig:
+    return ModelConfig(
+        encoder=ModelEncoderConfig(
+            adaptation=EncoderAdaptationConfig(mode="full", num_layers=0),
+            architecture=MultiScaleRdtArchitectureConfig(
+                hidden_size=16,
+                num_attention_heads=4,
+                mlp_ratio=2.0,
+                shared_stem_depth=1,
+                adapter_depth=1,
+                patch_branches=small_patch_branches(),
+                rdt=RdtConfig(enabled=True, steps=1, top_tokens_per_branch=2),
+                evidence_pooling=EvidencePoolingConfig(
+                    type="branch_gated",
+                    dropout=0.0,
+                ),
+            ),
+        ),
+        classifier=ClassifierConfig(type="linear", hidden_dim=16, dropout=0.0),
     )
 
 
@@ -693,6 +721,86 @@ def test_ssl_checkpoint_loads_into_supervised_model_and_transfer_freezes(
         weight_decay=0.01,
     )
     assert ml_summary.param_group_count == len(ml_optimizer.param_groups) == 3
+
+
+def test_cnuh_transfer_template_parses_as_training_and_transfer() -> None:
+    training_cfg = JsonConfigLoader.load_training(
+        "configs/cnuh_4class_from_fsd50k_transfer_template.json"
+    )
+    transfer_cfg = JsonConfigLoader.load_cnuh_transfer_template(
+        "configs/cnuh_4class_from_fsd50k_transfer_template.json"
+    )
+
+    assert training_cfg.experiment.name == "respiratory_classification_with_CNUH_data"
+    assert training_cfg.data.label_to_index == {
+        "normal": 0,
+        "crackle": 1,
+        "wheeze": 2,
+        "rhonchi": 3,
+    }
+    assert transfer_cfg.transfer.reset_classifier is True
+    assert transfer_cfg.transfer.strict is False
+    assert transfer_cfg.optimizer.frozen_encoder_lr == 0.0
+    assert transfer_cfg.optimizer.body_lr == pytest.approx(1e-5)
+    assert transfer_cfg.optimizer.head_lr == pytest.approx(3e-4)
+
+
+def test_cnuh_transfer_setup_loads_freezes_and_builds_optimizer(
+    tmp_path: Path,
+) -> None:
+    source_model = build_ast_model(
+        _transfer_model_cfg(),
+        num_mel_bins=32,
+        max_length=32,
+        num_classes=200,
+    )
+    checkpoint_path = tmp_path / "fsd50k_supervised.pt"
+    torch.save({"model_state_dict": source_model.state_dict()}, checkpoint_path)
+
+    setup = prepare_cnuh_transfer_model_and_optimizer(
+        _transfer_model_cfg(),
+        CnuhTransferConfig(
+            checkpoint_path=str(checkpoint_path),
+            reset_classifier=True,
+            freeze_encoder=True,
+            strict=False,
+            freeze_modules=(
+                "patch_tokenizers",
+                "position_embeddings",
+                "scale_embeddings",
+                "shared_stem",
+                "scale_specific_adapters",
+                "frequency_attention_poolers",
+            ),
+        ),
+        CnuhTransferOptimizerConfig(
+            frozen_encoder_lr=0.0,
+            body_lr=1e-5,
+            head_lr=3e-4,
+        ),
+        num_mel_bins=32,
+        max_length=32,
+        num_classes=4,
+        weight_decay=0.01,
+    )
+
+    assert any(
+        key.startswith("encoder.") for key in setup.transfer_load_summary.loaded_keys
+    )
+    assert any("classifier" in key for key in setup.transfer_load_summary.skipped_keys)
+    assert any(
+        name.startswith("encoder.patch_tokenizers")
+        for name in setup.freeze_summary.frozen_parameter_names
+    )
+    assert any(
+        name.startswith("branch_mil_heads")
+        for name in setup.freeze_summary.trainable_parameter_names
+    )
+    assert [group["name"] for group in setup.optimizer.param_groups] == [
+        "body",
+        "head",
+    ]
+    assert setup.optimizer_summary.param_group_count == 2
 
 
 def test_new_fsd50k_configs_parse() -> None:

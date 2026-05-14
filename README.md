@@ -825,12 +825,20 @@ metadata. This should reduce the initial multi-label probability collapse near
 `0.5`; it is not expected to make first-epoch `F1@0.5` high by itself.
 
 Stage 3 starts from `configs/cnuh_4class_from_fsd50k_transfer_template.json`.
+Run it through the dedicated transfer entrypoint:
+
+```bash
+python -m src.cli.cnuh_transfer_train --config configs/cnuh_4class_from_fsd50k_transfer_template.json
+```
+
 The transfer utility loads an FSD50K supervised checkpoint with `strict=false`,
 filters the FSD50K classifier head when `reset_classifier=true`, and freezes the
 early encoder by default: patch tokenizers, position/scale embeddings, shared
 stem, scale-specific adapters, and frequency-attention poolers. Branch MIL,
 RDT, branch-aware gated evidence pooling, fusion, and the new CNUH classifier
-remain trainable.
+remain trainable. Do not use `src.cli.training` for this stage unless you want
+ordinary CNUH training from the model config only; that entrypoint does not
+consume the transfer checkpoint or transfer freeze policy.
 
 ## Notes
 
