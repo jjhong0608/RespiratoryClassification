@@ -30,6 +30,7 @@ from src.utils.config import (
     BranchBinaryAuxiliaryLossConfig,
     CheckpointingConfig,
     EarlyStoppingConfig,
+    GateEntropyRegularizationConfig,
     LabelSmoothingConfig,
 )
 from src.utils.fs import Fs
@@ -64,6 +65,9 @@ class TrainerConfig:
     attention_entropy: AttentionEntropyLossConfig = field(
         default_factory=AttentionEntropyLossConfig
     )
+    gate_entropy_regularization: GateEntropyRegularizationConfig = field(
+        default_factory=GateEntropyRegularizationConfig
+    )
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
     checkpointing: CheckpointingConfig | None = None
@@ -78,6 +82,8 @@ class LossComponents:
     branch_auxiliary: Tensor | None = None
     branch_binary_auxiliary: Tensor | None = None
     attention_entropy: Tensor | None = None
+    gate_entropy: Tensor | None = None
+    gate_entropy_regularization: Tensor | None = None
     branch_binary_aux_weight: float = 0.0
     branch_binary_aux_monitor_weight: float = 0.0
 
@@ -485,6 +491,25 @@ class Trainer(LoggingMixin):
             entropies.append(entropy)
         return torch.stack(entropies).mean()
 
+    def _compute_gate_entropy_regularization(
+        self,
+        output: AstModelOutput,
+    ) -> tuple[Tensor, Tensor]:
+        if self.cfg.gate_entropy_regularization.target != "evidence_gate":
+            raise ValueError(
+                "gate entropy regularization supports only target='evidence_gate'"
+            )
+        if output.evidence_gate_entropy is None:
+            raise ValueError(
+                "gate entropy regularization enabled but model did not return "
+                "evidence_gate_entropy"
+            )
+        gate_entropy = output.evidence_gate_entropy.mean()
+        regularization = (
+            -float(self.cfg.gate_entropy_regularization.weight) * gate_entropy
+        )
+        return gate_entropy, regularization
+
     def _branch_binary_targets(
         self,
         labels: Tensor,
@@ -601,6 +626,14 @@ class Trainer(LoggingMixin):
             entropy_term = self.cfg.attention_entropy.weight * entropy_loss
             scheduled_total = scheduled_total + entropy_term
             monitor_total = monitor_total + entropy_term
+        gate_entropy: Tensor | None = None
+        gate_entropy_regularization: Tensor | None = None
+        if self.cfg.gate_entropy_regularization.enabled:
+            gate_entropy, gate_entropy_regularization = (
+                self._compute_gate_entropy_regularization(output)
+            )
+            scheduled_total = scheduled_total + gate_entropy_regularization
+            monitor_total = monitor_total + gate_entropy_regularization
         return LossComponents(
             total=monitor_total if use_monitor_total else scheduled_total,
             total_scheduled=scheduled_total,
@@ -609,6 +642,8 @@ class Trainer(LoggingMixin):
             branch_auxiliary=auxiliary_loss,
             branch_binary_auxiliary=branch_binary_loss,
             attention_entropy=entropy_loss,
+            gate_entropy=gate_entropy,
+            gate_entropy_regularization=gate_entropy_regularization,
             branch_binary_aux_weight=branch_binary_weight,
             branch_binary_aux_monitor_weight=branch_binary_monitor_weight,
         )
@@ -635,6 +670,8 @@ class Trainer(LoggingMixin):
             "branch_auxiliary": 0.0,
             "branch_binary_auxiliary": 0.0,
             "attention_entropy": 0.0,
+            "gate_entropy": 0.0,
+            "gate_entropy_regularization": 0.0,
             "branch_binary_aux_weight": 0.0,
             "branch_binary_aux_monitor_weight": 0.0,
         }
@@ -686,6 +723,10 @@ class Trainer(LoggingMixin):
                 "branch_auxiliary": loss_components.branch_auxiliary,
                 "branch_binary_auxiliary": loss_components.branch_binary_auxiliary,
                 "attention_entropy": loss_components.attention_entropy,
+                "gate_entropy": loss_components.gate_entropy,
+                "gate_entropy_regularization": (
+                    loss_components.gate_entropy_regularization
+                ),
                 "branch_binary_aux_weight": (loss_components.branch_binary_aux_weight),
                 "branch_binary_aux_monitor_weight": (
                     loss_components.branch_binary_aux_monitor_weight
@@ -857,6 +898,11 @@ class Trainer(LoggingMixin):
                         "branch_binary_aux_weight",
                         0.0,
                     ),
+                    "train_gate_entropy": train_components.get("gate_entropy", 0.0),
+                    "train_loss_gate_entropy_regularization": train_components.get(
+                        "gate_entropy_regularization",
+                        0.0,
+                    ),
                 }
             )
             val_components = dict(val_result.loss_components)
@@ -886,6 +932,11 @@ class Trainer(LoggingMixin):
                         "branch_binary_aux_monitor_weight",
                         0.0,
                     ),
+                    "val_gate_entropy": val_components.get("gate_entropy", 0.0),
+                    "val_loss_gate_entropy_regularization": val_components.get(
+                        "gate_entropy_regularization",
+                        0.0,
+                    ),
                 }
             )
             train_loss_component_history.append(train_components)
@@ -906,7 +957,8 @@ class Trainer(LoggingMixin):
                     "Val F1@opt: %.4f | Val Balanced Acc@opt: %.4f | Val Opt Threshold: %.4f | "
                     "Train Main Loss: %.4f | Val Main Loss: %.4f | "
                     "Train Branch Binary Loss: %.4f | Val Branch Binary Loss: %.4f | "
-                    "Branch Binary Weight: %.4f | Val Scheduled Loss: %.4f",
+                    "Branch Binary Weight: %.4f | Train Gate Entropy: %.4f | "
+                    "Val Gate Entropy: %.4f | Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
@@ -929,6 +981,8 @@ class Trainer(LoggingMixin):
                     train_components.get("branch_binary_auxiliary", 0.0),
                     val_components.get("branch_binary_auxiliary", 0.0),
                     train_components.get("branch_binary_aux_weight", 0.0),
+                    train_components.get("gate_entropy", 0.0),
+                    val_components.get("gate_entropy", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
             else:
@@ -939,7 +993,8 @@ class Trainer(LoggingMixin):
                     "Val Precision: %.4f | Val F1: %.4f | Val Balanced Acc: %.4f | "
                     "Train Main Loss: %.4f | Val Main Loss: %.4f | "
                     "Train Branch Binary Loss: %.4f | Val Branch Binary Loss: %.4f | "
-                    "Branch Binary Weight: %.4f | Val Scheduled Loss: %.4f",
+                    "Branch Binary Weight: %.4f | Train Gate Entropy: %.4f | "
+                    "Val Gate Entropy: %.4f | Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
@@ -959,6 +1014,8 @@ class Trainer(LoggingMixin):
                     train_components.get("branch_binary_auxiliary", 0.0),
                     val_components.get("branch_binary_auxiliary", 0.0),
                     train_components.get("branch_binary_aux_weight", 0.0),
+                    train_components.get("gate_entropy", 0.0),
+                    val_components.get("gate_entropy", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
 

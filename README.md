@@ -147,6 +147,12 @@ C3 staged training:
 Stage 2 intentionally uses `strict=false` and `load_optimizer_state=false`
 because it turns on RDT and uses different learning rates.
 
+For transfer-style warm-starts where the checkpoint and target model share most
+layers but differ in class-dependent heads, set
+`train.initialization.skip_mismatched_shapes=true`. This loads only tensors with
+matching keys and shapes, keeps mismatched target tensors newly initialized, and
+requires `load_optimizer_state=false`.
+
 ## Next Experiment Series: D/E/F
 
 Use the same checkpoint-selection policy as C0-C5: compare experiments with
@@ -580,13 +586,19 @@ The active schema is:
       "attention_entropy": {
         "enabled": false,
         "weight": 0.0
+      },
+      "gate_entropy_regularization": {
+        "enabled": false,
+        "weight": 0.0,
+        "target": "evidence_gate"
       }
     },
     "initialization": {
       "checkpoint_path": null,
       "load_model_state": true,
       "strict": false,
-      "load_optimizer_state": false
+      "load_optimizer_state": false,
+      "skip_mismatched_shapes": false
     },
     "sampler": {
       "weighted_random": false,
@@ -624,6 +636,8 @@ Additional experiment knobs:
   token dropout
 - `train.loss.attention_entropy.enabled = true` adds
   `weight * mean_branch(entropy(attention))`
+- `train.loss.gate_entropy_regularization.enabled = true` adds
+  `-weight * mean(evidence_gate_entropy)` from branch-gated evidence pooling
 - `train.loss.branch_auxiliary.weights` overrides scalar
   `branch_auxiliary.weight` with normalized per-branch weighting
 - `train.loss.class_weighting.enabled = true` adds train-derived
@@ -670,6 +684,14 @@ auxiliary BCE uses `sqrt(n_normal / n_abnormal)`, computed from the training
 targets after applying the configured binary map. If either binary side is
 absent in the training split, training fails fast with a clear error.
 
+When `train.loss.gate_entropy_regularization.enabled = true`, the trainer uses
+the `evidence_gate_entropy` returned by `branch_gated` evidence pooling and
+subtracts `weight * mean(evidence_gate_entropy)` from the scheduled and monitor
+loss. This is an entropy bonus rather than a hard cap, so it does not guarantee
+`max(evidence_gate_weights) <= 0.5`. Check gate-weight distributions,
+high-confidence errors, Brier score, balanced accuracy, and macro recall when
+comparing this setting.
+
 ## Optimizer Layout
 
 Training keeps two AdamW parameter groups:
@@ -682,6 +704,18 @@ Training keeps two AdamW parameter groups:
 
 If `adaptation.mode = "frozen"`, the encoder group is frozen and only the head
 parameters are trainable.
+
+## Initialization
+
+`train.initialization.checkpoint_path` warm-starts training or cross-validation
+from a saved checkpoint. Exact resume-style loads keep
+`skip_mismatched_shapes=false`, so tensor shape mismatches still fail fast even
+when `strict=false`.
+
+Set `skip_mismatched_shapes=true` only for transfer warm-starts such as a
+4-class checkpoint feeding a 3-class disease-group model. In that mode, matching
+tensors are loaded, mismatched class-dependent tensors are skipped and reported
+in the initialization summary, and optimizer state loading is rejected.
 
 ## Diagnostics
 

@@ -194,6 +194,13 @@ class AttentionEntropyLossConfig:
 
 
 @dataclass(frozen=True)
+class GateEntropyRegularizationConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["evidence_gate"] = "evidence_gate"
+
+
+@dataclass(frozen=True)
 class ClassWeightingConfig:
     enabled: bool = False
     type: Literal["sqrt_inverse_frequency"] = "sqrt_inverse_frequency"
@@ -262,6 +269,9 @@ class LossConfig:
     attention_entropy: AttentionEntropyLossConfig = field(
         default_factory=AttentionEntropyLossConfig
     )
+    gate_entropy_regularization: GateEntropyRegularizationConfig = field(
+        default_factory=GateEntropyRegularizationConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -288,6 +298,7 @@ class TrainingInitializationConfig:
     load_model_state: bool = True
     strict: bool = False
     load_optimizer_state: bool = False
+    skip_mismatched_shapes: bool = False
 
 
 @dataclass(frozen=True)
@@ -885,6 +896,18 @@ class JsonConfigLoader:
             raise TypeError(
                 "train.initialization.load_optimizer_state must be a boolean"
             )
+        if not isinstance(cfg.initialization.skip_mismatched_shapes, bool):
+            raise TypeError(
+                "train.initialization.skip_mismatched_shapes must be a boolean"
+            )
+        if (
+            cfg.initialization.skip_mismatched_shapes
+            and cfg.initialization.load_optimizer_state
+        ):
+            raise ValueError(
+                "train.initialization.load_optimizer_state must be false when "
+                "skip_mismatched_shapes is true"
+            )
         if not isinstance(cfg.loss.branch_auxiliary.enabled, bool):
             raise ValueError("train.loss.branch_auxiliary.enabled must be a boolean")
         if cfg.loss.branch_auxiliary.aggregation != "mean":
@@ -915,6 +938,21 @@ class JsonConfigLoader:
         ):
             raise ValueError(
                 "train.loss.attention_entropy.weight must be greater than zero when enabled"
+            )
+        if not isinstance(cfg.loss.gate_entropy_regularization.enabled, bool):
+            raise ValueError(
+                "train.loss.gate_entropy_regularization.enabled must be a boolean"
+            )
+        if cfg.loss.gate_entropy_regularization.target != "evidence_gate":
+            raise ValueError(
+                "train.loss.gate_entropy_regularization.target must be 'evidence_gate'"
+            )
+        if (
+            cfg.loss.gate_entropy_regularization.enabled
+            and cfg.loss.gate_entropy_regularization.weight <= 0
+        ):
+            raise ValueError(
+                "train.loss.gate_entropy_regularization.weight must be greater than zero when enabled"
             )
         if not isinstance(cfg.loss.class_weighting.enabled, bool):
             raise ValueError("train.loss.class_weighting.enabled must be a boolean")
@@ -1361,6 +1399,9 @@ class JsonConfigLoader:
         )
         loss["attention_entropy"] = AttentionEntropyLossConfig(
             **dict(loss.get("attention_entropy", {}))
+        )
+        loss["gate_entropy_regularization"] = GateEntropyRegularizationConfig(
+            **dict(loss.get("gate_entropy_regularization", {}))
         )
         kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))

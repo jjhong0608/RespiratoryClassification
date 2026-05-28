@@ -12,13 +12,12 @@
     "train_dirs": [],
     "val_dirs": [],
     "eval_dirs": [
-      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/ALL_CNUH_DATA/folds/fold_0/"
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/test/"
     ],
     "label_to_index": {
-      "normal": 0,
-      "crackle": 1,
-      "wheeze": 2,
-      "rhonchi": 3
+      "Normal": 0,
+      "Lung_Parenchymal": 1,
+      "Airway": 2
     },
     "batch_size": 4,
     "num_workers": 0,

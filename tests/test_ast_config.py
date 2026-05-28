@@ -688,6 +688,9 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.data.augmentation.fbank.enabled is False
     assert cfg.train.loss.label_smoothing.enabled is False
     assert cfg.train.loss.label_smoothing.value == 0.0
+    assert cfg.train.loss.gate_entropy_regularization.enabled is False
+    assert cfg.train.loss.gate_entropy_regularization.weight == 0.0
+    assert cfg.train.loss.gate_entropy_regularization.target == "evidence_gate"
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.sampler.weighted_random is True
     assert cfg.train.sampler.enabled is False
@@ -811,6 +814,52 @@ def test_valid_label_smoothing_config_loads(tmp_path: Path) -> None:
 
     assert cfg.train.loss.label_smoothing.enabled is True
     assert cfg.train.loss.label_smoothing.value == 0.05
+
+
+def test_valid_gate_entropy_regularization_config_loads(tmp_path: Path) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["gate_entropy_regularization"] = {
+        "enabled": True,
+        "weight": 0.001,
+        "target": "evidence_gate",
+    }
+    config_path = _write_json(tmp_path / "gate_entropy_regularization.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.gate_entropy_regularization.enabled is True
+    assert cfg.train.loss.gate_entropy_regularization.weight == 0.001
+    assert cfg.train.loss.gate_entropy_regularization.target == "evidence_gate"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "gate_entropy_regularization.enabled"),
+        ("weight", 0.0, "gate_entropy_regularization.weight"),
+        ("weight", -0.001, "gate_entropy_regularization.weight"),
+        ("target", "branch_attention", "gate_entropy_regularization.target"),
+    ],
+)
+def test_invalid_gate_entropy_regularization_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["gate_entropy_regularization"] = {
+        "enabled": True,
+        "weight": 0.001,
+        "target": "evidence_gate",
+    }
+    payload["train"]["loss"]["gate_entropy_regularization"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_gate_entropy_regularization.json", payload
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 @pytest.mark.parametrize(
@@ -1524,6 +1573,25 @@ def test_training_initialization_accepts_checkpoint_path(tmp_path: Path) -> None
     assert cfg.train.initialization.load_model_state is True
     assert cfg.train.initialization.strict is False
     assert cfg.train.initialization.load_optimizer_state is False
+    assert cfg.train.initialization.skip_mismatched_shapes is False
+
+
+def test_training_initialization_accepts_skip_mismatched_shapes(
+    tmp_path: Path,
+) -> None:
+    payload = _base_payload()
+    payload["train"]["initialization"] = {
+        "checkpoint_path": "checkpoints/stage1/best_loss_0.123456.pt",
+        "load_model_state": True,
+        "strict": False,
+        "load_optimizer_state": False,
+        "skip_mismatched_shapes": True,
+    }
+    config_path = _write_json(tmp_path / "filtered_warmstart.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.initialization.skip_mismatched_shapes is True
 
 
 @pytest.mark.parametrize(
@@ -1532,6 +1600,7 @@ def test_training_initialization_accepts_checkpoint_path(tmp_path: Path) -> None
         ("load_model_state", "yes", "load_model_state"),
         ("strict", "false", "strict"),
         ("load_optimizer_state", 1, "load_optimizer_state"),
+        ("skip_mismatched_shapes", "true", "skip_mismatched_shapes"),
     ],
 )
 def test_training_initialization_flags_must_be_booleans(
@@ -1546,6 +1615,7 @@ def test_training_initialization_flags_must_be_booleans(
         "load_model_state": True,
         "strict": False,
         "load_optimizer_state": False,
+        "skip_mismatched_shapes": False,
     }
     payload["train"]["initialization"][field_name] = field_value
     config_path = _write_json(tmp_path / f"bad_init_{field_name}.json", payload)
@@ -1563,10 +1633,28 @@ def test_training_initialization_checkpoint_path_must_be_string_or_null(
         "load_model_state": True,
         "strict": False,
         "load_optimizer_state": False,
+        "skip_mismatched_shapes": False,
     }
     config_path = _write_json(tmp_path / "bad_init_path.json", payload)
 
     with pytest.raises(TypeError, match="checkpoint_path"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_training_initialization_rejects_optimizer_state_with_shape_filter(
+    tmp_path: Path,
+) -> None:
+    payload = _base_payload()
+    payload["train"]["initialization"] = {
+        "checkpoint_path": "checkpoints/stage1/best_loss_0.123456.pt",
+        "load_model_state": True,
+        "strict": False,
+        "load_optimizer_state": True,
+        "skip_mismatched_shapes": True,
+    }
+    config_path = _write_json(tmp_path / "bad_init_optimizer_filter.json", payload)
+
+    with pytest.raises(ValueError, match="load_optimizer_state"):
         JsonConfigLoader.load_training(config_path)
 
 

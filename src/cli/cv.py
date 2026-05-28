@@ -18,6 +18,7 @@ from src.training.imbalance import (
     resolve_imbalance,
     resolve_loss_weights,
 )
+from src.training.initialization import initialize_from_checkpoint
 from src.training.trainer import Trainer, TrainerConfig
 from src.utils.config import JsonConfigLoader
 from src.utils.fs import Fs
@@ -248,6 +249,35 @@ def main() -> None:
             optimizer_summary.head_trainable_parameters,
             optimizer_summary.param_group_count,
         )
+        initialization_summary = initialize_from_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            cfg=cfg.train.initialization,
+            map_location="cpu",
+        )
+        if initialization_summary.checkpoint_path is not None:
+            logger.info(
+                "[%s] Training initialization | checkpoint=%s | strict=%s | "
+                "loaded_model_state=%s | loaded_optimizer_state=%s | "
+                "missing_keys=%s | unexpected_keys=%s | skipped_mismatched_shapes=%d",
+                fold.name,
+                initialization_summary.checkpoint_path,
+                initialization_summary.strict,
+                initialization_summary.loaded_model_state,
+                initialization_summary.loaded_optimizer_state,
+                list(initialization_summary.missing_keys),
+                list(initialization_summary.unexpected_keys),
+                len(initialization_summary.skipped_mismatched_shapes),
+            )
+            for skipped in initialization_summary.skipped_mismatched_shapes:
+                logger.info(
+                    "[%s] Skipped mismatched checkpoint tensor | key=%s | "
+                    "checkpoint_shape=%s | model_shape=%s",
+                    fold.name,
+                    skipped.key,
+                    list(skipped.checkpoint_shape),
+                    list(skipped.model_shape),
+                )
 
         trainer = Trainer(
             TrainerConfig(
@@ -275,6 +305,9 @@ def main() -> None:
                     resolved_loss_weights.main_index_to_binary_target
                 ),
                 attention_entropy=cfg.train.loss.attention_entropy,
+                gate_entropy_regularization=(
+                    cfg.train.loss.gate_entropy_regularization
+                ),
                 analysis=cfg.analysis,
                 early_stopping=cfg.train.early_stopping,
                 checkpointing=cfg.checkpointing,
@@ -293,6 +326,7 @@ def main() -> None:
                 "architecture_summary": asdict(architecture_summary),
                 "adaptation_summary": asdict(adaptation_summary),
                 "optimizer_summary": asdict(optimizer_summary),
+                "initialization_summary": asdict(initialization_summary),
                 "loss_weight_summary": asdict(resolved_loss_weights),
             },
         )

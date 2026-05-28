@@ -258,6 +258,7 @@ def main() -> None:
                 resolved_loss_weights.main_index_to_binary_target
             ),
             attention_entropy=cfg.train.loss.attention_entropy,
+            gate_entropy_regularization=(cfg.train.loss.gate_entropy_regularization),
             analysis=cfg.analysis,
             early_stopping=cfg.train.early_stopping,
             checkpointing=cfg.checkpointing,
