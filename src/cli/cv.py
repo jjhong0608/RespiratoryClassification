@@ -280,6 +280,17 @@ def main() -> None:
                     list(skipped.model_shape),
                 )
 
+        class_evidence_margin_cfg = cfg.train.loss.class_evidence_margin
+        class_evidence_margin_major_index = (
+            cfg.data.label_to_index[class_evidence_margin_cfg.major_class]
+            if (
+                class_evidence_margin_cfg.enabled
+                and class_evidence_margin_cfg.mode == "minority_vs_major"
+                and class_evidence_margin_cfg.major_class is not None
+            )
+            else None
+        )
+
         trainer = Trainer(
             TrainerConfig(
                 device=cfg.experiment.device,
@@ -315,6 +326,8 @@ def main() -> None:
                 class_gate_diversity_regularization=(
                     cfg.train.loss.class_gate_diversity_regularization
                 ),
+                class_evidence_margin=cfg.train.loss.class_evidence_margin,
+                class_evidence_margin_major_index=class_evidence_margin_major_index,
                 analysis=cfg.analysis,
                 early_stopping=cfg.train.early_stopping,
                 checkpointing=cfg.checkpointing,

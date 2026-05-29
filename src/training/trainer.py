@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -29,6 +30,7 @@ from src.utils.config import (
     BranchAuxiliaryLossConfig,
     BranchBinaryAuxiliaryLossConfig,
     CheckpointingConfig,
+    ClassEvidenceMarginConfig,
     ClassGateDiversityRegularizationConfig,
     EarlyStoppingConfig,
     GateEntropyRegularizationConfig,
@@ -75,6 +77,10 @@ class TrainerConfig:
     class_gate_diversity_regularization: ClassGateDiversityRegularizationConfig = field(
         default_factory=ClassGateDiversityRegularizationConfig
     )
+    class_evidence_margin: ClassEvidenceMarginConfig = field(
+        default_factory=ClassEvidenceMarginConfig
+    )
+    class_evidence_margin_major_index: int | None = None
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
     checkpointing: CheckpointingConfig | None = None
@@ -94,6 +100,8 @@ class LossComponents:
     gate_entropy_regularization: Tensor | None = None
     class_gate_diversity: Tensor | None = None
     class_gate_diversity_regularization: Tensor | None = None
+    class_evidence_margin: Tensor | None = None
+    class_evidence_margin_loss: Tensor | None = None
     branch_binary_aux_weight: float = 0.0
     branch_binary_aux_monitor_weight: float = 0.0
 
@@ -633,6 +641,87 @@ class Trainer(LoggingMixin):
         )
         return diversity, regularization
 
+    def _compute_class_evidence_margin_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        if self.cfg.class_evidence_margin.target != "class_evidence_logits":
+            raise ValueError(
+                "class evidence margin supports only target='class_evidence_logits'"
+            )
+        if output.class_evidence_logits is None:
+            raise ValueError(
+                "class evidence margin enabled but model did not return "
+                "class_evidence_logits"
+            )
+        logits = output.class_evidence_logits
+        if logits.ndim != 2:
+            raise ValueError(
+                "class_evidence_logits must have shape (B, C), "
+                f"got {tuple(logits.shape)}"
+            )
+        if int(logits.shape[1]) < 2:
+            raise ValueError("class evidence margin requires at least two classes")
+        label_indices = labels.to(device=logits.device, dtype=torch.long)
+        if label_indices.ndim != 1:
+            raise ValueError(
+                "labels must have shape (B,) for class evidence margin loss"
+            )
+        if int(label_indices.shape[0]) != int(logits.shape[0]):
+            raise ValueError(
+                "labels batch size must match class_evidence_logits batch size"
+            )
+        if label_indices.numel() == 0:
+            raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss
+        if int(label_indices.min().item()) < 0 or int(
+            label_indices.max().item()
+        ) >= int(logits.shape[1]):
+            raise ValueError(
+                "labels contain a class index outside class_evidence_logits"
+            )
+
+        true_logits = logits.gather(1, label_indices.unsqueeze(1)).squeeze(1)
+        margin = float(self.cfg.class_evidence_margin.margin)
+        mode = self.cfg.class_evidence_margin.mode
+        if mode == "minority_vs_major":
+            major_index = self.cfg.class_evidence_margin_major_index
+            if major_index is None:
+                raise ValueError(
+                    "class evidence margin mode='minority_vs_major' requires "
+                    "class_evidence_margin_major_index"
+                )
+            if major_index < 0 or major_index >= int(logits.shape[1]):
+                raise ValueError(
+                    "class_evidence_margin_major_index is outside class_evidence_logits"
+                )
+            eligible = label_indices != int(major_index)
+            if not bool(eligible.any()):
+                raw_loss = logits.sum() * 0.0
+            else:
+                major_logits = logits[:, int(major_index)]
+                margin_gap = true_logits - major_logits
+                raw_loss = torch.relu(margin - margin_gap[eligible]).mean()
+        elif mode == "true_vs_hardest_negative":
+            negative_logits = logits.masked_fill(
+                F.one_hot(
+                    label_indices,
+                    num_classes=int(logits.shape[1]),
+                ).to(dtype=torch.bool, device=logits.device),
+                -torch.inf,
+            )
+            hardest_negative = negative_logits.max(dim=1).values
+            margin_gap = true_logits - hardest_negative
+            raw_loss = torch.relu(margin - margin_gap).mean()
+        else:
+            raise ValueError(
+                "class evidence margin mode must be 'minority_vs_major' or "
+                "'true_vs_hardest_negative'"
+            )
+        weighted_loss = float(self.cfg.class_evidence_margin.weight) * raw_loss
+        return raw_loss, weighted_loss
+
     def _branch_binary_targets(
         self,
         labels: Tensor,
@@ -778,6 +867,14 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + class_gate_diversity_regularization
             monitor_total = monitor_total + class_gate_diversity_regularization
+        class_evidence_margin: Tensor | None = None
+        class_evidence_margin_loss: Tensor | None = None
+        if self.cfg.class_evidence_margin.enabled:
+            class_evidence_margin, class_evidence_margin_loss = (
+                self._compute_class_evidence_margin_loss(output, labels)
+            )
+            scheduled_total = scheduled_total + class_evidence_margin_loss
+            monitor_total = monitor_total + class_evidence_margin_loss
         return LossComponents(
             total=monitor_total if use_monitor_total else scheduled_total,
             total_scheduled=scheduled_total,
@@ -791,6 +888,8 @@ class Trainer(LoggingMixin):
             gate_entropy_regularization=gate_entropy_regularization,
             class_gate_diversity=class_gate_diversity,
             class_gate_diversity_regularization=class_gate_diversity_regularization,
+            class_evidence_margin=class_evidence_margin,
+            class_evidence_margin_loss=class_evidence_margin_loss,
             branch_binary_aux_weight=branch_binary_weight,
             branch_binary_aux_monitor_weight=branch_binary_monitor_weight,
         )
@@ -822,6 +921,8 @@ class Trainer(LoggingMixin):
             "gate_entropy_regularization": 0.0,
             "class_gate_diversity": 0.0,
             "class_gate_diversity_regularization": 0.0,
+            "class_evidence_margin": 0.0,
+            "class_evidence_margin_loss": 0.0,
             "branch_binary_aux_weight": 0.0,
             "branch_binary_aux_monitor_weight": 0.0,
         }
@@ -881,6 +982,10 @@ class Trainer(LoggingMixin):
                 "class_gate_diversity": loss_components.class_gate_diversity,
                 "class_gate_diversity_regularization": (
                     loss_components.class_gate_diversity_regularization
+                ),
+                "class_evidence_margin": loss_components.class_evidence_margin,
+                "class_evidence_margin_loss": (
+                    loss_components.class_evidence_margin_loss
                 ),
                 "branch_binary_aux_weight": (loss_components.branch_binary_aux_weight),
                 "branch_binary_aux_monitor_weight": (
@@ -1075,6 +1180,14 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "train_class_evidence_margin": train_components.get(
+                        "class_evidence_margin",
+                        0.0,
+                    ),
+                    "train_loss_class_evidence_margin": train_components.get(
+                        "class_evidence_margin_loss",
+                        0.0,
+                    ),
                 }
             )
             val_components = dict(val_result.loss_components)
@@ -1123,6 +1236,14 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "val_class_evidence_margin": val_components.get(
+                        "class_evidence_margin",
+                        0.0,
+                    ),
+                    "val_loss_class_evidence_margin": val_components.get(
+                        "class_evidence_margin_loss",
+                        0.0,
+                    ),
                 }
             )
             train_loss_component_history.append(train_components)
@@ -1146,7 +1267,9 @@ class Trainer(LoggingMixin):
                     "Branch Binary Weight: %.4f | Train Gate Entropy: %.4f | "
                     "Val Gate Entropy: %.4f | Train Evidence Aux Loss: %.4f | "
                     "Val Evidence Aux Loss: %.4f | Train Class Gate Diversity: %.4f | "
-                    "Val Class Gate Diversity: %.4f | Val Scheduled Loss: %.4f",
+                    "Val Class Gate Diversity: %.4f | "
+                    "Train Class Evidence Margin: %.4f | "
+                    "Val Class Evidence Margin: %.4f | Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
@@ -1175,6 +1298,8 @@ class Trainer(LoggingMixin):
                     val_components.get("evidence_auxiliary_loss", 0.0),
                     train_components.get("class_gate_diversity", 0.0),
                     val_components.get("class_gate_diversity", 0.0),
+                    train_components.get("class_evidence_margin", 0.0),
+                    val_components.get("class_evidence_margin", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
             else:
@@ -1188,7 +1313,9 @@ class Trainer(LoggingMixin):
                     "Branch Binary Weight: %.4f | Train Gate Entropy: %.4f | "
                     "Val Gate Entropy: %.4f | Train Evidence Aux Loss: %.4f | "
                     "Val Evidence Aux Loss: %.4f | Train Class Gate Diversity: %.4f | "
-                    "Val Class Gate Diversity: %.4f | Val Scheduled Loss: %.4f",
+                    "Val Class Gate Diversity: %.4f | "
+                    "Train Class Evidence Margin: %.4f | "
+                    "Val Class Evidence Margin: %.4f | Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
@@ -1214,6 +1341,8 @@ class Trainer(LoggingMixin):
                     val_components.get("evidence_auxiliary_loss", 0.0),
                     train_components.get("class_gate_diversity", 0.0),
                     val_components.get("class_gate_diversity", 0.0),
+                    train_components.get("class_evidence_margin", 0.0),
+                    val_components.get("class_evidence_margin", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
 

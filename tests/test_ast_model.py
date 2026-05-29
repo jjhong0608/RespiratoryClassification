@@ -13,6 +13,7 @@ from src.models.model import (
     BranchMilHead,
     BranchMilOutput,
     ClassAwareBranchGatedEvidencePooling,
+    ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
     ClassGateGlobalResidualConfig,
     ClassifierConfig,
@@ -616,6 +617,13 @@ def test_model_forward_uses_class_aware_branch_gated_evidence_pooling(
             output.branch_logits,
         ),
     )
+    assert output.class_gated_branch_logit_features is not None
+    assert output.class_gated_branch_logit_features.shape == (2, num_classes)
+    assert torch.allclose(
+        output.class_gated_branch_logit_features,
+        output.class_gated_branch_logits,
+    )
+    assert output.class_gated_branch_logit_feature_mode == "raw"
     assert output.class_evidence_gate_entropy is not None
     assert output.class_evidence_gate_entropy.shape == (2, num_classes)
     assert output.evidence_gate_weights is not None
@@ -659,6 +667,49 @@ def test_class_aware_model_can_disable_global_residual() -> None:
             output.branch_logits,
         ),
     )
+    assert output.class_gated_branch_logit_features is not None
+    assert torch.allclose(
+        output.class_gated_branch_logit_features,
+        output.class_gated_branch_logits,
+    )
+    assert output.class_gated_branch_logit_feature_mode == "raw"
+
+
+def test_class_aware_model_uses_hardest_negative_branch_logit_features() -> None:
+    model = MultiScaleRdtAstModel(
+        _small_model_config(
+            num_classes=3,
+            evidence_pooling=EvidencePoolingConfig(
+                type="class_aware_branch_gated",
+                dropout=0.0,
+                class_gate=ClassGateConfig(
+                    branch_logit_feature=ClassGateBranchLogitFeatureConfig(
+                        mode="hardest_negative_margin"
+                    )
+                ),
+            ),
+        )
+    )
+
+    output = model(torch.randn(2, 32, 32))
+
+    assert output.class_gated_branch_logits is not None
+    assert output.class_gated_branch_logit_features is not None
+    raw_scores = output.class_gated_branch_logits
+    num_classes = raw_scores.shape[1]
+    negative_scores = raw_scores.unsqueeze(1).expand(-1, num_classes, -1)
+    self_mask = torch.eye(num_classes, dtype=torch.bool).unsqueeze(0)
+    expected_features = (
+        raw_scores
+        - negative_scores.masked_fill(
+            self_mask,
+            float("-inf"),
+        )
+        .max(dim=-1)
+        .values
+    )
+    assert torch.allclose(output.class_gated_branch_logit_features, expected_features)
+    assert output.class_gated_branch_logit_feature_mode == "hardest_negative_margin"
 
 
 def test_class_aware_model_fixed_residual_scale_is_not_trainable() -> None:

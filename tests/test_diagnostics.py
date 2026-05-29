@@ -58,6 +58,8 @@ def _class_aware_output() -> AstModelOutput:
         class_evidence_logits=torch.tensor([[0.2, 0.8, -0.1]]),
         global_residual_logits=torch.tensor([[0.01, 0.02, 0.03]]),
         class_gated_branch_logits=torch.tensor([[0.12, 0.34, 0.56]]),
+        class_gated_branch_logit_features=torch.tensor([[-0.44, -0.22, 0.22]]),
+        class_gated_branch_logit_feature_mode="hardest_negative_margin",
         class_evidence_gate_weights=torch.tensor(
             [[[0.8, 0.2], [0.25, 0.75], [0.5, 0.5]]]
         ),
@@ -197,6 +199,12 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
         0.3400000035762787,
         0.5600000023841858,
     ]
+    assert row["class_gated_branch_logit_features"] == [
+        -0.4399999976158142,
+        -0.2199999988079071,
+        0.2199999988079071,
+    ]
+    assert row["class_gated_branch_logit_feature_mode"] == ("hardest_negative_margin")
     assert row["class_evidence_gate_weights"][1] == [
         0.25,
         0.75,

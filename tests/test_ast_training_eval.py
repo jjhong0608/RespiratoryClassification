@@ -39,6 +39,7 @@ from src.utils.config import (
     BranchBinaryPosWeightConfig,
     CheckpointingConfig,
     CheckpointMonitorConfig,
+    ClassEvidenceMarginConfig,
     ClassGateDiversityRegularizationConfig,
     ClassifierConfig,
     DataConfig,
@@ -229,6 +230,14 @@ def _trainer_cfg(
     class_gate_evidence_auxiliary_weight: float = 0.1,
     class_gate_diversity_regularization_enabled: bool = False,
     class_gate_diversity_regularization_weight: float = 0.0,
+    class_evidence_margin_enabled: bool = False,
+    class_evidence_margin_weight: float = 0.0,
+    class_evidence_margin_value: float = 0.0,
+    class_evidence_margin_mode: Literal[
+        "minority_vs_major",
+        "true_vs_hardest_negative",
+    ] = "minority_vs_major",
+    class_evidence_margin_major_index: int | None = None,
 ) -> TrainerConfig:
     return TrainerConfig(
         device="cpu",
@@ -294,6 +303,17 @@ def _trainer_cfg(
             target="class_evidence_gate",
             metric="js_divergence",
         ),
+        class_evidence_margin=ClassEvidenceMarginConfig(
+            enabled=class_evidence_margin_enabled,
+            weight=class_evidence_margin_weight,
+            margin=class_evidence_margin_value,
+            target="class_evidence_logits",
+            mode=class_evidence_margin_mode,
+            major_class="normal"
+            if class_evidence_margin_major_index is not None
+            else None,
+        ),
+        class_evidence_margin_major_index=class_evidence_margin_major_index,
         analysis=_analysis_cfg(),
         early_stopping=EarlyStoppingConfig(
             enabled=True,
@@ -1358,6 +1378,161 @@ def test_trainer_class_gate_diversity_regularization_subtracts_js_divergence() -
     assert torch.isclose(components.total, final_loss + regularization)
 
 
+def test_trainer_class_evidence_margin_minority_vs_major() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.05,
+            class_evidence_margin_value=0.5,
+            class_evidence_margin_mode="minority_vs_major",
+            class_evidence_margin_major_index=0,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(3, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(3, 32),
+        class_evidence_logits=torch.tensor(
+            [
+                [1.3, 0.2, -0.1],
+                [0.2, 0.4, 0.1],
+                [0.9, 0.0, 1.0],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1, 2], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    raw_margin, weighted_margin = trainer._compute_class_evidence_margin_loss(
+        output,
+        labels,
+    )
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+
+    assert torch.isclose(raw_margin, torch.tensor(0.35))
+    assert torch.isclose(weighted_margin, torch.tensor(0.0175))
+    assert torch.isclose(components.total, final_loss + weighted_margin)
+    assert torch.isclose(components.class_evidence_margin, raw_margin)
+    assert torch.isclose(components.class_evidence_margin_loss, weighted_margin)
+
+
+def test_trainer_class_evidence_margin_minority_vs_major_zero_without_minority() -> (
+    None
+):
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.05,
+            class_evidence_margin_value=0.5,
+            class_evidence_margin_mode="minority_vs_major",
+            class_evidence_margin_major_index=0,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.tensor(
+            [[1.3, 0.2, -0.1], [0.9, 0.5, 0.2]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 0], dtype=torch.long)
+
+    raw_margin, weighted_margin = trainer._compute_class_evidence_margin_loss(
+        output,
+        labels,
+    )
+
+    assert torch.isclose(raw_margin, torch.tensor(0.0))
+    assert torch.isclose(weighted_margin, torch.tensor(0.0))
+
+
+def test_trainer_class_evidence_margin_true_vs_hardest_negative() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.2,
+            class_evidence_margin_value=0.5,
+            class_evidence_margin_mode="true_vs_hardest_negative",
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.tensor(
+            [[1.0, 0.4, 1.3], [0.2, 0.9, 0.6]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_margin, weighted_margin = trainer._compute_class_evidence_margin_loss(
+        output,
+        labels,
+    )
+
+    assert torch.isclose(raw_margin, torch.tensor(0.5))
+    assert torch.isclose(weighted_margin, torch.tensor(0.1))
+
+
+def test_trainer_raises_when_class_evidence_margin_enabled_without_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.05,
+            class_evidence_margin_value=0.5,
+            class_evidence_margin_mode="minority_vs_major",
+            class_evidence_margin_major_index=0,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=None,
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="class evidence margin enabled"):
+        trainer._compute_total_loss(criterion, output, labels)
+
+
+def test_trainer_raises_when_class_evidence_margin_label_is_outside_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.05,
+            class_evidence_margin_value=0.5,
+            class_evidence_margin_mode="true_vs_hardest_negative",
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.zeros(2, 3),
+    )
+    labels = torch.tensor([1, 3], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="outside class_evidence_logits"):
+        trainer._compute_class_evidence_margin_loss(output, labels)
+
+
 def test_trainer_raises_when_class_gate_diversity_enabled_without_weights() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -1452,7 +1627,7 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
                 logits=torch.zeros(batch_size, 3, dtype=torch.float32),
                 pooled_embedding=torch.zeros(batch_size, 32),
                 class_evidence_logits=torch.tensor(
-                    [[0.1, 0.8, -0.2], [0.7, 0.1, 0.0]],
+                    [[0.1, 0.4, -0.2], [0.7, 0.1, 0.0]],
                     dtype=torch.float32,
                 ),
                 class_evidence_gate_weights=torch.tensor(
@@ -1473,6 +1648,11 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
             class_gate_evidence_auxiliary_weight=0.2,
             class_gate_diversity_regularization_enabled=True,
             class_gate_diversity_regularization_weight=0.3,
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.05,
+            class_evidence_margin_value=0.5,
+            class_evidence_margin_mode="minority_vs_major",
+            class_evidence_margin_major_index=0,
         )
     )
     batch = ClipBatch(
@@ -1494,6 +1674,8 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
     assert "evidence_auxiliary_loss" in result.loss_components
     assert "class_gate_diversity" in result.loss_components
     assert "class_gate_diversity_regularization" in result.loss_components
+    assert "class_evidence_margin" in result.loss_components
+    assert "class_evidence_margin_loss" in result.loss_components
 
 
 def test_configured_checkpoint_monitors_keep_top_three(tmp_path: Path) -> None:

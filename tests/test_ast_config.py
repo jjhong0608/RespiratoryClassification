@@ -720,6 +720,12 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
         == "class_evidence_gate"
     )
     assert cfg.train.loss.class_gate_diversity_regularization.metric == "js_divergence"
+    assert cfg.train.loss.class_evidence_margin.enabled is False
+    assert cfg.train.loss.class_evidence_margin.weight == 0.0
+    assert cfg.train.loss.class_evidence_margin.margin == 0.0
+    assert cfg.train.loss.class_evidence_margin.target == "class_evidence_logits"
+    assert cfg.train.loss.class_evidence_margin.mode == "minority_vs_major"
+    assert cfg.train.loss.class_evidence_margin.major_class is None
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.sampler.weighted_random is True
     assert cfg.train.sampler.enabled is False
@@ -782,6 +788,47 @@ def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
     assert class_gate.global_residual.learnable is True
     assert class_gate.evidence_auxiliary.enabled is False
     assert class_gate.evidence_auxiliary.weight == 0.1
+    assert class_gate.branch_logit_feature.mode == "raw"
+
+
+def test_class_aware_branch_logit_feature_mode_loads(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    evidence_pooling = _class_aware_evidence_pooling_payload()
+    evidence_pooling["class_gate"]["branch_logit_feature"] = {
+        "mode": "hardest_negative_margin"
+    }
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = evidence_pooling
+    config_path = _write_json(
+        tmp_path / "class_aware_branch_logit_feature.json",
+        payload,
+    )
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    class_gate = cfg.model.encoder.architecture.evidence_pooling.class_gate
+    assert class_gate.branch_logit_feature.mode == "hardest_negative_margin"
+
+
+def test_invalid_class_aware_branch_logit_feature_mode_is_rejected(
+    tmp_path: Path,
+) -> None:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    evidence_pooling = _class_aware_evidence_pooling_payload()
+    evidence_pooling["class_gate"]["branch_logit_feature"] = {
+        "mode": "true_vs_hardest_negative"
+    }
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = evidence_pooling
+    config_path = _write_json(
+        tmp_path / "bad_class_aware_branch_logit_feature.json",
+        payload,
+    )
+
+    with pytest.raises(ValueError, match="branch_logit_feature.mode"):
+        JsonConfigLoader.load_training(config_path)
 
 
 def test_two_label_class_aware_cross_entropy_config_loads(tmp_path: Path) -> None:
@@ -1076,6 +1123,64 @@ def test_valid_class_gate_diversity_regularization_config_loads(
     assert diversity_cfg.metric == "js_divergence"
 
 
+def _class_aware_cross_entropy_payload() -> dict:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "crackle": 1, "wheeze": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    return payload
+
+
+def test_valid_class_evidence_margin_minority_vs_major_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_evidence_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.5,
+        "target": "class_evidence_logits",
+        "mode": "minority_vs_major",
+        "major_class": "normal",
+    }
+    config_path = _write_json(tmp_path / "class_evidence_margin.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    margin_cfg = cfg.train.loss.class_evidence_margin
+    assert margin_cfg.enabled is True
+    assert margin_cfg.weight == 0.05
+    assert margin_cfg.margin == 0.5
+    assert margin_cfg.target == "class_evidence_logits"
+    assert margin_cfg.mode == "minority_vs_major"
+    assert margin_cfg.major_class == "normal"
+
+
+def test_valid_class_evidence_margin_true_vs_hardest_config_loads_without_major(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_evidence_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.5,
+        "target": "class_evidence_logits",
+        "mode": "true_vs_hardest_negative",
+    }
+    config_path = _write_json(tmp_path / "class_evidence_margin_hardest.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    margin_cfg = cfg.train.loss.class_evidence_margin
+    assert margin_cfg.enabled is True
+    assert margin_cfg.mode == "true_vs_hardest_negative"
+    assert margin_cfg.major_class is None
+
+
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
@@ -1106,6 +1211,106 @@ def test_invalid_class_gate_diversity_regularization_config_is_rejected(
     )
 
     with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "class_evidence_margin.enabled"),
+        ("weight", 0.0, "class_evidence_margin.weight"),
+        ("weight", -0.001, "class_evidence_margin.weight"),
+        ("margin", 0.0, "class_evidence_margin.margin"),
+        ("margin", -0.1, "class_evidence_margin.margin"),
+        ("target", "final_logits", "class_evidence_margin.target"),
+        ("mode", "minority_vs_normal", "class_evidence_margin.mode"),
+        ("major_class", "airway", "class_evidence_margin.major_class"),
+    ],
+)
+def test_invalid_class_evidence_margin_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_evidence_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.5,
+        "target": "class_evidence_logits",
+        "mode": "minority_vs_major",
+        "major_class": "normal",
+    }
+    payload["train"]["loss"]["class_evidence_margin"][field] = value
+    config_path = _write_json(tmp_path / "bad_class_evidence_margin.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_class_evidence_margin_minority_vs_major_requires_major_class(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_evidence_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.5,
+        "target": "class_evidence_logits",
+        "mode": "minority_vs_major",
+    }
+    config_path = _write_json(
+        tmp_path / "class_evidence_margin_missing_major.json",
+        payload,
+    )
+
+    with pytest.raises(ValueError, match="major_class is required"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_class_evidence_margin_requires_class_aware_pooling(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "crackle": 1, "wheeze": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["train"]["loss"]["class_evidence_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.5,
+        "target": "class_evidence_logits",
+        "mode": "minority_vs_major",
+        "major_class": "normal",
+    }
+    config_path = _write_json(
+        tmp_path / "class_evidence_margin_mean_pooling.json",
+        payload,
+    )
+
+    with pytest.raises(ValueError, match="class_evidence_margin requires"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_class_evidence_margin_requires_cross_entropy(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    payload["train"]["loss"]["class_evidence_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.5,
+        "target": "class_evidence_logits",
+        "mode": "minority_vs_major",
+        "major_class": "normal",
+    }
+    config_path = _write_json(
+        tmp_path / "class_evidence_margin_bce.json",
+        payload,
+    )
+
+    with pytest.raises(ValueError, match="class_evidence_margin.*cross_entropy"):
         JsonConfigLoader.load_training(config_path)
 
 

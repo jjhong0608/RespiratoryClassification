@@ -70,6 +70,11 @@ class ClassGateEvidenceAuxiliaryConfig:
 
 
 @dataclass(frozen=True)
+class ClassGateBranchLogitFeatureConfig:
+    mode: Literal["raw", "hardest_negative_margin"] = "raw"
+
+
+@dataclass(frozen=True)
 class ClassGateConfig:
     mode: Literal["query"] = "query"
     scorer: Literal["diagonal"] = "diagonal"
@@ -78,6 +83,9 @@ class ClassGateConfig:
     )
     evidence_auxiliary: ClassGateEvidenceAuxiliaryConfig = field(
         default_factory=ClassGateEvidenceAuxiliaryConfig
+    )
+    branch_logit_feature: ClassGateBranchLogitFeatureConfig = field(
+        default_factory=ClassGateBranchLogitFeatureConfig
     )
 
 
@@ -185,6 +193,8 @@ class AstModelOutput:
     class_evidence_gate_weights: Tensor | None = None
     class_evidence_gate_entropy: Tensor | None = None
     class_gated_branch_logits: Tensor | None = None
+    class_gated_branch_logit_features: Tensor | None = None
+    class_gated_branch_logit_feature_mode: str | None = None
     global_residual_scale: Tensor | None = None
     branch_evidence_norms: Tensor | None = None
     selected_evidence_dropout_mask: Tensor | None = None
@@ -1097,6 +1107,43 @@ class MultiScaleRdtAstModel(nn.Module):
             return torch.stack(branch_logits, dim=1)
         return torch.stack(branch_logits, dim=1)
 
+    @staticmethod
+    def _class_gated_branch_logit_features(
+        raw_scores: Tensor,
+        *,
+        mode: Literal["raw", "hardest_negative_margin"],
+    ) -> Tensor:
+        if mode == "raw":
+            return raw_scores
+        if mode != "hardest_negative_margin":
+            raise ValueError(f"Unsupported branch logit feature mode: {mode}")
+        if raw_scores.ndim != 2:
+            raise ValueError(
+                "class_gated_branch_logits must have shape (B, C), "
+                f"got {tuple(raw_scores.shape)}"
+            )
+        num_classes = raw_scores.shape[1]
+        if num_classes < 2:
+            raise ValueError(
+                "hardest_negative_margin branch logit features require "
+                "at least two classes"
+            )
+        negative_scores = raw_scores.unsqueeze(1).expand(-1, num_classes, -1)
+        self_mask = torch.eye(
+            num_classes,
+            dtype=torch.bool,
+            device=raw_scores.device,
+        ).unsqueeze(0)
+        hardest_negative = (
+            negative_scores.masked_fill(
+                self_mask,
+                float("-inf"),
+            )
+            .max(dim=-1)
+            .values
+        )
+        return raw_scores - hardest_negative
+
     def forward(self, input_values: Tensor) -> AstModelOutput:
         if input_values.ndim != 3:
             raise ValueError(
@@ -1204,6 +1251,8 @@ class MultiScaleRdtAstModel(nn.Module):
         global_residual_logits: Tensor | None = None
         global_residual_scale: Tensor | None = None
         class_gated_branch_logits: Tensor | None = None
+        class_gated_branch_logit_features: Tensor | None = None
+        class_gated_branch_logit_feature_mode: str | None = None
         if self.class_aware_evidence_pooling:
             class_evidence_logits = pooling_output.class_evidence_logits
             if class_evidence_logits is None:
@@ -1245,6 +1294,12 @@ class MultiScaleRdtAstModel(nn.Module):
                 class_evidence_gate_weights,
                 stacked_branch_logits,
             )
+            branch_feature_cfg = self.cfg.encoder.architecture.evidence_pooling.class_gate.branch_logit_feature
+            class_gated_branch_logit_feature_mode = branch_feature_cfg.mode
+            class_gated_branch_logit_features = self._class_gated_branch_logit_features(
+                class_gated_branch_logits,
+                mode=branch_feature_cfg.mode,
+            )
             if self.global_residual_combiner is None:
                 pooled_embedding = evidence_embedding
                 logits = class_evidence_logits
@@ -1265,7 +1320,7 @@ class MultiScaleRdtAstModel(nn.Module):
                     -1,
                 )
                 fusion_input = torch.cat(
-                    [class_evidence_features, class_gated_branch_logits],
+                    [class_evidence_features, class_gated_branch_logit_features],
                     dim=1,
                 )
                 pooled_embedding = self.fusion_projector(fusion_input)
@@ -1309,6 +1364,10 @@ class MultiScaleRdtAstModel(nn.Module):
             class_evidence_gate_weights=pooling_output.class_gate_weights,
             class_evidence_gate_entropy=pooling_output.class_gate_entropy,
             class_gated_branch_logits=class_gated_branch_logits,
+            class_gated_branch_logit_features=class_gated_branch_logit_features,
+            class_gated_branch_logit_feature_mode=(
+                class_gated_branch_logit_feature_mode
+            ),
             global_residual_scale=global_residual_scale,
             branch_evidence_norms=pooling_output.branch_evidence_norms,
             selected_evidence_dropout_mask=selected_evidence_dropout_mask,

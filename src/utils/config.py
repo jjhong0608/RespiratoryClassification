@@ -10,6 +10,7 @@ from src.evaluation.thresholds import ThresholdOptimizationConfig
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
     ClassGateEvidenceAuxiliaryConfig,
     ClassGateGlobalResidualConfig,
@@ -216,6 +217,19 @@ class ClassGateDiversityRegularizationConfig:
 
 
 @dataclass(frozen=True)
+class ClassEvidenceMarginConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    margin: float = 0.0
+    target: Literal["class_evidence_logits"] = "class_evidence_logits"
+    mode: Literal[
+        "minority_vs_major",
+        "true_vs_hardest_negative",
+    ] = "minority_vs_major"
+    major_class: str | None = None
+
+
+@dataclass(frozen=True)
 class ClassWeightingConfig:
     enabled: bool = False
     type: Literal["sqrt_inverse_frequency"] = "sqrt_inverse_frequency"
@@ -289,6 +303,9 @@ class LossConfig:
     )
     class_gate_diversity_regularization: ClassGateDiversityRegularizationConfig = field(
         default_factory=ClassGateDiversityRegularizationConfig
+    )
+    class_evidence_margin: ClassEvidenceMarginConfig = field(
+        default_factory=ClassEvidenceMarginConfig
     )
 
 
@@ -430,6 +447,7 @@ class JsonConfigLoader:
     _EVIDENCE_POOLING_TYPES = {"mean", "branch_gated", "class_aware_branch_gated"}
     _CLASS_GATE_MODES = {"query"}
     _CLASS_GATE_SCORERS = {"diagonal"}
+    _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
     _GATE_ENTROPY_TARGETS = {
         "evidence_gate",
         "class_evidence_gate",
@@ -437,6 +455,11 @@ class JsonConfigLoader:
     }
     _CLASS_GATE_DIVERSITY_TARGETS = {"class_evidence_gate"}
     _CLASS_GATE_DIVERSITY_METRICS = {"js_divergence"}
+    _CLASS_EVIDENCE_MARGIN_TARGETS = {"class_evidence_logits"}
+    _CLASS_EVIDENCE_MARGIN_MODES = {
+        "minority_vs_major",
+        "true_vs_hardest_negative",
+    }
     _TIME_SHIFT_MODES = {"zero_pad", "roll"}
     _AUGMENTATION_POLICY_TYPES = {"independent", "one_of"}
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
@@ -770,6 +793,15 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate.scorer "
                 "must be 'diagonal'"
             )
+        if (
+            class_gate.branch_logit_feature.mode
+            not in JsonConfigLoader._CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "branch_logit_feature.mode must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES)}"
+            )
         if not isinstance(class_gate.global_residual.enabled, bool):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
@@ -1053,6 +1085,70 @@ class JsonConfigLoader:
                 "train.loss.class_gate_diversity_regularization.weight must be "
                 "greater than zero when enabled"
             )
+        if not isinstance(cfg.loss.class_evidence_margin.enabled, bool):
+            raise ValueError(
+                "train.loss.class_evidence_margin.enabled must be a boolean"
+            )
+        if (
+            cfg.loss.class_evidence_margin.target
+            not in JsonConfigLoader._CLASS_EVIDENCE_MARGIN_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_margin.target must be "
+                "'class_evidence_logits'"
+            )
+        if (
+            cfg.loss.class_evidence_margin.mode
+            not in JsonConfigLoader._CLASS_EVIDENCE_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_margin.mode must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_EVIDENCE_MARGIN_MODES)}"
+            )
+        if cfg.loss.class_evidence_margin.major_class is not None and not isinstance(
+            cfg.loss.class_evidence_margin.major_class, str
+        ):
+            raise TypeError(
+                "train.loss.class_evidence_margin.major_class must be a string or null"
+            )
+        if (
+            cfg.loss.class_evidence_margin.major_class is not None
+            and cfg.loss.class_evidence_margin.major_class not in label_to_index
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_margin.major_class must exist in "
+                "data.label_to_index"
+            )
+        if cfg.loss.class_evidence_margin.enabled:
+            if cfg.loss.class_evidence_margin.weight <= 0:
+                raise ValueError(
+                    "train.loss.class_evidence_margin.weight must be greater than "
+                    "zero when enabled"
+                )
+            if cfg.loss.class_evidence_margin.margin <= 0:
+                raise ValueError(
+                    "train.loss.class_evidence_margin.margin must be greater than "
+                    "zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.class_evidence_margin is supported only for "
+                    "cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.class_evidence_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if (
+                cfg.loss.class_evidence_margin.mode == "minority_vs_major"
+                and cfg.loss.class_evidence_margin.major_class is None
+            ):
+                raise ValueError(
+                    "train.loss.class_evidence_margin.major_class is required "
+                    "when mode='minority_vs_major'"
+                )
         if not isinstance(cfg.loss.class_weighting.enabled, bool):
             raise ValueError("train.loss.class_weighting.enabled must be a boolean")
         if cfg.loss.class_weighting.type not in JsonConfigLoader._CLASS_WEIGHTING_TYPES:
@@ -1430,6 +1526,9 @@ class JsonConfigLoader:
         class_gate["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(
             **dict(class_gate.get("evidence_auxiliary", {}))
         )
+        class_gate["branch_logit_feature"] = ClassGateBranchLogitFeatureConfig(
+            **dict(class_gate.get("branch_logit_feature", {}))
+        )
         kwargs["class_gate"] = ClassGateConfig(**class_gate)
         return EvidencePoolingConfig(**kwargs)
 
@@ -1543,6 +1642,9 @@ class JsonConfigLoader:
             ClassGateDiversityRegularizationConfig(
                 **dict(loss.get("class_gate_diversity_regularization", {}))
             )
+        )
+        loss["class_evidence_margin"] = ClassEvidenceMarginConfig(
+            **dict(loss.get("class_evidence_margin", {}))
         )
         kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))

@@ -99,6 +99,11 @@ def build_diagnostic_rows(
         if output.class_gated_branch_logits is not None
         else None
     )
+    class_gated_branch_logit_features = (
+        output.class_gated_branch_logit_features.detach().cpu()
+        if output.class_gated_branch_logit_features is not None
+        else None
+    )
     global_residual_scale = (
         output.global_residual_scale.detach().cpu()
         if output.global_residual_scale is not None
@@ -156,6 +161,14 @@ def build_diagnostic_rows(
                 row["class_gated_branch_logits"] = class_gated_branch_logits[
                     index
                 ].tolist()
+            if class_gated_branch_logit_features is not None:
+                row["class_gated_branch_logit_features"] = (
+                    class_gated_branch_logit_features[index].tolist()
+                )
+            if output.class_gated_branch_logit_feature_mode is not None:
+                row["class_gated_branch_logit_feature_mode"] = (
+                    output.class_gated_branch_logit_feature_mode
+                )
             if binary_auxiliary_targets_cpu is not None:
                 row["binary_auxiliary_target"] = int(
                     binary_auxiliary_targets_cpu[index].item()

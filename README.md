@@ -484,6 +484,15 @@ same class-aware gate into `class_gated_branch_logits` with shape
 `[batch, class]`. The raw mean branch embedding and raw flattened branch logits
 are only used by the legacy `mean` and `branch_gated` fusion paths.
 
+The residual classifier can choose how to consume the class-gated branch-logit
+feature through
+`model.encoder.architecture.evidence_pooling.class_gate.branch_logit_feature.mode`.
+`"raw"` preserves the original `class_gated_branch_logits`. The optional
+`"hardest_negative_margin"` mode is label-free and replaces the residual input
+feature with `score[c] - max(score[j] for j != c)`, so train and evaluation use
+the same feature semantics. Diagnostics keep both the raw score and the actual
+residual feature.
+
 H0 branch-gated configs:
 
 - `configs/training_h0_branch_gated_seed0.json`
@@ -558,6 +567,9 @@ The active schema is:
             "evidence_auxiliary": {
               "enabled": false,
               "weight": 0.1
+            },
+            "branch_logit_feature": {
+              "mode": "raw"
             }
           }
         },
@@ -620,6 +632,14 @@ The active schema is:
         "weight": 0.0,
         "target": "class_evidence_gate",
         "metric": "js_divergence"
+      },
+      "class_evidence_margin": {
+        "enabled": false,
+        "weight": 0.0,
+        "margin": 0.0,
+        "target": "class_evidence_logits",
+        "mode": "minority_vs_major",
+        "major_class": null
       }
     },
     "initialization": {
@@ -662,6 +682,8 @@ Additional experiment knobs:
   `class_aware_branch_gated`
 - `architecture.evidence_pooling.class_gate.evidence_auxiliary.enabled = true`
   adds `weight * CE(class_evidence_logits, labels)` for class-aware pooling
+- `architecture.evidence_pooling.class_gate.branch_logit_feature.mode` supports
+  `raw` and `hardest_negative_margin` for the class-aware residual classifier
 - `data.augmentation` is disabled by default and applies only to train datasets
 - `data.augmentation.policy.type` supports `independent` and `one_of`
 - `architecture.token_augmentation` controls branch event and selected evidence
@@ -673,6 +695,8 @@ Additional experiment knobs:
 - `train.loss.class_gate_diversity_regularization.enabled = true` adds
   `-weight * mean_pairwise_js(class_evidence_gate_weights)` for class-aware
   pooling
+- `train.loss.class_evidence_margin.enabled = true` adds a weighted margin
+  penalty on `class_evidence_logits` for class-aware CE runs
 - `train.loss.branch_auxiliary.weights` overrides scalar
   `branch_auxiliary.weight` with normalized per-branch weighting
 - `train.loss.class_weighting.enabled = true` adds train-derived
@@ -747,6 +771,15 @@ branch-gate distributions and subtracts the weighted mean from the loss. This
 encourages label-specific branch usage but does not force every class to choose
 a unique branch.
 
+When `train.loss.class_evidence_margin.enabled = true`, the trainer adds
+`weight * margin_loss` on `class_evidence_logits` before the global residual is
+combined. `mode = "minority_vs_major"` applies only to samples whose label is
+not `major_class`, requiring their true-class evidence logit to exceed the
+major-class evidence logit by `margin`. `mode = "true_vs_hardest_negative"`
+requires every true-class evidence logit to exceed the largest non-true evidence
+logit by `margin`. This is a training-only auxiliary term; evaluation still uses
+`final_logits` with softmax + argmax.
+
 ## Optimizer Layout
 
 Training keeps two AdamW parameter groups:
@@ -815,8 +848,9 @@ When enabled, diagnostics now include:
 - `class_evidence_gate_weights`, `class_evidence_gate_entropy`,
   `true_class_gate_weights`, `predicted_class_gate_weights`,
   `class_evidence_logits`, `class_gated_branch_logits`,
-  `global_residual_logits`, and `global_residual_scale` when class-aware
-  branch-gated pooling is active
+  `class_gated_branch_logit_features`,
+  `class_gated_branch_logit_feature_mode`, `global_residual_logits`, and
+  `global_residual_scale` when class-aware branch-gated pooling is active
 - `selected_evidence_tokens` with the saved embedding payload only when
   `save_embeddings=true`
 
