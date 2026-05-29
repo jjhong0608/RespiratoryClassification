@@ -136,6 +136,28 @@ def _base_payload() -> dict:
     }
 
 
+def _class_aware_evidence_pooling_payload() -> dict:
+    return {
+        "type": "class_aware_branch_gated",
+        "gate_hidden_size": None,
+        "dropout": 0.15,
+        "temperature": 1.0,
+        "class_gate": {
+            "mode": "query",
+            "scorer": "diagonal",
+            "global_residual": {
+                "enabled": True,
+                "init_scale": 0.1,
+                "learnable": True,
+            },
+            "evidence_auxiliary": {
+                "enabled": False,
+                "weight": 0.1,
+            },
+        },
+    }
+
+
 def _cv_payload() -> dict:
     payload = _base_payload()
     payload["folds"] = [
@@ -738,25 +760,9 @@ def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
     payload["train"]["loss"]["type"] = "cross_entropy"
     payload["train"]["loss"]["auto_pos_weight"] = False
     payload["train"]["loss"]["pos_weight"] = None
-    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = {
-        "type": "class_aware_branch_gated",
-        "gate_hidden_size": None,
-        "dropout": 0.15,
-        "temperature": 1.0,
-        "class_gate": {
-            "mode": "query",
-            "scorer": "diagonal",
-            "global_residual": {
-                "enabled": True,
-                "init_scale": 0.1,
-                "learnable": True,
-            },
-            "evidence_auxiliary": {
-                "enabled": False,
-                "weight": 0.1,
-            },
-        },
-    }
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
     class_aware_path = _write_json(
         tmp_path / "class_aware_branch_gated_pooling.json",
         payload,
@@ -778,6 +784,103 @@ def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
     assert class_gate.evidence_auxiliary.weight == 0.1
 
 
+def test_two_label_class_aware_cross_entropy_config_loads(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    config_path = _write_json(tmp_path / "two_label_class_aware_ce.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert len(cfg.data.label_to_index) == 2
+    assert cfg.train.loss.type == "cross_entropy"
+    assert (
+        cfg.model.encoder.architecture.evidence_pooling.type
+        == "class_aware_branch_gated"
+    )
+
+
+@pytest.mark.parametrize("loss_type", ["bce", "focal"])
+def test_two_label_class_aware_requires_cross_entropy(
+    tmp_path: Path,
+    loss_type: str,
+) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["type"] = loss_type
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    config_path = _write_json(tmp_path / f"class_aware_{loss_type}.json", payload)
+
+    with pytest.raises(ValueError, match="class_aware_branch_gated.*cross_entropy"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_two_label_cross_entropy_requires_class_aware_pooling(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    config_path = _write_json(tmp_path / "two_label_ce_mean_pooling.json", payload)
+
+    with pytest.raises(ValueError, match="Two-label cross_entropy.*class_aware"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("auto_pos_weight", True, "auto_pos_weight.*one-logit"),
+        ("pos_weight", 2.0, "pos_weight.*one-logit"),
+    ],
+)
+def test_two_label_class_aware_cross_entropy_rejects_binary_pos_weighting(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["train"]["loss"][field] = value
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    config_path = _write_json(tmp_path / "two_label_ce_bad_pos_weight.json", payload)
+
+    with pytest.raises(ValueError, match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_two_label_class_aware_cross_entropy_allows_class_weighting(
+    tmp_path: Path,
+) -> None:
+    payload = _base_payload()
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    config_path = _write_json(tmp_path / "two_label_ce_class_weighting.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.class_weighting.enabled is True
+
+
 def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) -> None:
     payload = _base_payload()
     payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
@@ -793,7 +896,6 @@ def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) 
 @pytest.mark.parametrize(
     ("path", "value", "error"),
     [
-        (("type",), "class_aware_branch_gated", "requires more than two labels"),
         (("class_gate", "mode"), "mlp", "class_gate.mode"),
         (("class_gate", "scorer"), "full", "class_gate.scorer"),
         (
@@ -824,29 +926,9 @@ def test_invalid_class_aware_evidence_pooling_config_is_rejected(
     payload = _base_payload()
     payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
     payload["train"]["loss"]["type"] = "cross_entropy"
-    evidence_pooling = {
-        "type": "class_aware_branch_gated",
-        "gate_hidden_size": None,
-        "dropout": 0.15,
-        "temperature": 1.0,
-        "class_gate": {
-            "mode": "query",
-            "scorer": "diagonal",
-            "global_residual": {
-                "enabled": True,
-                "init_scale": 0.1,
-                "learnable": True,
-            },
-            "evidence_auxiliary": {
-                "enabled": True,
-                "weight": 0.1,
-            },
-        },
-    }
+    evidence_pooling = _class_aware_evidence_pooling_payload()
+    evidence_pooling["class_gate"]["evidence_auxiliary"]["enabled"] = True
     payload["model"]["encoder"]["architecture"]["evidence_pooling"] = evidence_pooling
-    if path == ("type",):
-        payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1}
-        payload["train"]["loss"]["type"] = "bce"
     target: dict = evidence_pooling
     for key in path[:-1]:
         target = target[key]

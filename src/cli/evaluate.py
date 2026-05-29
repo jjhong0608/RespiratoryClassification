@@ -222,7 +222,9 @@ def evaluate_checkpoint(
     else:
         threshold_optimization = ThresholdOptimizationResult.disabled(
             cfg.threshold_optimization.metric,
-            reason="threshold optimization is only supported for binary classification",
+            reason=(
+                "threshold optimization is only supported for one-logit binary outputs"
+            ),
         )
         optimized_metrics = baseline_metrics
 

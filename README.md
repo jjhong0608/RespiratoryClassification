@@ -365,9 +365,9 @@ also stores:
 - `threshold_optimization`
 - `optimized_metrics`
 
-Threshold optimization is checkpoint-driven and only applies to binary
-classification. For multiclass evaluation it is reported as disabled with an
-explicit reason.
+Threshold optimization is checkpoint-driven and only applies to one-logit binary
+outputs. Two-class class-aware CE uses softmax + argmax, so it is reported as
+disabled with `decision_threshold = null`.
 
 ## Cross-Validation
 
@@ -686,14 +686,26 @@ Additional experiment knobs:
 
 ## Loss Rules
 
-Loss behavior still depends on the number of classes:
+Loss behavior depends on both the label count and the output semantics:
 
-- Binary (`len(label_to_index) == 2`)
-  - supported losses: `bce`, `focal`
+- One-logit binary (`len(label_to_index) == 2`, `loss.type = "bce"` or
+  `"focal"`)
+  - supported pooling: `mean` or `branch_gated`
+  - logits shape: `[batch]`
+  - prediction: sigmoid + fixed `0.5` threshold during normal evaluation
+  - optional threshold optimization is available from validation scores
   - optional `auto_pos_weight` / `pos_weight`
   - optional branch auxiliary loss uses the same binary criterion on each
     branch logit
-- Multi-class (`len(label_to_index) > 2`)
+- Two-class class-aware CE (`len(label_to_index) == 2`,
+  `loss.type = "cross_entropy"`, `evidence_pooling.type =
+  "class_aware_branch_gated"`)
+  - logits shape: `[batch, 2]`
+  - prediction: softmax + argmax
+  - threshold optimization is disabled and `decision_threshold` is `null`
+  - `auto_pos_weight` / `pos_weight` are rejected
+  - optional `class_weighting` uses train-only class counts
+- Multi-class CE (`len(label_to_index) > 2`)
   - required loss: `cross_entropy`
   - binary-only weighting options are rejected
   - branch auxiliary loss applies cross-entropy to each branch head and then

@@ -121,6 +121,7 @@ def main() -> None:
         imbalance = resolve_imbalance(
             targets=train_targets,
             num_classes=num_classes,
+            loss_type=cfg.train.loss.type,
             pos_weight=cfg.train.loss.pos_weight,
             auto_pos_weight=cfg.train.loss.auto_pos_weight,
             weighted_random=cfg.train.sampler.weighted_random,

@@ -798,14 +798,6 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "evidence_auxiliary.weight must be greater than zero when enabled"
             )
-        if (
-            architecture.evidence_pooling.type == "class_aware_branch_gated"
-            and len(data_cfg.label_to_index) <= 2
-        ):
-            raise ValueError(
-                "model.encoder.architecture.evidence_pooling.type="
-                "'class_aware_branch_gated' requires more than two labels"
-            )
         token_augmentation = architecture.token_augmentation
         if not isinstance(token_augmentation.branch_event_dropout.enabled, bool):
             raise ValueError(
@@ -931,6 +923,7 @@ class JsonConfigLoader:
         num_classes: int,
         num_branches: int,
         label_to_index: Mapping[str, int],
+        evidence_pooling_type: str,
     ) -> None:
         if cfg.epochs <= 0:
             raise ValueError("train.epochs must be greater than zero")
@@ -1073,12 +1066,9 @@ class JsonConfigLoader:
             raise ValueError("train.loss.class_weighting.normalize must be 'mean_one'")
         if cfg.loss.class_weighting.source not in JsonConfigLoader._LOSS_WEIGHT_SOURCES:
             raise ValueError("train.loss.class_weighting.source must be 'train'")
-        if cfg.loss.class_weighting.enabled and (
-            num_classes <= 2 or cfg.loss.type != "cross_entropy"
-        ):
+        if cfg.loss.class_weighting.enabled and cfg.loss.type != "cross_entropy":
             raise ValueError(
-                "train.loss.class_weighting is supported only for multiclass "
-                "cross_entropy runs"
+                "train.loss.class_weighting is supported only for cross_entropy runs"
             )
         if not isinstance(cfg.loss.label_smoothing.enabled, bool):
             raise ValueError("train.loss.label_smoothing.enabled must be a boolean")
@@ -1088,29 +1078,56 @@ class JsonConfigLoader:
             cfg.loss.branch_binary_auxiliary,
             label_to_index=label_to_index,
         )
+        is_class_aware_pooling = evidence_pooling_type == "class_aware_branch_gated"
         if num_classes == 2:
-            if cfg.loss.type not in {"bce", "focal"}:
-                raise ValueError(
-                    "Binary AST runs support only train.loss.type='bce' or 'focal'"
-                )
-            if cfg.loss.auto_pos_weight and cfg.loss.pos_weight is not None:
-                raise ValueError(
-                    "train.loss.auto_pos_weight and train.loss.pos_weight cannot both be set"
-                )
-            if cfg.loss.pos_weight is not None and cfg.loss.pos_weight <= 0:
-                raise ValueError("train.loss.pos_weight must be greater than zero")
-            return
+            if cfg.loss.type in {"bce", "focal"}:
+                if is_class_aware_pooling:
+                    raise ValueError(
+                        "Two-label class_aware_branch_gated AST runs require "
+                        "train.loss.type='cross_entropy'"
+                    )
+                if cfg.loss.auto_pos_weight and cfg.loss.pos_weight is not None:
+                    raise ValueError(
+                        "train.loss.auto_pos_weight and train.loss.pos_weight cannot both be set"
+                    )
+                if cfg.loss.pos_weight is not None and cfg.loss.pos_weight <= 0:
+                    raise ValueError("train.loss.pos_weight must be greater than zero")
+                return
+            if cfg.loss.type == "cross_entropy":
+                if not is_class_aware_pooling:
+                    raise ValueError(
+                        "Two-label cross_entropy AST runs require "
+                        "model.encoder.architecture.evidence_pooling.type="
+                        "'class_aware_branch_gated'"
+                    )
+                if cfg.loss.auto_pos_weight:
+                    raise ValueError(
+                        "train.loss.auto_pos_weight is only supported for one-logit "
+                        "binary bce/focal runs"
+                    )
+                if cfg.loss.pos_weight is not None:
+                    raise ValueError(
+                        "train.loss.pos_weight is only supported for one-logit "
+                        "binary bce/focal runs"
+                    )
+                return
+            raise ValueError(
+                "Two-label AST runs support train.loss.type='bce', 'focal', "
+                "or class-aware 'cross_entropy'"
+            )
         if cfg.loss.type != "cross_entropy":
             raise ValueError(
                 "Multi-class AST runs require train.loss.type='cross_entropy'"
             )
         if cfg.loss.auto_pos_weight:
             raise ValueError(
-                "train.loss.auto_pos_weight is only supported for binary classification"
+                "train.loss.auto_pos_weight is only supported for one-logit "
+                "binary bce/focal runs"
             )
         if cfg.loss.pos_weight is not None:
             raise ValueError(
-                "train.loss.pos_weight is only supported for binary classification"
+                "train.loss.pos_weight is only supported for one-logit binary "
+                "bce/focal runs"
             )
 
     @staticmethod
@@ -1615,6 +1632,7 @@ class JsonConfigLoader:
             num_classes=len(cfg.data.label_to_index),
             num_branches=len(cfg.model.encoder.architecture.patch_branches),
             label_to_index=cfg.data.label_to_index,
+            evidence_pooling_type=cfg.model.encoder.architecture.evidence_pooling.type,
         )
         JsonConfigLoader._validate_val(cfg.val)
         JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
@@ -1663,6 +1681,7 @@ class JsonConfigLoader:
             num_classes=len(cfg.data.label_to_index),
             num_branches=len(cfg.model.encoder.architecture.patch_branches),
             label_to_index=cfg.data.label_to_index,
+            evidence_pooling_type=cfg.model.encoder.architecture.evidence_pooling.type,
         )
         JsonConfigLoader._validate_val(cfg.val)
         JsonConfigLoader._validate_checkpointing(cfg.checkpointing)

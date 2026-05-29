@@ -395,20 +395,23 @@ class Trainer(LoggingMixin):
             )
         )
 
+    def _uses_binary_sigmoid_output(self) -> bool:
+        return self.cfg.loss_type in {"bce", "focal"}
+
     def _compute_main_loss(
         self,
         criterion: nn.Module,
         logits: Tensor,
         labels: Tensor,
     ) -> Tensor:
-        if self.cfg.num_classes == 2:
+        if self._uses_binary_sigmoid_output():
             return criterion(
                 logits, labels.to(device=logits.device, dtype=logits.dtype)
             )
         return criterion(logits, labels.to(device=logits.device, dtype=torch.long))
 
     def _predict(self, logits: Tensor) -> tuple[Tensor, Tensor]:
-        if self.cfg.num_classes == 2:
+        if self._uses_binary_sigmoid_output():
             probabilities = torch.sigmoid(logits.detach())
             predictions = (probabilities >= 0.5).to(torch.long)
             return probabilities, predictions
@@ -427,7 +430,7 @@ class Trainer(LoggingMixin):
                 "Unsupported branch auxiliary aggregation: "
                 f"{self.cfg.branch_auxiliary.aggregation}"
             )
-        if self.cfg.num_classes == 2:
+        if self._uses_binary_sigmoid_output():
             if branch_logits.ndim != 2:
                 raise ValueError(
                     "Binary branch logits must have shape (B, num_branches), "
@@ -1009,7 +1012,7 @@ class Trainer(LoggingMixin):
                     use_monitor_total=True,
                 )
 
-            if self.cfg.num_classes == 2:
+            if val_result.probabilities.ndim == 1:
                 val_threshold_optimization, val_metrics_optimized = (
                     compute_threshold_optimized_metrics(
                         val_result.targets,
@@ -1021,7 +1024,10 @@ class Trainer(LoggingMixin):
             else:
                 val_threshold_optimization = ThresholdOptimizationResult.disabled(
                     "f1",
-                    reason="threshold optimization is only supported for binary classification",
+                    reason=(
+                        "threshold optimization is only supported for one-logit "
+                        "binary outputs"
+                    ),
                 )
                 val_metrics_optimized = val_result.metrics
                 best_f1 = val_result.metrics.f1_score
@@ -1128,7 +1134,7 @@ class Trainer(LoggingMixin):
                 if len(lrs) == 1
                 else "[" + ", ".join(f"{lr:.8f}" for lr in lrs) + "]"
             )
-            if self.cfg.num_classes == 2:
+            if val_result.probabilities.ndim == 1:
                 self.logger.info(
                     "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
                     "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "

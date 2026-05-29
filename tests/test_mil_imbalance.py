@@ -25,6 +25,7 @@ def test_compute_binary_pos_weight_uses_negative_over_positive_ratio() -> None:
 def test_resolve_imbalance_computes_auto_pos_weight() -> None:
     resolved = resolve_imbalance(
         targets=[0, 0, 0, 1, 1],
+        loss_type="bce",
         pos_weight=None,
         auto_pos_weight=True,
         weighted_random=True,
@@ -42,9 +43,52 @@ def test_resolve_imbalance_rejects_conflicting_pos_weight_settings() -> None:
     ):
         resolve_imbalance(
             targets=[0, 1],
+            loss_type="bce",
             pos_weight=2.0,
             auto_pos_weight=True,
             weighted_random=False,
+        )
+
+
+def test_resolve_imbalance_cross_entropy_ignores_binary_pos_weighting() -> None:
+    resolved = resolve_imbalance(
+        targets=[0, 0, 1, 1],
+        num_classes=2,
+        loss_type="cross_entropy",
+        pos_weight=None,
+        auto_pos_weight=False,
+        weighted_random=False,
+    )
+
+    assert resolved.pos_weight is None
+    assert dict(resolved.class_counts) == {0: 2, 1: 2}
+
+
+@pytest.mark.parametrize(
+    ("field", "kwargs", "error"),
+    [
+        ("auto_pos_weight", {"auto_pos_weight": True}, "auto_pos_weight.*one-logit"),
+        ("pos_weight", {"pos_weight": 2.0}, "pos_weight.*one-logit"),
+    ],
+)
+def test_resolve_imbalance_cross_entropy_rejects_binary_pos_weighting(
+    field: str,
+    kwargs: dict[str, object],
+    error: str,
+) -> None:
+    base_kwargs = {
+        "pos_weight": None,
+        "auto_pos_weight": False,
+    }
+    base_kwargs.update(kwargs)
+
+    with pytest.raises(ValueError, match=error):
+        resolve_imbalance(
+            targets=[0, 1],
+            num_classes=2,
+            loss_type="cross_entropy",
+            weighted_random=False,
+            **base_kwargs,
         )
 
 

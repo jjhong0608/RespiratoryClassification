@@ -415,9 +415,9 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         cfg: EvidencePoolingConfig,
     ) -> None:
         super().__init__()
-        if num_classes <= 2:
+        if num_classes < 2:
             raise ValueError(
-                "class_aware_branch_gated evidence pooling requires num_classes > 2"
+                "class_aware_branch_gated evidence pooling requires num_classes >= 2"
             )
         self.temperature = cfg.temperature
         self.num_classes = num_classes
@@ -984,7 +984,14 @@ class MultiScaleRdtAstModel(nn.Module):
         self.cfg = cfg
         architecture = cfg.encoder.architecture
         self.encoder = MultiScalePatchStemAdapterEncoder(cfg.encoder)
-        output_dim = 1 if cfg.num_classes == 2 else cfg.num_classes
+        self.class_aware_evidence_pooling = (
+            architecture.evidence_pooling.type == "class_aware_branch_gated"
+        )
+        output_dim = (
+            cfg.num_classes
+            if self.class_aware_evidence_pooling
+            else (1 if cfg.num_classes == 2 else cfg.num_classes)
+        )
         self.branch_mil_heads = nn.ModuleList(
             BranchMilHead(
                 hidden_size=architecture.hidden_size,
@@ -1012,9 +1019,6 @@ class MultiScaleRdtAstModel(nn.Module):
         self.rdt_block = (
             RdtRefinementBlock(architecture) if architecture.rdt.enabled else None
         )
-        self.class_aware_evidence_pooling = (
-            architecture.evidence_pooling.type == "class_aware_branch_gated"
-        )
         self.global_residual_combiner: GlobalResidualLogitCombiner | None = None
         if architecture.evidence_pooling.type == "mean":
             self.evidence_pooler: nn.Module = MeanEvidencePooling()
@@ -1024,9 +1028,9 @@ class MultiScaleRdtAstModel(nn.Module):
                 cfg=architecture.evidence_pooling,
             )
         elif architecture.evidence_pooling.type == "class_aware_branch_gated":
-            if cfg.num_classes <= 2:
+            if cfg.num_classes < 2:
                 raise ValueError(
-                    "class_aware_branch_gated evidence pooling requires num_classes > 2"
+                    "class_aware_branch_gated evidence pooling requires num_classes >= 2"
                 )
             self.evidence_pooler = ClassAwareBranchGatedEvidencePooling(
                 hidden_size=architecture.hidden_size,

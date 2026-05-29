@@ -45,6 +45,7 @@ from src.utils.config import (
     EarlyStoppingConfig,
     EncoderAdaptationConfig,
     EvalConfig,
+    EvidencePoolingConfig,
     ExperimentConfig,
     GateEntropyRegularizationConfig,
     LabelSmoothingConfig,
@@ -79,6 +80,7 @@ def _small_architecture(
     *,
     rdt_enabled: bool,
     rdt_steps: int,
+    evidence_pooling: EvidencePoolingConfig | None = None,
 ) -> MultiScaleRdtArchitectureConfig:
     return MultiScaleRdtArchitectureConfig(
         hidden_size=32,
@@ -97,6 +99,7 @@ def _small_architecture(
             gated_residual=True,
             layerscale_init=0.01,
         ),
+        evidence_pooling=evidence_pooling or EvidencePoolingConfig(),
     )
 
 
@@ -105,6 +108,7 @@ def _model_cfg(
     classifier_type: Literal["linear", "mlp"] = "linear",
     rdt_enabled: bool = True,
     rdt_steps: int = 3,
+    evidence_pooling: EvidencePoolingConfig | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         encoder=ModelEncoderConfig(
@@ -112,6 +116,7 @@ def _model_cfg(
             architecture=_small_architecture(
                 rdt_enabled=rdt_enabled,
                 rdt_steps=rdt_steps,
+                evidence_pooling=evidence_pooling,
             ),
         ),
         classifier=ClassifierConfig(
@@ -713,6 +718,75 @@ def test_cross_entropy_label_smoothing_disabled_uses_zero() -> None:
     labels = torch.tensor([0, 2], dtype=torch.long)
 
     assert torch.isclose(criterion(logits, labels), expected(logits, labels))
+
+
+def test_two_class_cross_entropy_main_loss_uses_ce_targets() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    expected = torch.nn.CrossEntropyLoss()
+    logits = torch.tensor([[1.2, -0.4], [-0.2, 0.7]], dtype=torch.float32)
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    actual = trainer._compute_main_loss(criterion, logits, labels)
+
+    assert torch.isclose(actual, expected(logits, labels))
+
+
+def test_two_class_cross_entropy_predicts_with_softmax_argmax() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+        )
+    )
+    logits = torch.tensor([[1.2, -0.4], [-0.2, 0.7]], dtype=torch.float32)
+
+    probabilities, predictions = trainer._predict(logits)
+
+    assert probabilities.shape == (2, 2)
+    assert torch.allclose(probabilities, torch.softmax(logits, dim=-1))
+    assert predictions.tolist() == [0, 1]
+
+
+def test_two_class_cross_entropy_branch_auxiliary_uses_ce_per_branch() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=2,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_auxiliary_enabled=True,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    branch_logits = torch.tensor(
+        [
+            [[1.0, -0.2], [0.1, 0.5], [0.8, -0.4]],
+            [[-0.1, 0.7], [0.3, -0.3], [0.2, 0.9]],
+        ],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+    expected = torch.stack(
+        [
+            criterion(branch_logits[:, branch_index, :], labels)
+            for branch_index in range(3)
+        ]
+    )
+
+    actual = trainer._compute_branch_auxiliary_losses(
+        criterion,
+        branch_logits,
+        labels,
+    )
+
+    assert torch.allclose(actual, expected)
 
 
 def test_trainer_total_loss_includes_weighted_ce_and_branch_binary_auxiliary() -> None:
@@ -1536,6 +1610,49 @@ def test_binary_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:
     assert "selected_evidence_branch_ids" in diagnostics[0]
     assert diagnostics[0]["evidence_score_source"] == "attention_weight"
     assert "selected_evidence_tokens" in diagnostics[0]
+
+
+def test_two_class_class_aware_ce_smoke_uses_softmax_without_threshold(
+    tmp_path: Path,
+) -> None:
+    data_cfg = _prepare_binary_dataset(tmp_path / "class_aware_ce")
+    checkpoint_path, data_cfg = _train_smoke_run(
+        tmp_path,
+        data_cfg=data_cfg,
+        model_cfg=_model_cfg(
+            classifier_type="mlp",
+            rdt_enabled=True,
+            rdt_steps=2,
+            evidence_pooling=EvidencePoolingConfig(
+                type="class_aware_branch_gated",
+                dropout=0.0,
+            ),
+        ),
+        loss_type="cross_entropy",
+        branch_auxiliary_enabled=True,
+    )
+
+    checkpoint = load_checkpoint(str(checkpoint_path), device=torch.device("cpu"))
+    assert checkpoint["val_threshold_optimization"]["enabled"] is False
+
+    result = evaluate_checkpoint(
+        _eval_cfg(tmp_path, checkpoint_path, data_cfg),
+        checkpoint_path,
+        return_predictions=True,
+        return_diagnostics=True,
+    )
+    assert isinstance(result, tuple) and len(result) == 3
+    metrics, rows, diagnostics = result
+
+    assert metrics["decision_threshold"] is None
+    assert metrics["threshold_optimization"]["enabled"] is False
+    assert metrics["optimized_metrics"]["decision_threshold"] is None
+    assert np.asarray(metrics["predicted_probability"]).shape == (2, 2)
+    assert len(rows) == len(build_dataset(data_cfg, split="eval"))
+    assert len(diagnostics) == len(rows)
+    assert diagnostics[0]["evidence_pooling_type"] == "class_aware_branch_gated"
+    assert "class_evidence_gate_weights" in diagnostics[0]
+    assert "true_class_gate_weights" in diagnostics[0]
 
 
 def test_multiclass_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:

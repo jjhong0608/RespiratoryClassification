@@ -286,23 +286,34 @@ def resolve_imbalance(
     *,
     targets: Sequence[int],
     num_classes: int = 2,
+    loss_type: str = "bce",
     pos_weight: float | None,
     auto_pos_weight: bool,
     weighted_random: bool,
 ) -> ResolvedImbalance:
-    if num_classes > 2:
+    if loss_type == "cross_entropy":
         if auto_pos_weight:
             raise ValueError(
-                "train.loss.auto_pos_weight is only supported for binary classification"
+                "train.loss.auto_pos_weight is only supported for one-logit binary "
+                "bce/focal runs"
             )
         if pos_weight is not None:
             raise ValueError(
-                "train.loss.pos_weight is only supported for binary classification"
+                "train.loss.pos_weight is only supported for one-logit binary "
+                "bce/focal runs"
             )
         return ResolvedImbalance(
             pos_weight=None,
             weighted_random=weighted_random,
             class_counts=class_counts(targets),
+        )
+    if loss_type not in {"bce", "focal"}:
+        raise ValueError(
+            "train.loss.type must be one of 'bce', 'focal', or 'cross_entropy'"
+        )
+    if num_classes != 2:
+        raise ValueError(
+            "bce/focal imbalance resolution is supported only for two-label runs"
         )
     if auto_pos_weight and pos_weight is not None:
         raise ValueError(

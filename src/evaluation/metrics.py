@@ -16,7 +16,6 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.preprocessing import label_binarize
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +63,46 @@ class EvalMetrics:
 
 
 class MetricsComputer:
+    @staticmethod
+    def _one_hot_targets(y_true: np.ndarray, num_classes: int) -> np.ndarray:
+        target_arr = np.asarray(y_true, dtype=int).reshape(-1)
+        if np.any((target_arr < 0) | (target_arr >= num_classes)):
+            raise ValueError("y_true contains a class index outside y_prob")
+        return np.eye(num_classes, dtype=float)[target_arr]
+
+    @staticmethod
+    def _mean_binary_ovr_metric(
+        y_true: np.ndarray,
+        y_prob: np.ndarray,
+        metric_name: str,
+    ) -> float | None:
+        scores: list[float] = []
+        for class_index in range(y_prob.shape[1]):
+            class_true = (y_true == class_index).astype(int)
+            if np.unique(class_true).size < 2:
+                continue
+            try:
+                if metric_name == "roc_auc":
+                    scores.append(
+                        float(roc_auc_score(class_true, y_prob[:, class_index]))
+                    )
+                elif metric_name == "pr_auc":
+                    scores.append(
+                        float(
+                            average_precision_score(
+                                class_true,
+                                y_prob[:, class_index],
+                            )
+                        )
+                    )
+                else:
+                    raise ValueError(f"Unsupported metric_name: {metric_name}")
+            except ValueError:
+                continue
+        if not scores:
+            return None
+        return float(np.mean(scores))
+
     @staticmethod
     def compute(
         y_true: np.ndarray,
@@ -122,28 +161,48 @@ class MetricsComputer:
                 except ValueError:
                     brier = None
             elif y_prob.ndim == 2:
+                num_probability_classes = int(y_prob.shape[1])
                 try:
-                    roc_auc = float(
-                        roc_auc_score(
-                            y_true, y_prob, multi_class="ovr", average="macro"
-                        )
+                    y_onehot = MetricsComputer._one_hot_targets(
+                        y_true,
+                        num_probability_classes,
                     )
+                except ValueError:
+                    y_onehot = None
+                try:
+                    if num_probability_classes == 2:
+                        roc_auc = MetricsComputer._mean_binary_ovr_metric(
+                            y_true,
+                            y_prob,
+                            "roc_auc",
+                        )
+                    else:
+                        roc_auc = float(
+                            roc_auc_score(
+                                y_true,
+                                y_prob,
+                                multi_class="ovr",
+                                average="macro",
+                            )
+                        )
                 except ValueError:
                     roc_auc = None
                 try:
-                    y_onehot = label_binarize(
-                        y_true, classes=list(range(y_prob.shape[1]))
-                    )
-                    pr_auc = float(
-                        average_precision_score(y_onehot, y_prob, average="macro")
-                    )
+                    if num_probability_classes == 2:
+                        pr_auc = MetricsComputer._mean_binary_ovr_metric(
+                            y_true,
+                            y_prob,
+                            "pr_auc",
+                        )
+                    elif y_onehot is not None:
+                        pr_auc = float(
+                            average_precision_score(y_onehot, y_prob, average="macro")
+                        )
                 except ValueError:
                     pr_auc = None
                 try:
-                    y_onehot = label_binarize(
-                        y_true, classes=list(range(y_prob.shape[1]))
-                    )
-                    brier = float(np.mean(np.sum((y_prob - y_onehot) ** 2, axis=1)))
+                    if y_onehot is not None:
+                        brier = float(np.mean(np.sum((y_prob - y_onehot) ** 2, axis=1)))
                 except Exception:
                     brier = None
 

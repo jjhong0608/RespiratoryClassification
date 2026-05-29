@@ -275,10 +275,13 @@ def test_branch_aware_gated_pooling_supports_dynamic_branch_count() -> None:
     assert output.branch_evidence_summary.shape == (2, 3, 16)
 
 
-def test_class_aware_gated_pooling_returns_class_gate_outputs() -> None:
+@pytest.mark.parametrize("num_classes", [2, 3])
+def test_class_aware_gated_pooling_returns_class_gate_outputs(
+    num_classes: int,
+) -> None:
     pooler = ClassAwareBranchGatedEvidencePooling(
         hidden_size=16,
-        num_classes=3,
+        num_classes=num_classes,
         cfg=EvidencePoolingConfig(type="class_aware_branch_gated", dropout=0.0),
     )
     evidence_tokens = torch.randn(2, 6, 16)
@@ -288,27 +291,27 @@ def test_class_aware_gated_pooling_returns_class_gate_outputs() -> None:
 
     assert output.pooled_embedding.shape == (2, 16)
     assert output.class_evidence_embeddings is not None
-    assert output.class_evidence_embeddings.shape == (2, 3, 16)
+    assert output.class_evidence_embeddings.shape == (2, num_classes, 16)
     assert output.class_evidence_logits is not None
-    assert output.class_evidence_logits.shape == (2, 3)
+    assert output.class_evidence_logits.shape == (2, num_classes)
     assert output.class_gate_weights is not None
-    assert output.class_gate_weights.shape == (2, 3, 3)
+    assert output.class_gate_weights.shape == (2, num_classes, 3)
     assert output.class_gate_entropy is not None
-    assert output.class_gate_entropy.shape == (2, 3)
+    assert output.class_gate_entropy.shape == (2, num_classes)
     assert output.gate_weights is not None
     assert output.gate_weights.shape == (2, 3)
     assert torch.allclose(
         output.class_gate_weights.sum(dim=-1),
-        torch.ones(2, 3),
+        torch.ones(2, num_classes),
         atol=1e-5,
     )
 
 
-def test_class_aware_gated_pooling_rejects_binary_output_dim() -> None:
-    with pytest.raises(ValueError, match="requires num_classes > 2"):
+def test_class_aware_gated_pooling_rejects_invalid_class_count() -> None:
+    with pytest.raises(ValueError, match="requires num_classes >= 2"):
         ClassAwareBranchGatedEvidencePooling(
             hidden_size=16,
-            num_classes=2,
+            num_classes=1,
             cfg=EvidencePoolingConfig(type="class_aware_branch_gated"),
         )
 
@@ -563,10 +566,13 @@ def test_model_forward_uses_branch_gated_evidence_pooling(num_classes: int) -> N
     )
 
 
-def test_model_forward_uses_class_aware_branch_gated_evidence_pooling() -> None:
+@pytest.mark.parametrize("num_classes", [2, 3])
+def test_model_forward_uses_class_aware_branch_gated_evidence_pooling(
+    num_classes: int,
+) -> None:
     model = MultiScaleRdtAstModel(
         _small_model_config(
-            num_classes=3,
+            num_classes=num_classes,
             evidence_pooling=EvidencePoolingConfig(
                 type="class_aware_branch_gated",
                 dropout=0.0,
@@ -576,25 +582,27 @@ def test_model_forward_uses_class_aware_branch_gated_evidence_pooling() -> None:
 
     output = model(torch.randn(2, 32, 32))
 
-    assert output.logits.shape == (2, 3)
+    assert output.logits.shape == (2, num_classes)
     assert output.pooled_embedding.shape == (2, 32)
     assert output.evidence_pooling_type == "class_aware_branch_gated"
+    assert output.branch_logits is not None
+    assert output.branch_logits.shape == (2, 4, num_classes)
     assert output.class_evidence_embeddings is not None
-    assert output.class_evidence_embeddings.shape == (2, 3, 32)
+    assert output.class_evidence_embeddings.shape == (2, num_classes, 32)
     assert output.class_evidence_logits is not None
-    assert output.class_evidence_logits.shape == (2, 3)
+    assert output.class_evidence_logits.shape == (2, num_classes)
     assert output.global_residual_logits is not None
-    assert output.global_residual_logits.shape == (2, 3)
+    assert output.global_residual_logits.shape == (2, num_classes)
     assert output.global_residual_scale is not None
     assert output.class_evidence_gate_weights is not None
-    assert output.class_evidence_gate_weights.shape == (2, 3, 4)
+    assert output.class_evidence_gate_weights.shape == (2, num_classes, 4)
     assert output.class_evidence_gate_entropy is not None
-    assert output.class_evidence_gate_entropy.shape == (2, 3)
+    assert output.class_evidence_gate_entropy.shape == (2, num_classes)
     assert output.evidence_gate_weights is not None
     assert output.evidence_gate_weights.shape == (2, 4)
     assert torch.allclose(
         output.class_evidence_gate_weights.sum(dim=-1),
-        torch.ones(2, 3),
+        torch.ones(2, num_classes),
         atol=1e-5,
     )
 
@@ -647,11 +655,11 @@ def test_class_aware_model_fixed_residual_scale_is_not_trainable() -> None:
     assert torch.isclose(model.global_residual_combiner.scale, torch.tensor(0.2))
 
 
-def test_class_aware_model_rejects_binary_class_count() -> None:
-    with pytest.raises(ValueError, match="requires num_classes > 2"):
+def test_class_aware_model_rejects_invalid_class_count() -> None:
+    with pytest.raises(ValueError, match="requires num_classes >= 2"):
         MultiScaleRdtAstModel(
             _small_model_config(
-                num_classes=2,
+                num_classes=1,
                 evidence_pooling=EvidencePoolingConfig(
                     type="class_aware_branch_gated",
                     dropout=0.0,
