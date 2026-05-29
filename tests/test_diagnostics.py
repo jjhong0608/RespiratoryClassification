@@ -48,6 +48,23 @@ def _branch_gated_output() -> AstModelOutput:
     )
 
 
+def _class_aware_output() -> AstModelOutput:
+    return AstModelOutput(
+        logits=torch.tensor([[0.1, 0.7, -0.2]]),
+        pooled_embedding=torch.tensor([[0.1, 0.2]]),
+        evidence_pooling_type="class_aware_branch_gated",
+        evidence_gate_weights=torch.tensor([[0.3, 0.7]]),
+        evidence_gate_entropy=torch.tensor([0.61]),
+        class_evidence_logits=torch.tensor([[0.2, 0.8, -0.1]]),
+        global_residual_logits=torch.tensor([[0.01, 0.02, 0.03]]),
+        class_evidence_gate_weights=torch.tensor(
+            [[[0.8, 0.2], [0.25, 0.75], [0.5, 0.5]]]
+        ),
+        class_evidence_gate_entropy=torch.tensor([[0.50, 0.56, 0.69]]),
+        global_residual_scale=torch.tensor(0.1),
+    )
+
+
 def _dropout_output() -> AstModelOutput:
     return AstModelOutput(
         logits=torch.tensor([0.25]),
@@ -146,6 +163,42 @@ def test_diagnostics_include_branch_gated_pooling_metadata() -> None:
     assert row["evidence_gate_weights"] == [0.4000000059604645, 0.6000000238418579]
     assert row["evidence_gate_entropy"] == pytest.approx(0.673)
     assert row["branch_evidence_norms"] == [1.0, 2.0]
+
+
+def test_diagnostics_include_class_aware_gate_metadata() -> None:
+    rows = build_diagnostic_rows(
+        _batch(),
+        _class_aware_output(),
+        probabilities=torch.tensor([[0.2, 0.7, 0.1]]),
+        predicted_labels=torch.tensor([1]),
+        analysis=AnalysisOutputConfig(
+            save_logits=True,
+            save_probabilities=True,
+            save_embeddings=False,
+            save_clip_metadata=True,
+        ),
+    )
+
+    row = rows[0]
+    assert row["evidence_pooling_type"] == "class_aware_branch_gated"
+    assert row["class_evidence_logits"] == [
+        0.20000000298023224,
+        0.800000011920929,
+        -0.10000000149011612,
+    ]
+    assert row["global_residual_logits"] == [
+        0.009999999776482582,
+        0.019999999552965164,
+        0.029999999329447746,
+    ]
+    assert row["class_evidence_gate_weights"][1] == [
+        0.25,
+        0.75,
+    ]
+    assert row["true_class_gate_weights"] == [0.25, 0.75]
+    assert row["predicted_class_gate_weights"] == [0.25, 0.75]
+    assert row["class_evidence_gate_entropy"] == pytest.approx([0.50, 0.56, 0.69])
+    assert row["global_residual_scale"] == pytest.approx(0.1)
 
 
 def test_diagnostics_include_selected_evidence_dropout_metadata() -> None:

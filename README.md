@@ -470,6 +470,12 @@ their source branch, averages each branch's selected tokens into a branch
 evidence summary, computes a gate from those branch evidence summaries only,
 and uses the gated weighted sum as the evidence embedding.
 
+`evidence_pooling.type = "class_aware_branch_gated"` keeps the branch summaries
+but computes class-specific gate weights with shape `[batch, class, branch]`.
+The class gate uses learnable class queries and a diagonal class evidence scorer.
+Its evidence logits can be combined with the configured classifier as a global
+residual: `final_logits = class_evidence_logits + scale * global_residual_logits`.
+
 Branch logits are not used as gate input. Mean branch embeddings are not used as
 gate input. Final fusion still receives the evidence embedding, mean branch
 embedding, and branch logits.
@@ -536,7 +542,20 @@ The active schema is:
           "type": "mean",
           "gate_hidden_size": null,
           "dropout": 0.1,
-          "temperature": 1.0
+          "temperature": 1.0,
+          "class_gate": {
+            "mode": "query",
+            "scorer": "diagonal",
+            "global_residual": {
+              "enabled": true,
+              "init_scale": 0.1,
+              "learnable": true
+            },
+            "evidence_auxiliary": {
+              "enabled": false,
+              "weight": 0.1
+            }
+          }
         },
         "patch_branches": [
           {"patch_size": [16, 16], "stride": [8, 16]},
@@ -591,6 +610,12 @@ The active schema is:
         "enabled": false,
         "weight": 0.0,
         "target": "evidence_gate"
+      },
+      "class_gate_diversity_regularization": {
+        "enabled": false,
+        "weight": 0.0,
+        "target": "class_evidence_gate",
+        "metric": "js_divergence"
       }
     },
     "initialization": {
@@ -629,7 +654,10 @@ Additional experiment knobs:
   selected evidence `U0`
 - `architecture.mil.attention_temperature` must be greater than zero and scales
   branch MIL attention softmax logits
-- `architecture.evidence_pooling.type` supports `mean` and `branch_gated`
+- `architecture.evidence_pooling.type` supports `mean`, `branch_gated`, and
+  `class_aware_branch_gated`
+- `architecture.evidence_pooling.class_gate.evidence_auxiliary.enabled = true`
+  adds `weight * CE(class_evidence_logits, labels)` for class-aware pooling
 - `data.augmentation` is disabled by default and applies only to train datasets
 - `data.augmentation.policy.type` supports `independent` and `one_of`
 - `architecture.token_augmentation` controls branch event and selected evidence
@@ -637,7 +665,10 @@ Additional experiment knobs:
 - `train.loss.attention_entropy.enabled = true` adds
   `weight * mean_branch(entropy(attention))`
 - `train.loss.gate_entropy_regularization.enabled = true` adds
-  `-weight * mean(evidence_gate_entropy)` from branch-gated evidence pooling
+  `-weight * entropy` from branch-gated or class-aware evidence pooling
+- `train.loss.class_gate_diversity_regularization.enabled = true` adds
+  `-weight * mean_pairwise_js(class_evidence_gate_weights)` for class-aware
+  pooling
 - `train.loss.branch_auxiliary.weights` overrides scalar
   `branch_auxiliary.weight` with normalized per-branch weighting
 - `train.loss.class_weighting.enabled = true` adds train-derived
@@ -685,12 +716,20 @@ targets after applying the configured binary map. If either binary side is
 absent in the training split, training fails fast with a clear error.
 
 When `train.loss.gate_entropy_regularization.enabled = true`, the trainer uses
-the `evidence_gate_entropy` returned by `branch_gated` evidence pooling and
-subtracts `weight * mean(evidence_gate_entropy)` from the scheduled and monitor
-loss. This is an entropy bonus rather than a hard cap, so it does not guarantee
-`max(evidence_gate_weights) <= 0.5`. Check gate-weight distributions,
-high-confidence errors, Brier score, balanced accuracy, and macro recall when
-comparing this setting.
+the requested target: `evidence_gate` for legacy branch-gated pooling,
+`class_evidence_gate` for all class-aware gates, or `true_class_evidence_gate`
+for the gate corresponding to the ground-truth class. It subtracts
+`weight * mean(entropy)` from the scheduled and monitor loss. This is an
+entropy bonus rather than a hard cap, so it does not guarantee
+`max(gate_weights) <= 0.5`. Check gate-weight distributions, high-confidence
+errors, Brier score, balanced accuracy, and macro recall when comparing this
+setting.
+
+When `train.loss.class_gate_diversity_regularization.enabled = true`, the
+trainer computes pairwise Jensen-Shannon divergence among the class-specific
+branch-gate distributions and subtracts the weighted mean from the loss. This
+encourages label-specific branch usage but does not force every class to choose
+a unique branch.
 
 ## Optimizer Layout
 
@@ -757,6 +796,10 @@ When enabled, diagnostics now include:
 - `evidence_pooling_type` identifying the evidence readout
 - `evidence_gate_weights`, `evidence_gate_entropy`, and
   `branch_evidence_norms` when branch-aware gated pooling is active
+- `class_evidence_gate_weights`, `class_evidence_gate_entropy`,
+  `true_class_gate_weights`, `predicted_class_gate_weights`,
+  `class_evidence_logits`, `global_residual_logits`, and
+  `global_residual_scale` when class-aware branch-gated pooling is active
 - `selected_evidence_tokens` with the saved embedding payload only when
   `save_embeddings=true`
 

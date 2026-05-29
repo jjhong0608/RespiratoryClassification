@@ -7,6 +7,9 @@ import torch
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassGateConfig,
+    ClassGateEvidenceAuxiliaryConfig,
+    ClassGateGlobalResidualConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -57,6 +60,42 @@ def _parse_patch_branch(raw: object) -> PatchBranchConfig:
     patch_size = _parse_pair(raw.get("patch_size"), field_name="patch_size")
     stride = _parse_pair(raw.get("stride"), field_name="stride")
     return PatchBranchConfig(patch_size=patch_size, stride=stride)
+
+
+def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
+    if raw is None:
+        return EvidencePoolingConfig()
+    if not isinstance(raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling must be a dict"
+        )
+    kwargs = dict(raw)
+    class_gate_raw = kwargs.get("class_gate", {})
+    if not isinstance(class_gate_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate must be a dict"
+        )
+    class_gate_kwargs = dict(class_gate_raw)
+    global_residual_raw = class_gate_kwargs.get("global_residual", {})
+    if not isinstance(global_residual_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "global_residual must be a dict"
+        )
+    evidence_auxiliary_raw = class_gate_kwargs.get("evidence_auxiliary", {})
+    if not isinstance(evidence_auxiliary_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "evidence_auxiliary must be a dict"
+        )
+    class_gate_kwargs["global_residual"] = ClassGateGlobalResidualConfig(
+        **dict(global_residual_raw)
+    )
+    class_gate_kwargs["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(
+        **dict(evidence_auxiliary_raw)
+    )
+    kwargs["class_gate"] = ClassGateConfig(**class_gate_kwargs)
+    return EvidencePoolingConfig(**kwargs)
 
 
 def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
@@ -125,8 +164,8 @@ def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
         )
     architecture_kwargs["rdt"] = RdtConfig(**rdt_kwargs)
     architecture_kwargs["mil"] = MilConfig(**dict(architecture_kwargs.get("mil", {})))
-    architecture_kwargs["evidence_pooling"] = EvidencePoolingConfig(
-        **dict(architecture_kwargs.get("evidence_pooling", {}))
+    architecture_kwargs["evidence_pooling"] = _parse_evidence_pooling(
+        architecture_kwargs.get("evidence_pooling")
     )
     token_augmentation = dict(architecture_kwargs.get("token_augmentation", {}))
     token_augmentation["branch_event_dropout"] = BranchEventDropoutConfig(

@@ -10,6 +10,9 @@ from src.evaluation.thresholds import ThresholdOptimizationConfig
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassGateConfig,
+    ClassGateEvidenceAuxiliaryConfig,
+    ClassGateGlobalResidualConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -197,7 +200,19 @@ class AttentionEntropyLossConfig:
 class GateEntropyRegularizationConfig:
     enabled: bool = False
     weight: float = 0.0
-    target: Literal["evidence_gate"] = "evidence_gate"
+    target: Literal[
+        "evidence_gate",
+        "class_evidence_gate",
+        "true_class_evidence_gate",
+    ] = "evidence_gate"
+
+
+@dataclass(frozen=True)
+class ClassGateDiversityRegularizationConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_gate"] = "class_evidence_gate"
+    metric: Literal["js_divergence"] = "js_divergence"
 
 
 @dataclass(frozen=True)
@@ -271,6 +286,9 @@ class LossConfig:
     )
     gate_entropy_regularization: GateEntropyRegularizationConfig = field(
         default_factory=GateEntropyRegularizationConfig
+    )
+    class_gate_diversity_regularization: ClassGateDiversityRegularizationConfig = field(
+        default_factory=ClassGateDiversityRegularizationConfig
     )
 
 
@@ -409,7 +427,16 @@ class JsonConfigLoader:
         "attention_logit",
         "instance_logit",
     }
-    _EVIDENCE_POOLING_TYPES = {"mean", "branch_gated"}
+    _EVIDENCE_POOLING_TYPES = {"mean", "branch_gated", "class_aware_branch_gated"}
+    _CLASS_GATE_MODES = {"query"}
+    _CLASS_GATE_SCORERS = {"diagonal"}
+    _GATE_ENTROPY_TARGETS = {
+        "evidence_gate",
+        "class_evidence_gate",
+        "true_class_evidence_gate",
+    }
+    _CLASS_GATE_DIVERSITY_TARGETS = {"class_evidence_gate"}
+    _CLASS_GATE_DIVERSITY_METRICS = {"js_divergence"}
     _TIME_SHIFT_MODES = {"zero_pad", "roll"}
     _AUGMENTATION_POLICY_TYPES = {"independent", "one_of"}
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
@@ -732,6 +759,53 @@ class JsonConfigLoader:
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.gate_hidden_size must be null or greater than zero"
             )
+        class_gate = architecture.evidence_pooling.class_gate
+        if class_gate.mode not in JsonConfigLoader._CLASS_GATE_MODES:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate.mode "
+                "must be 'query'"
+            )
+        if class_gate.scorer not in JsonConfigLoader._CLASS_GATE_SCORERS:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate.scorer "
+                "must be 'diagonal'"
+            )
+        if not isinstance(class_gate.global_residual.enabled, bool):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.enabled must be a boolean"
+            )
+        if class_gate.global_residual.init_scale < 0:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.init_scale must be greater than or equal to zero"
+            )
+        if not isinstance(class_gate.global_residual.learnable, bool):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.learnable must be a boolean"
+            )
+        if not isinstance(class_gate.evidence_auxiliary.enabled, bool):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_auxiliary.enabled must be a boolean"
+            )
+        if (
+            class_gate.evidence_auxiliary.enabled
+            and class_gate.evidence_auxiliary.weight <= 0
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_auxiliary.weight must be greater than zero when enabled"
+            )
+        if (
+            architecture.evidence_pooling.type == "class_aware_branch_gated"
+            and len(data_cfg.label_to_index) <= 2
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.type="
+                "'class_aware_branch_gated' requires more than two labels"
+            )
         token_augmentation = architecture.token_augmentation
         if not isinstance(token_augmentation.branch_event_dropout.enabled, bool):
             raise ValueError(
@@ -943,9 +1017,13 @@ class JsonConfigLoader:
             raise ValueError(
                 "train.loss.gate_entropy_regularization.enabled must be a boolean"
             )
-        if cfg.loss.gate_entropy_regularization.target != "evidence_gate":
+        if (
+            cfg.loss.gate_entropy_regularization.target
+            not in JsonConfigLoader._GATE_ENTROPY_TARGETS
+        ):
             raise ValueError(
-                "train.loss.gate_entropy_regularization.target must be 'evidence_gate'"
+                "train.loss.gate_entropy_regularization.target must be one of "
+                f"{sorted(JsonConfigLoader._GATE_ENTROPY_TARGETS)}"
             )
         if (
             cfg.loss.gate_entropy_regularization.enabled
@@ -953,6 +1031,34 @@ class JsonConfigLoader:
         ):
             raise ValueError(
                 "train.loss.gate_entropy_regularization.weight must be greater than zero when enabled"
+            )
+        if not isinstance(cfg.loss.class_gate_diversity_regularization.enabled, bool):
+            raise ValueError(
+                "train.loss.class_gate_diversity_regularization.enabled must be a boolean"
+            )
+        if (
+            cfg.loss.class_gate_diversity_regularization.target
+            not in JsonConfigLoader._CLASS_GATE_DIVERSITY_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.class_gate_diversity_regularization.target must be "
+                "'class_evidence_gate'"
+            )
+        if (
+            cfg.loss.class_gate_diversity_regularization.metric
+            not in JsonConfigLoader._CLASS_GATE_DIVERSITY_METRICS
+        ):
+            raise ValueError(
+                "train.loss.class_gate_diversity_regularization.metric must be "
+                "'js_divergence'"
+            )
+        if (
+            cfg.loss.class_gate_diversity_regularization.enabled
+            and cfg.loss.class_gate_diversity_regularization.weight <= 0
+        ):
+            raise ValueError(
+                "train.loss.class_gate_diversity_regularization.weight must be "
+                "greater than zero when enabled"
             )
         if not isinstance(cfg.loss.class_weighting.enabled, bool):
             raise ValueError("train.loss.class_weighting.enabled must be a boolean")
@@ -1298,6 +1404,19 @@ class JsonConfigLoader:
         )
 
     @staticmethod
+    def _parse_evidence_pooling(raw: Mapping[str, Any]) -> EvidencePoolingConfig:
+        kwargs = dict(raw)
+        class_gate = dict(kwargs.get("class_gate", {}))
+        class_gate["global_residual"] = ClassGateGlobalResidualConfig(
+            **dict(class_gate.get("global_residual", {}))
+        )
+        class_gate["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(
+            **dict(class_gate.get("evidence_auxiliary", {}))
+        )
+        kwargs["class_gate"] = ClassGateConfig(**class_gate)
+        return EvidencePoolingConfig(**kwargs)
+
+    @staticmethod
     def _parse_model(raw: Mapping[str, Any], data_cfg: DataConfig) -> ModelConfig:
         kwargs = dict(raw)
         encoder = dict(raw["encoder"])
@@ -1339,8 +1458,8 @@ class JsonConfigLoader:
             )
         architecture["rdt"] = RdtConfig(**rdt)
         architecture["mil"] = MilConfig(**dict(architecture.get("mil", {})))
-        architecture["evidence_pooling"] = EvidencePoolingConfig(
-            **dict(architecture.get("evidence_pooling", {}))
+        architecture["evidence_pooling"] = JsonConfigLoader._parse_evidence_pooling(
+            dict(architecture.get("evidence_pooling", {}))
         )
         token_augmentation = dict(architecture.get("token_augmentation", {}))
         token_augmentation["branch_event_dropout"] = BranchEventDropoutConfig(
@@ -1402,6 +1521,11 @@ class JsonConfigLoader:
         )
         loss["gate_entropy_regularization"] = GateEntropyRegularizationConfig(
             **dict(loss.get("gate_entropy_regularization", {}))
+        )
+        loss["class_gate_diversity_regularization"] = (
+            ClassGateDiversityRegularizationConfig(
+                **dict(loss.get("class_gate_diversity_regularization", {}))
+            )
         )
         kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))

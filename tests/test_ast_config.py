@@ -691,6 +691,13 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.loss.gate_entropy_regularization.enabled is False
     assert cfg.train.loss.gate_entropy_regularization.weight == 0.0
     assert cfg.train.loss.gate_entropy_regularization.target == "evidence_gate"
+    assert cfg.train.loss.class_gate_diversity_regularization.enabled is False
+    assert cfg.train.loss.class_gate_diversity_regularization.weight == 0.0
+    assert (
+        cfg.train.loss.class_gate_diversity_regularization.target
+        == "class_evidence_gate"
+    )
+    assert cfg.train.loss.class_gate_diversity_regularization.metric == "js_divergence"
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.sampler.weighted_random is True
     assert cfg.train.sampler.enabled is False
@@ -727,6 +734,49 @@ def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
     assert gated_cfg.model.encoder.architecture.evidence_pooling.dropout == 0.2
     assert gated_cfg.model.encoder.architecture.evidence_pooling.temperature == 0.5
 
+    payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = {
+        "type": "class_aware_branch_gated",
+        "gate_hidden_size": None,
+        "dropout": 0.15,
+        "temperature": 1.0,
+        "class_gate": {
+            "mode": "query",
+            "scorer": "diagonal",
+            "global_residual": {
+                "enabled": True,
+                "init_scale": 0.1,
+                "learnable": True,
+            },
+            "evidence_auxiliary": {
+                "enabled": False,
+                "weight": 0.1,
+            },
+        },
+    }
+    class_aware_path = _write_json(
+        tmp_path / "class_aware_branch_gated_pooling.json",
+        payload,
+    )
+
+    class_aware_cfg = JsonConfigLoader.load_training(class_aware_path)
+
+    class_gate = class_aware_cfg.model.encoder.architecture.evidence_pooling.class_gate
+    assert (
+        class_aware_cfg.model.encoder.architecture.evidence_pooling.type
+        == "class_aware_branch_gated"
+    )
+    assert class_gate.mode == "query"
+    assert class_gate.scorer == "diagonal"
+    assert class_gate.global_residual.enabled is True
+    assert class_gate.global_residual.init_scale == 0.1
+    assert class_gate.global_residual.learnable is True
+    assert class_gate.evidence_auxiliary.enabled is False
+    assert class_gate.evidence_auxiliary.weight == 0.1
+
 
 def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) -> None:
     payload = _base_payload()
@@ -738,6 +788,73 @@ def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) 
 
     assert len(cfg.data.label_to_index) == 3
     assert cfg.train.loss.type == "cross_entropy"
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "error"),
+    [
+        (("type",), "class_aware_branch_gated", "requires more than two labels"),
+        (("class_gate", "mode"), "mlp", "class_gate.mode"),
+        (("class_gate", "scorer"), "full", "class_gate.scorer"),
+        (
+            ("class_gate", "global_residual", "enabled"),
+            "yes",
+            "global_residual.enabled",
+        ),
+        (("class_gate", "global_residual", "init_scale"), -0.1, "init_scale"),
+        (("class_gate", "global_residual", "learnable"), "yes", "learnable"),
+        (
+            ("class_gate", "evidence_auxiliary", "enabled"),
+            "yes",
+            "evidence_auxiliary.enabled",
+        ),
+        (
+            ("class_gate", "evidence_auxiliary", "weight"),
+            0.0,
+            "evidence_auxiliary.weight",
+        ),
+    ],
+)
+def test_invalid_class_aware_evidence_pooling_config_is_rejected(
+    tmp_path: Path,
+    path: tuple[str, ...],
+    value: object,
+    error: str,
+) -> None:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    evidence_pooling = {
+        "type": "class_aware_branch_gated",
+        "gate_hidden_size": None,
+        "dropout": 0.15,
+        "temperature": 1.0,
+        "class_gate": {
+            "mode": "query",
+            "scorer": "diagonal",
+            "global_residual": {
+                "enabled": True,
+                "init_scale": 0.1,
+                "learnable": True,
+            },
+            "evidence_auxiliary": {
+                "enabled": True,
+                "weight": 0.1,
+            },
+        },
+    }
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = evidence_pooling
+    if path == ("type",):
+        payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1}
+        payload["train"]["loss"]["type"] = "bce"
+    target: dict = evidence_pooling
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    config_path = _write_json(tmp_path / "bad_class_gate.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 def _fourclass_branch_binary_payload() -> dict:
@@ -830,6 +947,84 @@ def test_valid_gate_entropy_regularization_config_loads(tmp_path: Path) -> None:
     assert cfg.train.loss.gate_entropy_regularization.enabled is True
     assert cfg.train.loss.gate_entropy_regularization.weight == 0.001
     assert cfg.train.loss.gate_entropy_regularization.target == "evidence_gate"
+
+
+@pytest.mark.parametrize("target", ["class_evidence_gate", "true_class_evidence_gate"])
+def test_valid_class_gate_entropy_regularization_targets_load(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["gate_entropy_regularization"] = {
+        "enabled": True,
+        "weight": 0.001,
+        "target": target,
+    }
+    config_path = _write_json(
+        tmp_path / f"gate_entropy_regularization_{target}.json",
+        payload,
+    )
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.gate_entropy_regularization.target == target
+
+
+def test_valid_class_gate_diversity_regularization_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["class_gate_diversity_regularization"] = {
+        "enabled": True,
+        "weight": 0.0003,
+        "target": "class_evidence_gate",
+        "metric": "js_divergence",
+    }
+    config_path = _write_json(
+        tmp_path / "class_gate_diversity_regularization.json",
+        payload,
+    )
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    diversity_cfg = cfg.train.loss.class_gate_diversity_regularization
+    assert diversity_cfg.enabled is True
+    assert diversity_cfg.weight == 0.0003
+    assert diversity_cfg.target == "class_evidence_gate"
+    assert diversity_cfg.metric == "js_divergence"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "class_gate_diversity_regularization.enabled"),
+        ("weight", 0.0, "class_gate_diversity_regularization.weight"),
+        ("weight", -0.001, "class_gate_diversity_regularization.weight"),
+        ("target", "evidence_gate", "class_gate_diversity_regularization.target"),
+        ("metric", "kl_divergence", "class_gate_diversity_regularization.metric"),
+    ],
+)
+def test_invalid_class_gate_diversity_regularization_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _fourclass_branch_binary_payload()
+    payload["train"]["loss"]["class_gate_diversity_regularization"] = {
+        "enabled": True,
+        "weight": 0.0003,
+        "target": "class_evidence_gate",
+        "metric": "js_divergence",
+    }
+    payload["train"]["loss"]["class_gate_diversity_regularization"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_class_gate_diversity_regularization.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,7 @@ import torch
 from src.cli.cv import main as cv_main
 from src.cli.evaluate import evaluate_checkpoint
 from src.data.loaders import ClipBatch, build_clip_loader, build_dataset
-from src.models.model import AstModelOutput
+from src.models.model import AstModelOutput, ClassGateEvidenceAuxiliaryConfig
 from src.training.ast_setup import (
     apply_encoder_adaptation,
     build_ast_model,
@@ -39,6 +39,7 @@ from src.utils.config import (
     BranchBinaryPosWeightConfig,
     CheckpointingConfig,
     CheckpointMonitorConfig,
+    ClassGateDiversityRegularizationConfig,
     ClassifierConfig,
     DataConfig,
     EarlyStoppingConfig,
@@ -214,6 +215,15 @@ def _trainer_cfg(
     attention_entropy_weight: float = 0.0,
     gate_entropy_regularization_enabled: bool = False,
     gate_entropy_regularization_weight: float = 0.0,
+    gate_entropy_regularization_target: Literal[
+        "evidence_gate",
+        "class_evidence_gate",
+        "true_class_evidence_gate",
+    ] = "evidence_gate",
+    class_gate_evidence_auxiliary_enabled: bool = False,
+    class_gate_evidence_auxiliary_weight: float = 0.1,
+    class_gate_diversity_regularization_enabled: bool = False,
+    class_gate_diversity_regularization_weight: float = 0.0,
 ) -> TrainerConfig:
     return TrainerConfig(
         device="cpu",
@@ -267,7 +277,17 @@ def _trainer_cfg(
         gate_entropy_regularization=GateEntropyRegularizationConfig(
             enabled=gate_entropy_regularization_enabled,
             weight=gate_entropy_regularization_weight,
-            target="evidence_gate",
+            target=gate_entropy_regularization_target,
+        ),
+        class_gate_evidence_auxiliary=ClassGateEvidenceAuxiliaryConfig(
+            enabled=class_gate_evidence_auxiliary_enabled,
+            weight=class_gate_evidence_auxiliary_weight,
+        ),
+        class_gate_diversity_regularization=ClassGateDiversityRegularizationConfig(
+            enabled=class_gate_diversity_regularization_enabled,
+            weight=class_gate_diversity_regularization_weight,
+            target="class_evidence_gate",
+            metric="js_divergence",
         ),
         analysis=_analysis_cfg(),
         early_stopping=EarlyStoppingConfig(
@@ -1006,6 +1026,93 @@ def test_trainer_gate_entropy_regularization_disabled_adds_no_term() -> None:
     assert torch.isclose(components.total, final_loss)
 
 
+def test_trainer_evidence_auxiliary_disabled_adds_no_term() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_gate_evidence_auxiliary_enabled=False,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor(
+            [[0.4, -0.7, 0.1], [0.2, 0.3, -0.1]],
+            dtype=torch.float32,
+        ),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=None,
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+
+    assert components.evidence_auxiliary_loss is None
+    assert torch.isclose(components.total, final_loss)
+
+
+def test_trainer_evidence_auxiliary_enabled_adds_weighted_ce() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_gate_evidence_auxiliary_enabled=True,
+            class_gate_evidence_auxiliary_weight=0.2,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor(
+            [[0.4, -0.7, 0.1], [0.2, 0.3, -0.1]],
+            dtype=torch.float32,
+        ),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.tensor(
+            [[0.1, 0.8, -0.2], [0.7, 0.1, 0.0]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+    assert output.class_evidence_logits is not None
+    evidence_loss = trainer._compute_main_loss(
+        criterion,
+        output.class_evidence_logits,
+        labels,
+    )
+
+    assert components.evidence_auxiliary_loss is not None
+    assert torch.isclose(components.evidence_auxiliary_loss, evidence_loss)
+    assert torch.isclose(components.total, final_loss + (0.2 * evidence_loss))
+
+
+def test_trainer_raises_when_evidence_auxiliary_enabled_without_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_gate_evidence_auxiliary_enabled=True,
+            class_gate_evidence_auxiliary_weight=0.2,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=None,
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="class gate evidence auxiliary loss enabled"):
+        trainer._compute_total_loss(criterion, output, labels)
+
+
 def test_trainer_gate_entropy_regularization_subtracts_weighted_entropy() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -1035,6 +1142,69 @@ def test_trainer_gate_entropy_regularization_subtracts_weighted_entropy() -> Non
     assert components.gate_entropy_regularization is not None
     assert torch.isclose(components.gate_entropy_regularization, regularization)
     assert torch.isclose(components.total, final_loss + regularization)
+
+
+def test_trainer_gate_entropy_regularization_supports_class_gate_targets() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_entropy_regularization_enabled=True,
+            gate_entropy_regularization_weight=0.5,
+            gate_entropy_regularization_target="true_class_evidence_gate",
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor(
+            [[0.4, -0.7, 0.1], [0.2, 0.3, -0.1]],
+            dtype=torch.float32,
+        ),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_gate_entropy=torch.tensor(
+            [[0.2, 0.6, 0.4], [0.9, 0.3, 0.7]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+    gate_entropy, regularization = trainer._compute_gate_entropy_regularization(
+        output,
+        labels,
+    )
+
+    assert torch.isclose(gate_entropy, torch.tensor(0.75))
+    assert torch.isclose(regularization, torch.tensor(-0.375))
+    assert torch.isclose(components.total, final_loss + regularization)
+
+
+def test_trainer_gate_entropy_regularization_supports_all_class_gate_target() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_entropy_regularization_enabled=True,
+            gate_entropy_regularization_weight=0.25,
+            gate_entropy_regularization_target="class_evidence_gate",
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_gate_entropy=torch.tensor(
+            [[0.2, 0.6, 0.4], [0.9, 0.3, 0.7]],
+            dtype=torch.float32,
+        ),
+    )
+
+    gate_entropy, regularization = trainer._compute_gate_entropy_regularization(output)
+
+    assert torch.isclose(gate_entropy, torch.tensor(0.5166667), atol=1e-6)
+    assert torch.isclose(regularization, torch.tensor(-0.1291667), atol=1e-6)
 
 
 def test_trainer_gate_entropy_regularization_combines_with_branch_auxiliary() -> None:
@@ -1072,6 +1242,71 @@ def test_trainer_gate_entropy_regularization_combines_with_branch_auxiliary() ->
         components.total,
         final_loss + (0.1 * branch_loss) + regularization,
     )
+
+
+def test_trainer_class_gate_diversity_regularization_subtracts_js_divergence() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_gate_diversity_regularization_enabled=True,
+            class_gate_diversity_regularization_weight=0.3,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.tensor(
+            [[0.4, -0.7, 0.1], [0.2, 0.3, -0.1]],
+            dtype=torch.float32,
+        ),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_gate_weights=torch.tensor(
+            [
+                [[0.8, 0.2], [0.5, 0.5], [0.2, 0.8]],
+                [[0.7, 0.3], [0.6, 0.4], [0.1, 0.9]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+    diversity, regularization = trainer._compute_class_gate_diversity_regularization(
+        output
+    )
+
+    assert diversity > 0
+    assert torch.isclose(regularization, -0.3 * diversity)
+    assert components.class_gate_diversity is not None
+    assert components.class_gate_diversity_regularization is not None
+    assert torch.isclose(components.total, final_loss + regularization)
+
+
+def test_trainer_raises_when_class_gate_diversity_enabled_without_weights() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_gate_diversity_regularization_enabled=True,
+            class_gate_diversity_regularization_weight=0.3,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_gate_weights=None,
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    with pytest.raises(
+        ValueError,
+        match="class gate diversity regularization enabled",
+    ):
+        trainer._compute_total_loss(criterion, output, labels)
 
 
 def test_trainer_raises_when_gate_entropy_enabled_without_evidence_entropy() -> None:
@@ -1133,6 +1368,58 @@ def test_epoch_loss_components_include_gate_entropy_regularization() -> None:
 
     assert result.loss_components["gate_entropy"] == pytest.approx(0.4)
     assert result.loss_components["gate_entropy_regularization"] == pytest.approx(-0.1)
+
+
+def test_epoch_loss_components_include_class_gate_terms() -> None:
+    class ClassGateModel(torch.nn.Module):
+        def forward(self, input_values: torch.Tensor) -> AstModelOutput:
+            batch_size = input_values.shape[0]
+            return AstModelOutput(
+                logits=torch.zeros(batch_size, 3, dtype=torch.float32),
+                pooled_embedding=torch.zeros(batch_size, 32),
+                class_evidence_logits=torch.tensor(
+                    [[0.1, 0.8, -0.2], [0.7, 0.1, 0.0]],
+                    dtype=torch.float32,
+                ),
+                class_evidence_gate_weights=torch.tensor(
+                    [
+                        [[0.8, 0.2], [0.5, 0.5], [0.2, 0.8]],
+                        [[0.7, 0.3], [0.6, 0.4], [0.1, 0.9]],
+                    ],
+                    dtype=torch.float32,
+                ),
+            )
+
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_gate_evidence_auxiliary_enabled=True,
+            class_gate_evidence_auxiliary_weight=0.2,
+            class_gate_diversity_regularization_enabled=True,
+            class_gate_diversity_regularization_weight=0.3,
+        )
+    )
+    batch = ClipBatch(
+        input_values=torch.zeros(2, 1),
+        labels=torch.tensor([1, 0], dtype=torch.long),
+        audio_paths=("a.wav", "b.wav"),
+        label_names=("wheeze", "normal"),
+    )
+
+    result = trainer._epoch(
+        ClassGateModel(),
+        [batch],
+        optimizer=None,
+        scheduler=None,
+        device=torch.device("cpu"),
+        epoch=1,
+    )
+
+    assert "evidence_auxiliary_loss" in result.loss_components
+    assert "class_gate_diversity" in result.loss_components
+    assert "class_gate_diversity_regularization" in result.loss_components
 
 
 def test_configured_checkpoint_monitors_keep_top_three(tmp_path: Path) -> None:

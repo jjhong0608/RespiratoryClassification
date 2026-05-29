@@ -308,6 +308,12 @@ def main() -> None:
                 gate_entropy_regularization=(
                     cfg.train.loss.gate_entropy_regularization
                 ),
+                class_gate_evidence_auxiliary=(
+                    cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_auxiliary
+                ),
+                class_gate_diversity_regularization=(
+                    cfg.train.loss.class_gate_diversity_regularization
+                ),
                 analysis=cfg.analysis,
                 early_stopping=cfg.train.early_stopping,
                 checkpointing=cfg.checkpointing,

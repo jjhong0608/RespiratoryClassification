@@ -20,7 +20,7 @@ from src.evaluation.thresholds import (
     ThresholdOptimizationResult,
     compute_threshold_optimized_metrics,
 )
-from src.models.model import AstModelOutput
+from src.models.model import AstModelOutput, ClassGateEvidenceAuxiliaryConfig
 from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
 from src.utils.config import (
@@ -29,6 +29,7 @@ from src.utils.config import (
     BranchAuxiliaryLossConfig,
     BranchBinaryAuxiliaryLossConfig,
     CheckpointingConfig,
+    ClassGateDiversityRegularizationConfig,
     EarlyStoppingConfig,
     GateEntropyRegularizationConfig,
     LabelSmoothingConfig,
@@ -68,6 +69,12 @@ class TrainerConfig:
     gate_entropy_regularization: GateEntropyRegularizationConfig = field(
         default_factory=GateEntropyRegularizationConfig
     )
+    class_gate_evidence_auxiliary: ClassGateEvidenceAuxiliaryConfig = field(
+        default_factory=ClassGateEvidenceAuxiliaryConfig
+    )
+    class_gate_diversity_regularization: ClassGateDiversityRegularizationConfig = field(
+        default_factory=ClassGateDiversityRegularizationConfig
+    )
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
     checkpointing: CheckpointingConfig | None = None
@@ -81,9 +88,12 @@ class LossComponents:
     main: Tensor
     branch_auxiliary: Tensor | None = None
     branch_binary_auxiliary: Tensor | None = None
+    evidence_auxiliary_loss: Tensor | None = None
     attention_entropy: Tensor | None = None
     gate_entropy: Tensor | None = None
     gate_entropy_regularization: Tensor | None = None
+    class_gate_diversity: Tensor | None = None
+    class_gate_diversity_regularization: Tensor | None = None
     branch_binary_aux_weight: float = 0.0
     branch_binary_aux_monitor_weight: float = 0.0
 
@@ -491,24 +501,134 @@ class Trainer(LoggingMixin):
             entropies.append(entropy)
         return torch.stack(entropies).mean()
 
+    def _compute_evidence_auxiliary_loss(
+        self,
+        criterion: nn.Module,
+        output: AstModelOutput,
+        labels: Tensor,
+    ) -> Tensor:
+        if output.class_evidence_logits is None:
+            raise ValueError(
+                "class gate evidence auxiliary loss enabled but model did not return "
+                "class_evidence_logits"
+            )
+        return self._compute_main_loss(criterion, output.class_evidence_logits, labels)
+
     def _compute_gate_entropy_regularization(
         self,
         output: AstModelOutput,
+        labels: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        if self.cfg.gate_entropy_regularization.target != "evidence_gate":
-            raise ValueError(
-                "gate entropy regularization supports only target='evidence_gate'"
+        target = self.cfg.gate_entropy_regularization.target
+        if target == "evidence_gate":
+            if output.evidence_gate_entropy is None:
+                raise ValueError(
+                    "gate entropy regularization enabled but model did not return "
+                    "evidence_gate_entropy"
+                )
+            entropy_values = output.evidence_gate_entropy
+        elif target == "class_evidence_gate":
+            if output.class_evidence_gate_entropy is None:
+                raise ValueError(
+                    "gate entropy regularization enabled but model did not return "
+                    "class_evidence_gate_entropy"
+                )
+            entropy_values = output.class_evidence_gate_entropy
+        elif target == "true_class_evidence_gate":
+            if output.class_evidence_gate_entropy is None:
+                raise ValueError(
+                    "gate entropy regularization enabled but model did not return "
+                    "class_evidence_gate_entropy"
+                )
+            if labels is None:
+                raise ValueError(
+                    "target='true_class_evidence_gate' requires labels for gate "
+                    "entropy regularization"
+                )
+            if output.class_evidence_gate_entropy.ndim != 2:
+                raise ValueError(
+                    "class_evidence_gate_entropy must have shape (B, C), "
+                    f"got {tuple(output.class_evidence_gate_entropy.shape)}"
+                )
+            label_indices = labels.to(
+                device=output.class_evidence_gate_entropy.device,
+                dtype=torch.long,
             )
-        if output.evidence_gate_entropy is None:
+            if label_indices.numel() > 0 and int(label_indices.max().item()) >= int(
+                output.class_evidence_gate_entropy.shape[1]
+            ):
+                raise ValueError(
+                    "labels contain a class index outside class_evidence_gate_entropy"
+                )
+            entropy_values = output.class_evidence_gate_entropy.gather(
+                1,
+                label_indices.unsqueeze(1),
+            ).squeeze(1)
+        else:
             raise ValueError(
-                "gate entropy regularization enabled but model did not return "
-                "evidence_gate_entropy"
+                "gate entropy regularization target must be one of "
+                "'evidence_gate', 'class_evidence_gate', "
+                "'true_class_evidence_gate'"
             )
-        gate_entropy = output.evidence_gate_entropy.mean()
+        gate_entropy = entropy_values.mean()
         regularization = (
             -float(self.cfg.gate_entropy_regularization.weight) * gate_entropy
         )
         return gate_entropy, regularization
+
+    def _compute_class_gate_diversity_regularization(
+        self,
+        output: AstModelOutput,
+    ) -> tuple[Tensor, Tensor]:
+        if self.cfg.class_gate_diversity_regularization.target != "class_evidence_gate":
+            raise ValueError(
+                "class gate diversity regularization supports only "
+                "target='class_evidence_gate'"
+            )
+        if self.cfg.class_gate_diversity_regularization.metric != "js_divergence":
+            raise ValueError(
+                "class gate diversity regularization supports only "
+                "metric='js_divergence'"
+            )
+        if output.class_evidence_gate_weights is None:
+            raise ValueError(
+                "class gate diversity regularization enabled but model did not return "
+                "class_evidence_gate_weights"
+            )
+        gate_weights = output.class_evidence_gate_weights
+        if gate_weights.ndim != 3:
+            raise ValueError(
+                "class_evidence_gate_weights must have shape (B, C, R), "
+                f"got {tuple(gate_weights.shape)}"
+            )
+        if gate_weights.shape[1] <= 1:
+            raise ValueError(
+                "class gate diversity regularization requires at least two classes"
+            )
+        eps = torch.finfo(gate_weights.dtype).eps
+        distributions = gate_weights.clamp_min(eps)
+        distributions = distributions / distributions.sum(dim=-1, keepdim=True)
+        first = distributions.unsqueeze(2)
+        second = distributions.unsqueeze(1)
+        midpoint = 0.5 * (first + second)
+        first_kl = (first * (first / midpoint).log()).sum(dim=-1)
+        second_kl = (second * (second / midpoint).log()).sum(dim=-1)
+        js_divergence = 0.5 * (first_kl + second_kl)
+        num_classes = int(gate_weights.shape[1])
+        pair_mask = torch.triu(
+            torch.ones(
+                num_classes,
+                num_classes,
+                device=gate_weights.device,
+                dtype=torch.bool,
+            ),
+            diagonal=1,
+        )
+        diversity = js_divergence[:, pair_mask].mean()
+        regularization = (
+            -float(self.cfg.class_gate_diversity_regularization.weight) * diversity
+        )
+        return diversity, regularization
 
     def _branch_binary_targets(
         self,
@@ -620,6 +740,19 @@ class Trainer(LoggingMixin):
             monitor_total = monitor_total + (
                 branch_binary_monitor_weight * branch_binary_loss
             )
+        evidence_auxiliary_loss: Tensor | None = None
+        if self.cfg.class_gate_evidence_auxiliary.enabled:
+            evidence_auxiliary_loss = self._compute_evidence_auxiliary_loss(
+                criterion,
+                output,
+                labels,
+            )
+            evidence_auxiliary_term = (
+                float(self.cfg.class_gate_evidence_auxiliary.weight)
+                * evidence_auxiliary_loss
+            )
+            scheduled_total = scheduled_total + evidence_auxiliary_term
+            monitor_total = monitor_total + evidence_auxiliary_term
         entropy_loss: Tensor | None = None
         if self.cfg.attention_entropy.enabled:
             entropy_loss = self._compute_attention_entropy_loss(output)
@@ -630,10 +763,18 @@ class Trainer(LoggingMixin):
         gate_entropy_regularization: Tensor | None = None
         if self.cfg.gate_entropy_regularization.enabled:
             gate_entropy, gate_entropy_regularization = (
-                self._compute_gate_entropy_regularization(output)
+                self._compute_gate_entropy_regularization(output, labels)
             )
             scheduled_total = scheduled_total + gate_entropy_regularization
             monitor_total = monitor_total + gate_entropy_regularization
+        class_gate_diversity: Tensor | None = None
+        class_gate_diversity_regularization: Tensor | None = None
+        if self.cfg.class_gate_diversity_regularization.enabled:
+            class_gate_diversity, class_gate_diversity_regularization = (
+                self._compute_class_gate_diversity_regularization(output)
+            )
+            scheduled_total = scheduled_total + class_gate_diversity_regularization
+            monitor_total = monitor_total + class_gate_diversity_regularization
         return LossComponents(
             total=monitor_total if use_monitor_total else scheduled_total,
             total_scheduled=scheduled_total,
@@ -641,9 +782,12 @@ class Trainer(LoggingMixin):
             main=final_loss,
             branch_auxiliary=auxiliary_loss,
             branch_binary_auxiliary=branch_binary_loss,
+            evidence_auxiliary_loss=evidence_auxiliary_loss,
             attention_entropy=entropy_loss,
             gate_entropy=gate_entropy,
             gate_entropy_regularization=gate_entropy_regularization,
+            class_gate_diversity=class_gate_diversity,
+            class_gate_diversity_regularization=class_gate_diversity_regularization,
             branch_binary_aux_weight=branch_binary_weight,
             branch_binary_aux_monitor_weight=branch_binary_monitor_weight,
         )
@@ -669,9 +813,12 @@ class Trainer(LoggingMixin):
             "main": 0.0,
             "branch_auxiliary": 0.0,
             "branch_binary_auxiliary": 0.0,
+            "evidence_auxiliary_loss": 0.0,
             "attention_entropy": 0.0,
             "gate_entropy": 0.0,
             "gate_entropy_regularization": 0.0,
+            "class_gate_diversity": 0.0,
+            "class_gate_diversity_regularization": 0.0,
             "branch_binary_aux_weight": 0.0,
             "branch_binary_aux_monitor_weight": 0.0,
         }
@@ -722,10 +869,15 @@ class Trainer(LoggingMixin):
                 "main": loss_components.main,
                 "branch_auxiliary": loss_components.branch_auxiliary,
                 "branch_binary_auxiliary": loss_components.branch_binary_auxiliary,
+                "evidence_auxiliary_loss": loss_components.evidence_auxiliary_loss,
                 "attention_entropy": loss_components.attention_entropy,
                 "gate_entropy": loss_components.gate_entropy,
                 "gate_entropy_regularization": (
                     loss_components.gate_entropy_regularization
+                ),
+                "class_gate_diversity": loss_components.class_gate_diversity,
+                "class_gate_diversity_regularization": (
+                    loss_components.class_gate_diversity_regularization
                 ),
                 "branch_binary_aux_weight": (loss_components.branch_binary_aux_weight),
                 "branch_binary_aux_monitor_weight": (
@@ -894,6 +1046,10 @@ class Trainer(LoggingMixin):
                         "branch_binary_auxiliary",
                         0.0,
                     ),
+                    "train_loss_evidence_auxiliary": train_components.get(
+                        "evidence_auxiliary_loss",
+                        0.0,
+                    ),
                     "train_branch_binary_aux_weight": train_components.get(
                         "branch_binary_aux_weight",
                         0.0,
@@ -902,6 +1058,16 @@ class Trainer(LoggingMixin):
                     "train_loss_gate_entropy_regularization": train_components.get(
                         "gate_entropy_regularization",
                         0.0,
+                    ),
+                    "train_class_gate_diversity": train_components.get(
+                        "class_gate_diversity",
+                        0.0,
+                    ),
+                    "train_loss_class_gate_diversity_regularization": (
+                        train_components.get(
+                            "class_gate_diversity_regularization",
+                            0.0,
+                        )
                     ),
                 }
             )
@@ -924,6 +1090,10 @@ class Trainer(LoggingMixin):
                         "branch_binary_auxiliary",
                         0.0,
                     ),
+                    "val_loss_evidence_auxiliary": val_components.get(
+                        "evidence_auxiliary_loss",
+                        0.0,
+                    ),
                     "val_branch_binary_aux_weight": val_components.get(
                         "branch_binary_aux_weight",
                         0.0,
@@ -936,6 +1106,16 @@ class Trainer(LoggingMixin):
                     "val_loss_gate_entropy_regularization": val_components.get(
                         "gate_entropy_regularization",
                         0.0,
+                    ),
+                    "val_class_gate_diversity": val_components.get(
+                        "class_gate_diversity",
+                        0.0,
+                    ),
+                    "val_loss_class_gate_diversity_regularization": (
+                        val_components.get(
+                            "class_gate_diversity_regularization",
+                            0.0,
+                        )
                     ),
                 }
             )
@@ -958,7 +1138,9 @@ class Trainer(LoggingMixin):
                     "Train Main Loss: %.4f | Val Main Loss: %.4f | "
                     "Train Branch Binary Loss: %.4f | Val Branch Binary Loss: %.4f | "
                     "Branch Binary Weight: %.4f | Train Gate Entropy: %.4f | "
-                    "Val Gate Entropy: %.4f | Val Scheduled Loss: %.4f",
+                    "Val Gate Entropy: %.4f | Train Evidence Aux Loss: %.4f | "
+                    "Val Evidence Aux Loss: %.4f | Train Class Gate Diversity: %.4f | "
+                    "Val Class Gate Diversity: %.4f | Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
@@ -983,6 +1165,10 @@ class Trainer(LoggingMixin):
                     train_components.get("branch_binary_aux_weight", 0.0),
                     train_components.get("gate_entropy", 0.0),
                     val_components.get("gate_entropy", 0.0),
+                    train_components.get("evidence_auxiliary_loss", 0.0),
+                    val_components.get("evidence_auxiliary_loss", 0.0),
+                    train_components.get("class_gate_diversity", 0.0),
+                    val_components.get("class_gate_diversity", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
             else:
@@ -994,7 +1180,9 @@ class Trainer(LoggingMixin):
                     "Train Main Loss: %.4f | Val Main Loss: %.4f | "
                     "Train Branch Binary Loss: %.4f | Val Branch Binary Loss: %.4f | "
                     "Branch Binary Weight: %.4f | Train Gate Entropy: %.4f | "
-                    "Val Gate Entropy: %.4f | Val Scheduled Loss: %.4f",
+                    "Val Gate Entropy: %.4f | Train Evidence Aux Loss: %.4f | "
+                    "Val Evidence Aux Loss: %.4f | Train Class Gate Diversity: %.4f | "
+                    "Val Class Gate Diversity: %.4f | Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
@@ -1016,6 +1204,10 @@ class Trainer(LoggingMixin):
                     train_components.get("branch_binary_aux_weight", 0.0),
                     train_components.get("gate_entropy", 0.0),
                     val_components.get("gate_entropy", 0.0),
+                    train_components.get("evidence_auxiliary_loss", 0.0),
+                    val_components.get("evidence_auxiliary_loss", 0.0),
+                    train_components.get("class_gate_diversity", 0.0),
+                    val_components.get("class_gate_diversity", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
 
