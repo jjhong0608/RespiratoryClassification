@@ -1653,6 +1653,7 @@ def test_two_class_class_aware_ce_smoke_uses_softmax_without_threshold(
     assert diagnostics[0]["evidence_pooling_type"] == "class_aware_branch_gated"
     assert "class_evidence_gate_weights" in diagnostics[0]
     assert "true_class_gate_weights" in diagnostics[0]
+    assert "class_gated_branch_logits" in diagnostics[0]
 
 
 def test_multiclass_trainer_and_evaluator_smoke_b3(tmp_path: Path) -> None:

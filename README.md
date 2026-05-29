@@ -477,8 +477,12 @@ Its evidence logits can be combined with the configured classifier as a global
 residual: `final_logits = class_evidence_logits + scale * global_residual_logits`.
 
 Branch logits are not used as gate input. Mean branch embeddings are not used as
-gate input. Final fusion still receives the evidence embedding, mean branch
-embedding, and branch logits.
+gate input. For `class_aware_branch_gated`, the residual classifier reuses the
+class-aware gated evidence embeddings by flattening `[batch, class, hidden]` to
+`[batch, class * hidden]`, then concatenates branch logits after applying the
+same class-aware gate into `class_gated_branch_logits` with shape
+`[batch, class]`. The raw mean branch embedding and raw flattened branch logits
+are only used by the legacy `mean` and `branch_gated` fusion paths.
 
 H0 branch-gated configs:
 
@@ -810,8 +814,9 @@ When enabled, diagnostics now include:
   `branch_evidence_norms` when branch-aware gated pooling is active
 - `class_evidence_gate_weights`, `class_evidence_gate_entropy`,
   `true_class_gate_weights`, `predicted_class_gate_weights`,
-  `class_evidence_logits`, `global_residual_logits`, and
-  `global_residual_scale` when class-aware branch-gated pooling is active
+  `class_evidence_logits`, `class_gated_branch_logits`,
+  `global_residual_logits`, and `global_residual_scale` when class-aware
+  branch-gated pooling is active
 - `selected_evidence_tokens` with the saved embedding payload only when
   `save_embeddings=true`
 

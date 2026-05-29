@@ -184,6 +184,7 @@ class AstModelOutput:
     global_residual_logits: Tensor | None = None
     class_evidence_gate_weights: Tensor | None = None
     class_evidence_gate_entropy: Tensor | None = None
+    class_gated_branch_logits: Tensor | None = None
     global_residual_scale: Tensor | None = None
     branch_evidence_norms: Tensor | None = None
     selected_evidence_dropout_mask: Tensor | None = None
@@ -1048,9 +1049,13 @@ class MultiScaleRdtAstModel(nn.Module):
                 "Unsupported evidence pooling type: "
                 f"{architecture.evidence_pooling.type}"
             )
-        fusion_input_dim = (2 * architecture.hidden_size) + (
-            len(architecture.patch_branches) * output_dim
-        )
+        num_branches = len(architecture.patch_branches)
+        if self.class_aware_evidence_pooling:
+            fusion_input_dim = (cfg.num_classes * architecture.hidden_size) + output_dim
+        else:
+            fusion_input_dim = (2 * architecture.hidden_size) + (
+                num_branches * output_dim
+            )
         self.fusion_projector = nn.Sequential(
             nn.Linear(fusion_input_dim, architecture.hidden_size),
             nn.GELU(),
@@ -1196,13 +1201,9 @@ class MultiScaleRdtAstModel(nn.Module):
             selected_evidence_branch_ids,
         )
         evidence_embedding = pooling_output.pooled_embedding
-        branch_embedding_mean = torch.stack(branch_embeddings, dim=1).mean(dim=1)
-        branch_logit_features = stacked_branch_logits.reshape(
-            stacked_branch_logits.shape[0],
-            -1,
-        )
         global_residual_logits: Tensor | None = None
         global_residual_scale: Tensor | None = None
+        class_gated_branch_logits: Tensor | None = None
         if self.class_aware_evidence_pooling:
             class_evidence_logits = pooling_output.class_evidence_logits
             if class_evidence_logits is None:
@@ -1210,12 +1211,61 @@ class MultiScaleRdtAstModel(nn.Module):
                     "class_aware_branch_gated evidence pooling must return "
                     "class_evidence_logits"
                 )
+            class_evidence_gate_weights = pooling_output.class_gate_weights
+            if class_evidence_gate_weights is None:
+                raise ValueError(
+                    "class_aware_branch_gated evidence pooling must return "
+                    "class_gate_weights"
+                )
+            if class_evidence_gate_weights.ndim != 3:
+                raise ValueError(
+                    "class_gate_weights must have shape (B, C, R), "
+                    f"got {tuple(class_evidence_gate_weights.shape)}"
+                )
+            if stacked_branch_logits.ndim != 3:
+                raise ValueError(
+                    "class_aware_branch_gated branch logits must have shape "
+                    f"(B, R, C), got {tuple(stacked_branch_logits.shape)}"
+                )
+            if (
+                class_evidence_gate_weights.shape[0] != stacked_branch_logits.shape[0]
+                or class_evidence_gate_weights.shape[1]
+                != stacked_branch_logits.shape[2]
+                or class_evidence_gate_weights.shape[2]
+                != stacked_branch_logits.shape[1]
+            ):
+                raise ValueError(
+                    "class_gate_weights must align with branch logits as "
+                    "(B, C, R) vs (B, R, C); got "
+                    f"{tuple(class_evidence_gate_weights.shape)} and "
+                    f"{tuple(stacked_branch_logits.shape)}"
+                )
+            class_gated_branch_logits = torch.einsum(
+                "bcr,brc->bc",
+                class_evidence_gate_weights,
+                stacked_branch_logits,
+            )
             if self.global_residual_combiner is None:
                 pooled_embedding = evidence_embedding
                 logits = class_evidence_logits
             else:
+                class_evidence_embeddings = pooling_output.class_evidence_embeddings
+                if class_evidence_embeddings is None:
+                    raise ValueError(
+                        "class_aware_branch_gated evidence pooling must return "
+                        "class_evidence_embeddings"
+                    )
+                if class_evidence_embeddings.ndim != 3:
+                    raise ValueError(
+                        "class_evidence_embeddings must have shape (B, C, D), "
+                        f"got {tuple(class_evidence_embeddings.shape)}"
+                    )
+                class_evidence_features = class_evidence_embeddings.reshape(
+                    class_evidence_embeddings.shape[0],
+                    -1,
+                )
                 fusion_input = torch.cat(
-                    [evidence_embedding, branch_embedding_mean, branch_logit_features],
+                    [class_evidence_features, class_gated_branch_logits],
                     dim=1,
                 )
                 pooled_embedding = self.fusion_projector(fusion_input)
@@ -1226,6 +1276,11 @@ class MultiScaleRdtAstModel(nn.Module):
                 )
                 global_residual_scale = self.global_residual_combiner.scale.detach()
         else:
+            branch_logit_features = stacked_branch_logits.reshape(
+                stacked_branch_logits.shape[0],
+                -1,
+            )
+            branch_embedding_mean = torch.stack(branch_embeddings, dim=1).mean(dim=1)
             fusion_input = torch.cat(
                 [evidence_embedding, branch_embedding_mean, branch_logit_features],
                 dim=1,
@@ -1253,6 +1308,7 @@ class MultiScaleRdtAstModel(nn.Module):
             global_residual_logits=global_residual_logits,
             class_evidence_gate_weights=pooling_output.class_gate_weights,
             class_evidence_gate_entropy=pooling_output.class_gate_entropy,
+            class_gated_branch_logits=class_gated_branch_logits,
             global_residual_scale=global_residual_scale,
             branch_evidence_norms=pooling_output.branch_evidence_norms,
             selected_evidence_dropout_mask=selected_evidence_dropout_mask,

@@ -118,7 +118,7 @@
         "adapter_depth": 3,
         "rdt": {
           "enabled": true,
-          "steps": 4,
+          "steps": 3,
           "top_tokens_per_branch": 3,
           "gated_residual": true,
           "layerscale_init": 0.01,
@@ -249,8 +249,8 @@
         "target": "true_class_evidence_gate"
       },
       "class_gate_diversity_regularization": {
-        "enabled": false,
-        "weight": 0.0003,
+        "enabled": true,
+        "weight": 0.01,
         "target": "class_evidence_gate",
         "metric": "js_divergence"
       },
@@ -260,8 +260,8 @@
         "aggregation": "mean"
       },
       "branch_binary_auxiliary": {
-        "enabled": false,
-        "weight": 0.3,
+        "enabled": true,
+        "weight": 0.1,
         "label_to_index": {
           "Normal": 0,
           "Lung_Parenchymal": 1,

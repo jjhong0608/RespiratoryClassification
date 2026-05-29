@@ -549,6 +549,12 @@ def test_model_forward_uses_branch_gated_evidence_pooling(num_classes: int) -> N
 
     output = model(torch.randn(2, 32, 32))
 
+    fusion_linear = model.fusion_projector[0]
+    assert isinstance(fusion_linear, torch.nn.Linear)
+    expected_fusion_input_dim = (2 * 32) + (
+        4 * (1 if num_classes == 2 else num_classes)
+    )
+    assert fusion_linear.in_features == expected_fusion_input_dim
     expected_logit_shape = (2,) if num_classes == 2 else (2, num_classes)
     assert output.logits.shape == expected_logit_shape
     assert output.pooled_embedding.shape == (2, 32)
@@ -582,6 +588,10 @@ def test_model_forward_uses_class_aware_branch_gated_evidence_pooling(
 
     output = model(torch.randn(2, 32, 32))
 
+    fusion_linear = model.fusion_projector[0]
+    assert isinstance(fusion_linear, torch.nn.Linear)
+    expected_fusion_input_dim = (num_classes * 32) + num_classes
+    assert fusion_linear.in_features == expected_fusion_input_dim
     assert output.logits.shape == (2, num_classes)
     assert output.pooled_embedding.shape == (2, 32)
     assert output.evidence_pooling_type == "class_aware_branch_gated"
@@ -596,6 +606,16 @@ def test_model_forward_uses_class_aware_branch_gated_evidence_pooling(
     assert output.global_residual_scale is not None
     assert output.class_evidence_gate_weights is not None
     assert output.class_evidence_gate_weights.shape == (2, num_classes, 4)
+    assert output.class_gated_branch_logits is not None
+    assert output.class_gated_branch_logits.shape == (2, num_classes)
+    assert torch.allclose(
+        output.class_gated_branch_logits,
+        torch.einsum(
+            "bcr,brc->bc",
+            output.class_evidence_gate_weights,
+            output.branch_logits,
+        ),
+    )
     assert output.class_evidence_gate_entropy is not None
     assert output.class_evidence_gate_entropy.shape == (2, num_classes)
     assert output.evidence_gate_weights is not None
@@ -628,6 +648,17 @@ def test_class_aware_model_can_disable_global_residual() -> None:
     assert output.global_residual_logits is None
     assert output.global_residual_scale is None
     assert output.pooled_embedding.shape == (2, 32)
+    assert output.branch_logits is not None
+    assert output.class_evidence_gate_weights is not None
+    assert output.class_gated_branch_logits is not None
+    assert torch.allclose(
+        output.class_gated_branch_logits,
+        torch.einsum(
+            "bcr,brc->bc",
+            output.class_evidence_gate_weights,
+            output.branch_logits,
+        ),
+    )
 
 
 def test_class_aware_model_fixed_residual_scale_is_not_trainable() -> None:
