@@ -227,6 +227,29 @@ class ClassEvidenceMarginConfig:
         "true_vs_hardest_negative",
     ] = "minority_vs_major"
     major_class: str | None = None
+    class_weighted: bool = False
+
+
+@dataclass(frozen=True)
+class ClassGatedBranchLogitMarginConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    margin: float = 0.0
+    target: Literal["class_gated_branch_logits"] = "class_gated_branch_logits"
+    mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    class_weighted: bool = False
+
+
+@dataclass(frozen=True)
+class GateBranchAlignmentConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["true_class_gate"] = "true_class_gate"
+    source: Literal["branch_logit_margin"] = "branch_logit_margin"
+    mode: Literal["detached_soft_target_kl"] = "detached_soft_target_kl"
+    margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    temperature: float = 1.0
+    warmup_epochs: int = 0
 
 
 @dataclass(frozen=True)
@@ -306,6 +329,12 @@ class LossConfig:
     )
     class_evidence_margin: ClassEvidenceMarginConfig = field(
         default_factory=ClassEvidenceMarginConfig
+    )
+    class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
+        default_factory=ClassGatedBranchLogitMarginConfig
+    )
+    gate_branch_alignment: GateBranchAlignmentConfig = field(
+        default_factory=GateBranchAlignmentConfig
     )
 
 
@@ -460,6 +489,12 @@ class JsonConfigLoader:
         "minority_vs_major",
         "true_vs_hardest_negative",
     }
+    _CLASS_GATED_BRANCH_LOGIT_MARGIN_TARGETS = {"class_gated_branch_logits"}
+    _CLASS_GATED_BRANCH_LOGIT_MARGIN_MODES = {"true_vs_hardest_negative"}
+    _GATE_BRANCH_ALIGNMENT_TARGETS = {"true_class_gate"}
+    _GATE_BRANCH_ALIGNMENT_SOURCES = {"branch_logit_margin"}
+    _GATE_BRANCH_ALIGNMENT_MODES = {"detached_soft_target_kl"}
+    _GATE_BRANCH_ALIGNMENT_MARGIN_MODES = {"true_vs_hardest_negative"}
     _TIME_SHIFT_MODES = {"zero_pad", "roll"}
     _AUGMENTATION_POLICY_TYPES = {"independent", "one_of"}
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
@@ -1089,6 +1124,10 @@ class JsonConfigLoader:
             raise ValueError(
                 "train.loss.class_evidence_margin.enabled must be a boolean"
             )
+        if not isinstance(cfg.loss.class_evidence_margin.class_weighted, bool):
+            raise ValueError(
+                "train.loss.class_evidence_margin.class_weighted must be a boolean"
+            )
         if (
             cfg.loss.class_evidence_margin.target
             not in JsonConfigLoader._CLASS_EVIDENCE_MARGIN_TARGETS
@@ -1149,6 +1188,123 @@ class JsonConfigLoader:
                     "train.loss.class_evidence_margin.major_class is required "
                     "when mode='minority_vs_major'"
                 )
+        if not isinstance(cfg.loss.class_gated_branch_logit_margin.enabled, bool):
+            raise ValueError(
+                "train.loss.class_gated_branch_logit_margin.enabled must be a boolean"
+            )
+        if not isinstance(
+            cfg.loss.class_gated_branch_logit_margin.class_weighted, bool
+        ):
+            raise ValueError(
+                "train.loss.class_gated_branch_logit_margin.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            cfg.loss.class_gated_branch_logit_margin.target
+            not in JsonConfigLoader._CLASS_GATED_BRANCH_LOGIT_MARGIN_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.class_gated_branch_logit_margin.target must be "
+                "'class_gated_branch_logits'"
+            )
+        if (
+            cfg.loss.class_gated_branch_logit_margin.mode
+            not in JsonConfigLoader._CLASS_GATED_BRANCH_LOGIT_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.class_gated_branch_logit_margin.mode must be "
+                "'true_vs_hardest_negative'"
+            )
+        if cfg.loss.class_gated_branch_logit_margin.enabled:
+            if cfg.loss.class_gated_branch_logit_margin.weight <= 0:
+                raise ValueError(
+                    "train.loss.class_gated_branch_logit_margin.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.class_gated_branch_logit_margin.margin <= 0:
+                raise ValueError(
+                    "train.loss.class_gated_branch_logit_margin.margin must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.class_gated_branch_logit_margin is supported "
+                    "only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.class_gated_branch_logit_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+        if not isinstance(cfg.loss.gate_branch_alignment.enabled, bool):
+            raise ValueError(
+                "train.loss.gate_branch_alignment.enabled must be a boolean"
+            )
+        if (
+            cfg.loss.gate_branch_alignment.target
+            not in JsonConfigLoader._GATE_BRANCH_ALIGNMENT_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_alignment.target must be 'true_class_gate'"
+            )
+        if (
+            cfg.loss.gate_branch_alignment.source
+            not in JsonConfigLoader._GATE_BRANCH_ALIGNMENT_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_alignment.source must be 'branch_logit_margin'"
+            )
+        if (
+            cfg.loss.gate_branch_alignment.mode
+            not in JsonConfigLoader._GATE_BRANCH_ALIGNMENT_MODES
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_alignment.mode must be "
+                "'detached_soft_target_kl'"
+            )
+        if (
+            cfg.loss.gate_branch_alignment.margin_mode
+            not in JsonConfigLoader._GATE_BRANCH_ALIGNMENT_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_alignment.margin_mode must be "
+                "'true_vs_hardest_negative'"
+            )
+        if not isinstance(cfg.loss.gate_branch_alignment.warmup_epochs, int):
+            raise TypeError(
+                "train.loss.gate_branch_alignment.warmup_epochs must be an integer"
+            )
+        if not isinstance(cfg.loss.gate_branch_alignment.temperature, int | float):
+            raise TypeError(
+                "train.loss.gate_branch_alignment.temperature must be a number"
+            )
+        if cfg.loss.gate_branch_alignment.temperature <= 0:
+            raise ValueError(
+                "train.loss.gate_branch_alignment.temperature must be greater than zero"
+            )
+        if cfg.loss.gate_branch_alignment.warmup_epochs < 0:
+            raise ValueError(
+                "train.loss.gate_branch_alignment.warmup_epochs must be greater "
+                "than or equal to zero"
+            )
+        if cfg.loss.gate_branch_alignment.enabled:
+            if cfg.loss.gate_branch_alignment.weight <= 0:
+                raise ValueError(
+                    "train.loss.gate_branch_alignment.weight must be greater "
+                    "than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.gate_branch_alignment is supported only for "
+                    "cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.gate_branch_alignment requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
         if not isinstance(cfg.loss.class_weighting.enabled, bool):
             raise ValueError("train.loss.class_weighting.enabled must be a boolean")
         if cfg.loss.class_weighting.type not in JsonConfigLoader._CLASS_WEIGHTING_TYPES:
@@ -1165,6 +1321,24 @@ class JsonConfigLoader:
         if cfg.loss.class_weighting.enabled and cfg.loss.type != "cross_entropy":
             raise ValueError(
                 "train.loss.class_weighting is supported only for cross_entropy runs"
+            )
+        if (
+            cfg.loss.class_evidence_margin.enabled
+            and cfg.loss.class_evidence_margin.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_margin.class_weighted requires "
+                "train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.class_gated_branch_logit_margin.enabled
+            and cfg.loss.class_gated_branch_logit_margin.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.class_gated_branch_logit_margin.class_weighted "
+                "requires train.loss.class_weighting.enabled=true"
             )
         if not isinstance(cfg.loss.label_smoothing.enabled, bool):
             raise ValueError("train.loss.label_smoothing.enabled must be a boolean")
@@ -1645,6 +1819,12 @@ class JsonConfigLoader:
         )
         loss["class_evidence_margin"] = ClassEvidenceMarginConfig(
             **dict(loss.get("class_evidence_margin", {}))
+        )
+        loss["class_gated_branch_logit_margin"] = ClassGatedBranchLogitMarginConfig(
+            **dict(loss.get("class_gated_branch_logit_margin", {}))
+        )
+        loss["gate_branch_alignment"] = GateBranchAlignmentConfig(
+            **dict(loss.get("gate_branch_alignment", {}))
         )
         kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))

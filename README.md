@@ -639,7 +639,26 @@ The active schema is:
         "margin": 0.0,
         "target": "class_evidence_logits",
         "mode": "minority_vs_major",
-        "major_class": null
+        "major_class": null,
+        "class_weighted": false
+      },
+      "class_gated_branch_logit_margin": {
+        "enabled": false,
+        "weight": 0.0,
+        "margin": 0.0,
+        "target": "class_gated_branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": false
+      },
+      "gate_branch_alignment": {
+        "enabled": false,
+        "weight": 0.0,
+        "target": "true_class_gate",
+        "source": "branch_logit_margin",
+        "mode": "detached_soft_target_kl",
+        "margin_mode": "true_vs_hardest_negative",
+        "temperature": 1.0,
+        "warmup_epochs": 0
       }
     },
     "initialization": {
@@ -697,6 +716,10 @@ Additional experiment knobs:
   pooling
 - `train.loss.class_evidence_margin.enabled = true` adds a weighted margin
   penalty on `class_evidence_logits` for class-aware CE runs
+- `train.loss.class_gated_branch_logit_margin.enabled = true` adds a
+  true-vs-hardest-negative margin penalty on `class_gated_branch_logits`
+- `train.loss.gate_branch_alignment.enabled = true` aligns the true-class gate
+  to detached branch-logit margin soft targets after the configured warmup
 - `train.loss.branch_auxiliary.weights` overrides scalar
   `branch_auxiliary.weight` with normalized per-branch weighting
 - `train.loss.class_weighting.enabled = true` adds train-derived
@@ -778,7 +801,24 @@ not `major_class`, requiring their true-class evidence logit to exceed the
 major-class evidence logit by `margin`. `mode = "true_vs_hardest_negative"`
 requires every true-class evidence logit to exceed the largest non-true evidence
 logit by `margin`. This is a training-only auxiliary term; evaluation still uses
-`final_logits` with softmax + argmax.
+`final_logits` with softmax + argmax. When `class_weighted = true`, the
+per-sample margin penalty is multiplied by the same train-derived class weights
+used by cross-entropy, so `train.loss.class_weighting.enabled` must also be
+true.
+
+When `train.loss.class_gated_branch_logit_margin.enabled = true`, the trainer
+applies the same true-vs-hardest-negative margin idea to
+`class_gated_branch_logits`. This targets the class-gated branch-score path that
+feeds the global residual classifier. It supports `class_weighted = true` with
+the same class-weighting requirement as `class_evidence_margin`.
+
+When `train.loss.gate_branch_alignment.enabled = true`, the trainer computes
+per-branch true-vs-hardest-negative margins from `branch_logits`, converts those
+detached margins into a softmax target over branches, and minimizes
+`KL(target || true_class_gate)`. `warmup_epochs` keeps this term at zero through
+the specified epoch so the branch logits can form useful rankings before gate
+alignment starts. The detached target means this loss moves the gate toward good
+branch rankings; it does not directly increase the branch logits themselves.
 
 ## Optimizer Layout
 

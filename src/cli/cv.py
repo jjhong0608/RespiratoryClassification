@@ -328,6 +328,10 @@ def main() -> None:
                 ),
                 class_evidence_margin=cfg.train.loss.class_evidence_margin,
                 class_evidence_margin_major_index=class_evidence_margin_major_index,
+                class_gated_branch_logit_margin=(
+                    cfg.train.loss.class_gated_branch_logit_margin
+                ),
+                gate_branch_alignment=cfg.train.loss.gate_branch_alignment,
                 analysis=cfg.analysis,
                 early_stopping=cfg.train.early_stopping,
                 checkpointing=cfg.checkpointing,

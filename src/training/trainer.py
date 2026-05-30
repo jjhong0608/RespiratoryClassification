@@ -31,8 +31,10 @@ from src.utils.config import (
     BranchBinaryAuxiliaryLossConfig,
     CheckpointingConfig,
     ClassEvidenceMarginConfig,
+    ClassGatedBranchLogitMarginConfig,
     ClassGateDiversityRegularizationConfig,
     EarlyStoppingConfig,
+    GateBranchAlignmentConfig,
     GateEntropyRegularizationConfig,
     LabelSmoothingConfig,
 )
@@ -81,6 +83,12 @@ class TrainerConfig:
         default_factory=ClassEvidenceMarginConfig
     )
     class_evidence_margin_major_index: int | None = None
+    class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
+        default_factory=ClassGatedBranchLogitMarginConfig
+    )
+    gate_branch_alignment: GateBranchAlignmentConfig = field(
+        default_factory=GateBranchAlignmentConfig
+    )
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
     checkpointing: CheckpointingConfig | None = None
@@ -102,6 +110,10 @@ class LossComponents:
     class_gate_diversity_regularization: Tensor | None = None
     class_evidence_margin: Tensor | None = None
     class_evidence_margin_loss: Tensor | None = None
+    class_gated_branch_logit_margin: Tensor | None = None
+    class_gated_branch_logit_margin_loss: Tensor | None = None
+    gate_branch_alignment: Tensor | None = None
+    gate_branch_alignment_loss: Tensor | None = None
     branch_binary_aux_weight: float = 0.0
     branch_binary_aux_monitor_weight: float = 0.0
 
@@ -641,6 +653,75 @@ class Trainer(LoggingMixin):
         )
         return diversity, regularization
 
+    def _validate_class_margin_inputs(
+        self,
+        logits: Tensor,
+        labels: Tensor,
+        *,
+        logits_name: str,
+        loss_name: str,
+    ) -> Tensor:
+        if logits.ndim != 2:
+            raise ValueError(
+                f"{logits_name} must have shape (B, C), got {tuple(logits.shape)}"
+            )
+        if int(logits.shape[1]) < 2:
+            raise ValueError(f"{loss_name} requires at least two classes")
+        label_indices = labels.to(device=logits.device, dtype=torch.long)
+        if label_indices.ndim != 1:
+            raise ValueError(f"labels must have shape (B,) for {loss_name}")
+        if int(label_indices.shape[0]) != int(logits.shape[0]):
+            raise ValueError(f"labels batch size must match {logits_name} batch size")
+        if label_indices.numel() == 0:
+            return label_indices
+        if int(label_indices.min().item()) < 0 or int(
+            label_indices.max().item()
+        ) >= int(logits.shape[1]):
+            raise ValueError(f"labels contain a class index outside {logits_name}")
+        return label_indices
+
+    def _class_margin_weights(
+        self,
+        label_indices: Tensor,
+        logits: Tensor,
+        *,
+        enabled: bool,
+        loss_name: str,
+    ) -> Tensor:
+        if not enabled:
+            return torch.ones_like(label_indices, dtype=logits.dtype)
+        if self.cfg.class_weights is None:
+            raise ValueError(f"{loss_name}.class_weighted=true requires class_weights")
+        class_weights = torch.tensor(
+            self.cfg.class_weights,
+            device=logits.device,
+            dtype=logits.dtype,
+        )
+        if int(class_weights.numel()) != int(logits.shape[1]):
+            raise ValueError(
+                f"class_weights length must match {loss_name} class dimension"
+            )
+        return class_weights.gather(0, label_indices)
+
+    def _true_vs_hardest_negative_penalties(
+        self,
+        logits: Tensor,
+        label_indices: Tensor,
+        *,
+        margin: float,
+    ) -> Tensor:
+        true_logits = logits.gather(1, label_indices.unsqueeze(1)).squeeze(1)
+        negative_logits = logits.masked_fill(
+            F.one_hot(
+                label_indices,
+                num_classes=int(logits.shape[1]),
+            ).to(dtype=torch.bool, device=logits.device),
+            -torch.inf,
+        )
+        hardest_negative = negative_logits.max(dim=1).values
+        margin_gap = true_logits - hardest_negative
+        return torch.relu(margin - margin_gap)
+
     def _compute_class_evidence_margin_loss(
         self,
         output: AstModelOutput,
@@ -656,35 +737,25 @@ class Trainer(LoggingMixin):
                 "class_evidence_logits"
             )
         logits = output.class_evidence_logits
-        if logits.ndim != 2:
-            raise ValueError(
-                "class_evidence_logits must have shape (B, C), "
-                f"got {tuple(logits.shape)}"
-            )
-        if int(logits.shape[1]) < 2:
-            raise ValueError("class evidence margin requires at least two classes")
-        label_indices = labels.to(device=logits.device, dtype=torch.long)
-        if label_indices.ndim != 1:
-            raise ValueError(
-                "labels must have shape (B,) for class evidence margin loss"
-            )
-        if int(label_indices.shape[0]) != int(logits.shape[0]):
-            raise ValueError(
-                "labels batch size must match class_evidence_logits batch size"
-            )
+        label_indices = self._validate_class_margin_inputs(
+            logits,
+            labels,
+            logits_name="class_evidence_logits",
+            loss_name="class evidence margin",
+        )
         if label_indices.numel() == 0:
             raw_loss = logits.sum() * 0.0
             return raw_loss, raw_loss
-        if int(label_indices.min().item()) < 0 or int(
-            label_indices.max().item()
-        ) >= int(logits.shape[1]):
-            raise ValueError(
-                "labels contain a class index outside class_evidence_logits"
-            )
 
         true_logits = logits.gather(1, label_indices.unsqueeze(1)).squeeze(1)
         margin = float(self.cfg.class_evidence_margin.margin)
         mode = self.cfg.class_evidence_margin.mode
+        class_weights = self._class_margin_weights(
+            label_indices,
+            logits,
+            enabled=self.cfg.class_evidence_margin.class_weighted,
+            loss_name="class_evidence_margin",
+        )
         if mode == "minority_vs_major":
             major_index = self.cfg.class_evidence_margin_major_index
             if major_index is None:
@@ -702,24 +773,188 @@ class Trainer(LoggingMixin):
             else:
                 major_logits = logits[:, int(major_index)]
                 margin_gap = true_logits - major_logits
-                raw_loss = torch.relu(margin - margin_gap[eligible]).mean()
+                raw_loss = (
+                    torch.relu(margin - margin_gap[eligible]) * class_weights[eligible]
+                ).mean()
         elif mode == "true_vs_hardest_negative":
-            negative_logits = logits.masked_fill(
-                F.one_hot(
-                    label_indices,
-                    num_classes=int(logits.shape[1]),
-                ).to(dtype=torch.bool, device=logits.device),
-                -torch.inf,
+            penalties = self._true_vs_hardest_negative_penalties(
+                logits,
+                label_indices,
+                margin=margin,
             )
-            hardest_negative = negative_logits.max(dim=1).values
-            margin_gap = true_logits - hardest_negative
-            raw_loss = torch.relu(margin - margin_gap).mean()
+            raw_loss = (penalties * class_weights).mean()
         else:
             raise ValueError(
                 "class evidence margin mode must be 'minority_vs_major' or "
                 "'true_vs_hardest_negative'"
             )
         weighted_loss = float(self.cfg.class_evidence_margin.weight) * raw_loss
+        return raw_loss, weighted_loss
+
+    def _compute_class_gated_branch_logit_margin_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        cfg = self.cfg.class_gated_branch_logit_margin
+        if cfg.target != "class_gated_branch_logits":
+            raise ValueError(
+                "class-gated branch logit margin supports only "
+                "target='class_gated_branch_logits'"
+            )
+        if cfg.mode != "true_vs_hardest_negative":
+            raise ValueError(
+                "class-gated branch logit margin supports only "
+                "mode='true_vs_hardest_negative'"
+            )
+        if output.class_gated_branch_logits is None:
+            raise ValueError(
+                "class-gated branch logit margin enabled but model did not "
+                "return class_gated_branch_logits"
+            )
+        logits = output.class_gated_branch_logits
+        label_indices = self._validate_class_margin_inputs(
+            logits,
+            labels,
+            logits_name="class_gated_branch_logits",
+            loss_name="class-gated branch logit margin",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss
+        class_weights = self._class_margin_weights(
+            label_indices,
+            logits,
+            enabled=cfg.class_weighted,
+            loss_name="class_gated_branch_logit_margin",
+        )
+        penalties = self._true_vs_hardest_negative_penalties(
+            logits,
+            label_indices,
+            margin=float(cfg.margin),
+        )
+        raw_loss = (penalties * class_weights).mean()
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss
+
+    def _compute_gate_branch_alignment_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor]:
+        cfg = self.cfg.gate_branch_alignment
+        if cfg.target != "true_class_gate":
+            raise ValueError(
+                "gate-branch alignment supports only target='true_class_gate'"
+            )
+        if cfg.source != "branch_logit_margin":
+            raise ValueError(
+                "gate-branch alignment supports only source='branch_logit_margin'"
+            )
+        if cfg.mode != "detached_soft_target_kl":
+            raise ValueError(
+                "gate-branch alignment supports only mode='detached_soft_target_kl'"
+            )
+        if cfg.margin_mode != "true_vs_hardest_negative":
+            raise ValueError(
+                "gate-branch alignment supports only "
+                "margin_mode='true_vs_hardest_negative'"
+            )
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = output.logits.sum() * 0.0
+            return raw_loss, raw_loss
+        if output.branch_logits is None:
+            raise ValueError(
+                "gate-branch alignment enabled but model did not return branch_logits"
+            )
+        if output.class_evidence_gate_weights is None:
+            raise ValueError(
+                "gate-branch alignment enabled but model did not return "
+                "class_evidence_gate_weights"
+            )
+        branch_logits = output.branch_logits
+        gate_weights = output.class_evidence_gate_weights
+        if branch_logits.ndim != 3:
+            raise ValueError(
+                "branch_logits must have shape (B, R, C) for gate-branch "
+                f"alignment, got {tuple(branch_logits.shape)}"
+            )
+        if gate_weights.ndim != 3:
+            raise ValueError(
+                "class_evidence_gate_weights must have shape (B, C, R) for "
+                f"gate-branch alignment, got {tuple(gate_weights.shape)}"
+            )
+        batch_size, num_branches, num_classes = branch_logits.shape
+        if int(num_classes) < 2:
+            raise ValueError("gate-branch alignment requires at least two classes")
+        if tuple(gate_weights.shape) != (batch_size, num_classes, num_branches):
+            raise ValueError(
+                "class_evidence_gate_weights shape must match branch_logits as "
+                "(B, C, R)"
+            )
+        label_indices = labels.to(device=branch_logits.device, dtype=torch.long)
+        if label_indices.ndim != 1:
+            raise ValueError("labels must have shape (B,) for gate-branch alignment")
+        if int(label_indices.shape[0]) != int(batch_size):
+            raise ValueError(
+                "labels batch size must match branch_logits batch size for "
+                "gate-branch alignment"
+            )
+        if label_indices.numel() == 0:
+            raw_loss = branch_logits.sum() * 0.0
+            return raw_loss, raw_loss
+        if int(label_indices.min().item()) < 0 or int(
+            label_indices.max().item()
+        ) >= int(num_classes):
+            raise ValueError("labels contain a class index outside branch_logits")
+
+        class_gather = label_indices.view(batch_size, 1, 1).expand(
+            -1,
+            num_branches,
+            1,
+        )
+        true_branch_logits = branch_logits.gather(2, class_gather).squeeze(2)
+        true_class_mask = F.one_hot(
+            label_indices,
+            num_classes=int(num_classes),
+        ).to(dtype=torch.bool, device=branch_logits.device)
+        hardest_negative = (
+            branch_logits.masked_fill(
+                true_class_mask.unsqueeze(1),
+                -torch.inf,
+            )
+            .max(dim=2)
+            .values
+        )
+        branch_margin = true_branch_logits - hardest_negative
+        target_gate = torch.softmax(
+            branch_margin.detach() / float(cfg.temperature),
+            dim=-1,
+        )
+        gate_gather = label_indices.view(batch_size, 1, 1).expand(
+            -1,
+            1,
+            num_branches,
+        )
+        actual_gate = (
+            gate_weights.to(device=branch_logits.device)
+            .gather(
+                1,
+                gate_gather,
+            )
+            .squeeze(1)
+        )
+        eps = torch.finfo(actual_gate.dtype).eps
+        target_gate = target_gate.clamp_min(eps)
+        target_gate = target_gate / target_gate.sum(dim=-1, keepdim=True)
+        actual_gate = actual_gate.clamp_min(eps)
+        actual_gate = actual_gate / actual_gate.sum(dim=-1, keepdim=True)
+        raw_loss = (
+            (target_gate * (target_gate.log() - actual_gate.log())).sum(dim=-1).mean()
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
         return raw_loss, weighted_loss
 
     def _branch_binary_targets(
@@ -875,6 +1110,27 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + class_evidence_margin_loss
             monitor_total = monitor_total + class_evidence_margin_loss
+        class_gated_branch_logit_margin: Tensor | None = None
+        class_gated_branch_logit_margin_loss: Tensor | None = None
+        if self.cfg.class_gated_branch_logit_margin.enabled:
+            (
+                class_gated_branch_logit_margin,
+                class_gated_branch_logit_margin_loss,
+            ) = self._compute_class_gated_branch_logit_margin_loss(output, labels)
+            scheduled_total = scheduled_total + class_gated_branch_logit_margin_loss
+            monitor_total = monitor_total + class_gated_branch_logit_margin_loss
+        gate_branch_alignment: Tensor | None = None
+        gate_branch_alignment_loss: Tensor | None = None
+        if self.cfg.gate_branch_alignment.enabled:
+            gate_branch_alignment, gate_branch_alignment_loss = (
+                self._compute_gate_branch_alignment_loss(
+                    output,
+                    labels,
+                    epoch=epoch,
+                )
+            )
+            scheduled_total = scheduled_total + gate_branch_alignment_loss
+            monitor_total = monitor_total + gate_branch_alignment_loss
         return LossComponents(
             total=monitor_total if use_monitor_total else scheduled_total,
             total_scheduled=scheduled_total,
@@ -890,6 +1146,10 @@ class Trainer(LoggingMixin):
             class_gate_diversity_regularization=class_gate_diversity_regularization,
             class_evidence_margin=class_evidence_margin,
             class_evidence_margin_loss=class_evidence_margin_loss,
+            class_gated_branch_logit_margin=class_gated_branch_logit_margin,
+            class_gated_branch_logit_margin_loss=(class_gated_branch_logit_margin_loss),
+            gate_branch_alignment=gate_branch_alignment,
+            gate_branch_alignment_loss=gate_branch_alignment_loss,
             branch_binary_aux_weight=branch_binary_weight,
             branch_binary_aux_monitor_weight=branch_binary_monitor_weight,
         )
@@ -923,6 +1183,10 @@ class Trainer(LoggingMixin):
             "class_gate_diversity_regularization": 0.0,
             "class_evidence_margin": 0.0,
             "class_evidence_margin_loss": 0.0,
+            "class_gated_branch_logit_margin": 0.0,
+            "class_gated_branch_logit_margin_loss": 0.0,
+            "gate_branch_alignment": 0.0,
+            "gate_branch_alignment_loss": 0.0,
             "branch_binary_aux_weight": 0.0,
             "branch_binary_aux_monitor_weight": 0.0,
         }
@@ -986,6 +1250,16 @@ class Trainer(LoggingMixin):
                 "class_evidence_margin": loss_components.class_evidence_margin,
                 "class_evidence_margin_loss": (
                     loss_components.class_evidence_margin_loss
+                ),
+                "class_gated_branch_logit_margin": (
+                    loss_components.class_gated_branch_logit_margin
+                ),
+                "class_gated_branch_logit_margin_loss": (
+                    loss_components.class_gated_branch_logit_margin_loss
+                ),
+                "gate_branch_alignment": loss_components.gate_branch_alignment,
+                "gate_branch_alignment_loss": (
+                    loss_components.gate_branch_alignment_loss
                 ),
                 "branch_binary_aux_weight": (loss_components.branch_binary_aux_weight),
                 "branch_binary_aux_monitor_weight": (
@@ -1188,6 +1462,24 @@ class Trainer(LoggingMixin):
                         "class_evidence_margin_loss",
                         0.0,
                     ),
+                    "train_class_gated_branch_logit_margin": train_components.get(
+                        "class_gated_branch_logit_margin",
+                        0.0,
+                    ),
+                    "train_loss_class_gated_branch_logit_margin": (
+                        train_components.get(
+                            "class_gated_branch_logit_margin_loss",
+                            0.0,
+                        )
+                    ),
+                    "train_gate_branch_alignment": train_components.get(
+                        "gate_branch_alignment",
+                        0.0,
+                    ),
+                    "train_loss_gate_branch_alignment": train_components.get(
+                        "gate_branch_alignment_loss",
+                        0.0,
+                    ),
                 }
             )
             val_components = dict(val_result.loss_components)
@@ -1244,6 +1536,22 @@ class Trainer(LoggingMixin):
                         "class_evidence_margin_loss",
                         0.0,
                     ),
+                    "val_class_gated_branch_logit_margin": val_components.get(
+                        "class_gated_branch_logit_margin",
+                        0.0,
+                    ),
+                    "val_loss_class_gated_branch_logit_margin": val_components.get(
+                        "class_gated_branch_logit_margin_loss",
+                        0.0,
+                    ),
+                    "val_gate_branch_alignment": val_components.get(
+                        "gate_branch_alignment",
+                        0.0,
+                    ),
+                    "val_loss_gate_branch_alignment": val_components.get(
+                        "gate_branch_alignment_loss",
+                        0.0,
+                    ),
                 }
             )
             train_loss_component_history.append(train_components)
@@ -1269,7 +1577,11 @@ class Trainer(LoggingMixin):
                     "Val Evidence Aux Loss: %.4f | Train Class Gate Diversity: %.4f | "
                     "Val Class Gate Diversity: %.4f | "
                     "Train Class Evidence Margin: %.4f | "
-                    "Val Class Evidence Margin: %.4f | Val Scheduled Loss: %.4f",
+                    "Val Class Evidence Margin: %.4f | "
+                    "Train Class-Gated Branch Logit Margin: %.4f | "
+                    "Val Class-Gated Branch Logit Margin: %.4f | "
+                    "Train Gate-Branch Alignment: %.4f | "
+                    "Val Gate-Branch Alignment: %.4f | Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
@@ -1300,6 +1612,10 @@ class Trainer(LoggingMixin):
                     val_components.get("class_gate_diversity", 0.0),
                     train_components.get("class_evidence_margin", 0.0),
                     val_components.get("class_evidence_margin", 0.0),
+                    train_components.get("class_gated_branch_logit_margin", 0.0),
+                    val_components.get("class_gated_branch_logit_margin", 0.0),
+                    train_components.get("gate_branch_alignment", 0.0),
+                    val_components.get("gate_branch_alignment", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
             else:
@@ -1315,7 +1631,11 @@ class Trainer(LoggingMixin):
                     "Val Evidence Aux Loss: %.4f | Train Class Gate Diversity: %.4f | "
                     "Val Class Gate Diversity: %.4f | "
                     "Train Class Evidence Margin: %.4f | "
-                    "Val Class Evidence Margin: %.4f | Val Scheduled Loss: %.4f",
+                    "Val Class Evidence Margin: %.4f | "
+                    "Train Class-Gated Branch Logit Margin: %.4f | "
+                    "Val Class-Gated Branch Logit Margin: %.4f | "
+                    "Train Gate-Branch Alignment: %.4f | "
+                    "Val Gate-Branch Alignment: %.4f | Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
                     lr_str,
@@ -1343,6 +1663,10 @@ class Trainer(LoggingMixin):
                     val_components.get("class_gate_diversity", 0.0),
                     train_components.get("class_evidence_margin", 0.0),
                     val_components.get("class_evidence_margin", 0.0),
+                    train_components.get("class_gated_branch_logit_margin", 0.0),
+                    val_components.get("class_gated_branch_logit_margin", 0.0),
+                    train_components.get("gate_branch_alignment", 0.0),
+                    val_components.get("gate_branch_alignment", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
 

@@ -40,6 +40,7 @@ from src.utils.config import (
     CheckpointingConfig,
     CheckpointMonitorConfig,
     ClassEvidenceMarginConfig,
+    ClassGatedBranchLogitMarginConfig,
     ClassGateDiversityRegularizationConfig,
     ClassifierConfig,
     DataConfig,
@@ -48,6 +49,7 @@ from src.utils.config import (
     EvalConfig,
     EvidencePoolingConfig,
     ExperimentConfig,
+    GateBranchAlignmentConfig,
     GateEntropyRegularizationConfig,
     LabelSmoothingConfig,
     ModelConfig,
@@ -238,6 +240,15 @@ def _trainer_cfg(
         "true_vs_hardest_negative",
     ] = "minority_vs_major",
     class_evidence_margin_major_index: int | None = None,
+    class_evidence_margin_class_weighted: bool = False,
+    class_gated_branch_logit_margin_enabled: bool = False,
+    class_gated_branch_logit_margin_weight: float = 0.0,
+    class_gated_branch_logit_margin_value: float = 0.0,
+    class_gated_branch_logit_margin_class_weighted: bool = False,
+    gate_branch_alignment_enabled: bool = False,
+    gate_branch_alignment_weight: float = 0.0,
+    gate_branch_alignment_temperature: float = 1.0,
+    gate_branch_alignment_warmup_epochs: int = 0,
 ) -> TrainerConfig:
     return TrainerConfig(
         device="cpu",
@@ -312,8 +323,27 @@ def _trainer_cfg(
             major_class="normal"
             if class_evidence_margin_major_index is not None
             else None,
+            class_weighted=class_evidence_margin_class_weighted,
         ),
         class_evidence_margin_major_index=class_evidence_margin_major_index,
+        class_gated_branch_logit_margin=ClassGatedBranchLogitMarginConfig(
+            enabled=class_gated_branch_logit_margin_enabled,
+            weight=class_gated_branch_logit_margin_weight,
+            margin=class_gated_branch_logit_margin_value,
+            target="class_gated_branch_logits",
+            mode="true_vs_hardest_negative",
+            class_weighted=class_gated_branch_logit_margin_class_weighted,
+        ),
+        gate_branch_alignment=GateBranchAlignmentConfig(
+            enabled=gate_branch_alignment_enabled,
+            weight=gate_branch_alignment_weight,
+            target="true_class_gate",
+            source="branch_logit_margin",
+            mode="detached_soft_target_kl",
+            margin_mode="true_vs_hardest_negative",
+            temperature=gate_branch_alignment_temperature,
+            warmup_epochs=gate_branch_alignment_warmup_epochs,
+        ),
         analysis=_analysis_cfg(),
         early_stopping=EarlyStoppingConfig(
             enabled=True,
@@ -1485,6 +1515,222 @@ def test_trainer_class_evidence_margin_true_vs_hardest_negative() -> None:
     assert torch.isclose(weighted_margin, torch.tensor(0.1))
 
 
+def test_trainer_class_evidence_margin_applies_class_weights() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.5, 2.0, 0.5),
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.2,
+            class_evidence_margin_value=0.5,
+            class_evidence_margin_mode="true_vs_hardest_negative",
+            class_evidence_margin_class_weighted=True,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.tensor(
+            [[1.0, 0.4, 1.3], [0.2, 0.9, 0.6]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_margin, weighted_margin = trainer._compute_class_evidence_margin_loss(
+        output,
+        labels,
+    )
+
+    assert torch.isclose(raw_margin, torch.tensor(0.8))
+    assert torch.isclose(weighted_margin, torch.tensor(0.16))
+
+
+def test_trainer_class_evidence_margin_requires_weights_when_class_weighted() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.2,
+            class_evidence_margin_value=0.5,
+            class_evidence_margin_mode="true_vs_hardest_negative",
+            class_evidence_margin_class_weighted=True,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        class_evidence_logits=torch.tensor([[1.0, 0.4, 1.3]], dtype=torch.float32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="class_evidence_margin.class_weighted"):
+        trainer._compute_class_evidence_margin_loss(output, labels)
+
+
+def test_trainer_class_gated_branch_logit_margin_true_vs_hardest_negative() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.0, 2.0, 3.0),
+            class_gated_branch_logit_margin_enabled=True,
+            class_gated_branch_logit_margin_weight=0.25,
+            class_gated_branch_logit_margin_value=0.3,
+            class_gated_branch_logit_margin_class_weighted=True,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_gated_branch_logits=torch.tensor(
+            [[0.6, 0.1, 0.2], [0.2, 0.4, 0.9]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    raw_margin, weighted_margin = trainer._compute_class_gated_branch_logit_margin_loss(
+        output, labels
+    )
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+
+    assert torch.isclose(raw_margin, torch.tensor(0.8))
+    assert torch.isclose(weighted_margin, torch.tensor(0.2))
+    assert torch.isclose(components.total, final_loss + weighted_margin)
+    assert torch.isclose(components.class_gated_branch_logit_margin, raw_margin)
+    assert torch.isclose(
+        components.class_gated_branch_logit_margin_loss,
+        weighted_margin,
+    )
+
+
+def test_trainer_raises_when_branch_logit_margin_enabled_without_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_gated_branch_logit_margin_enabled=True,
+            class_gated_branch_logit_margin_weight=0.25,
+            class_gated_branch_logit_margin_value=0.3,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="class-gated branch logit margin enabled"):
+        trainer._compute_total_loss(criterion, output, labels)
+
+
+def test_trainer_gate_branch_alignment_is_zero_during_warmup() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_branch_alignment_enabled=True,
+            gate_branch_alignment_weight=0.01,
+            gate_branch_alignment_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    raw_loss, weighted_loss = trainer._compute_gate_branch_alignment_loss(
+        output,
+        labels,
+        epoch=10,
+    )
+
+    assert torch.isclose(raw_loss, torch.tensor(0.0))
+    assert torch.isclose(weighted_loss, torch.tensor(0.0))
+
+
+def test_trainer_gate_branch_alignment_uses_detached_soft_target_kl() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_branch_alignment_enabled=True,
+            gate_branch_alignment_weight=0.01,
+            gate_branch_alignment_temperature=1.0,
+            gate_branch_alignment_warmup_epochs=10,
+        )
+    )
+    branch_logits = torch.tensor(
+        [[[1.2, 0.2, 0.5], [0.3, 0.1, 0.9]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    gate_weights = torch.tensor(
+        [[[0.6, 0.4], [0.5, 0.5], [0.2, 0.8]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=branch_logits,
+        class_evidence_gate_weights=gate_weights,
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    raw_loss, weighted_loss = trainer._compute_gate_branch_alignment_loss(
+        output,
+        labels,
+        epoch=11,
+    )
+    target_gate = torch.softmax(torch.tensor([[0.7, -0.6]]), dim=-1)
+    actual_gate = torch.tensor([[0.6, 0.4]])
+    expected_raw = (
+        (target_gate * (target_gate.log() - actual_gate.log())).sum(dim=-1).mean()
+    )
+
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.01 * expected_raw)
+
+    weighted_loss.backward()
+    assert branch_logits.grad is None
+    assert gate_weights.grad is not None
+
+
+def test_trainer_raises_when_gate_branch_alignment_enabled_without_outputs() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_branch_alignment_enabled=True,
+            gate_branch_alignment_weight=0.01,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="gate-branch alignment enabled"):
+        trainer._compute_total_loss(criterion, output, labels, epoch=1)
+
+
 def test_trainer_raises_when_class_evidence_margin_enabled_without_logits() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -1637,6 +1883,17 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
                     ],
                     dtype=torch.float32,
                 ),
+                branch_logits=torch.tensor(
+                    [
+                        [[0.2, 0.6, 0.1], [0.4, 0.3, 0.2]],
+                        [[0.8, 0.2, 0.1], [0.5, 0.4, 0.3]],
+                    ],
+                    dtype=torch.float32,
+                ),
+                class_gated_branch_logits=torch.tensor(
+                    [[0.3, 0.5, 0.2], [0.7, 0.3, 0.2]],
+                    dtype=torch.float32,
+                ),
             )
 
     trainer = Trainer(
@@ -1653,6 +1910,11 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
             class_evidence_margin_value=0.5,
             class_evidence_margin_mode="minority_vs_major",
             class_evidence_margin_major_index=0,
+            class_gated_branch_logit_margin_enabled=True,
+            class_gated_branch_logit_margin_weight=0.03,
+            class_gated_branch_logit_margin_value=0.3,
+            gate_branch_alignment_enabled=True,
+            gate_branch_alignment_weight=0.01,
         )
     )
     batch = ClipBatch(
@@ -1676,6 +1938,10 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
     assert "class_gate_diversity_regularization" in result.loss_components
     assert "class_evidence_margin" in result.loss_components
     assert "class_evidence_margin_loss" in result.loss_components
+    assert "class_gated_branch_logit_margin" in result.loss_components
+    assert "class_gated_branch_logit_margin_loss" in result.loss_components
+    assert "gate_branch_alignment" in result.loss_components
+    assert "gate_branch_alignment_loss" in result.loss_components
 
 
 def test_configured_checkpoint_monitors_keep_top_three(tmp_path: Path) -> None:
