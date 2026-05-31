@@ -253,8 +253,20 @@ class GateWeightedBranchMarginConfig:
     class_weighted: bool = False
     warmup_epochs: int = 0
     reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
-    branch_selection: Literal["gate_weighted", "topk_gate"] = "gate_weighted"
-    top_k: int = 1
+    branch_selection: Literal["gate_weighted"] = "gate_weighted"
+
+
+@dataclass(frozen=True)
+class GateBranchRegretConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["true_class_gate"] = "true_class_gate"
+    source: Literal["branch_logits"] = "branch_logits"
+    mode: Literal["best_margin_regret"] = "best_margin_regret"
+    margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    positive_threshold: float = 0.0
+    tolerance: float = 0.0
+    warmup_epochs: int = 0
 
 
 @dataclass(frozen=True)
@@ -340,6 +352,9 @@ class LossConfig:
     )
     gate_weighted_branch_margin: GateWeightedBranchMarginConfig = field(
         default_factory=GateWeightedBranchMarginConfig
+    )
+    gate_branch_regret: GateBranchRegretConfig = field(
+        default_factory=GateBranchRegretConfig
     )
 
 
@@ -500,7 +515,11 @@ class JsonConfigLoader:
     _GATE_WEIGHTED_BRANCH_MARGIN_TARGETS = {"true_class_gate"}
     _GATE_WEIGHTED_BRANCH_MARGIN_SOURCES = {"branch_logits"}
     _GATE_WEIGHTED_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
-    _GATE_WEIGHTED_BRANCH_MARGIN_SELECTIONS = {"gate_weighted", "topk_gate"}
+    _GATE_WEIGHTED_BRANCH_MARGIN_SELECTIONS = {"gate_weighted"}
+    _GATE_BRANCH_REGRET_TARGETS = {"true_class_gate"}
+    _GATE_BRANCH_REGRET_SOURCES = {"branch_logits"}
+    _GATE_BRANCH_REGRET_MODES = {"best_margin_regret"}
+    _GATE_BRANCH_REGRET_MARGIN_MODES = {"true_vs_hardest_negative"}
     _TIME_SHIFT_MODES = {"zero_pad", "roll"}
     _AUGMENTATION_POLICY_TYPES = {"independent", "one_of"}
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
@@ -1318,10 +1337,6 @@ class JsonConfigLoader:
                 "train.loss.gate_weighted_branch_margin.warmup_epochs must be "
                 "greater than or equal to zero"
             )
-        if not isinstance(cfg.loss.gate_weighted_branch_margin.top_k, int):
-            raise TypeError(
-                "train.loss.gate_weighted_branch_margin.top_k must be an integer"
-            )
         if cfg.loss.gate_weighted_branch_margin.enabled:
             if cfg.loss.gate_weighted_branch_margin.weight <= 0:
                 raise ValueError(
@@ -1333,11 +1348,6 @@ class JsonConfigLoader:
                     "train.loss.gate_weighted_branch_margin.margin must be "
                     "greater than zero when enabled"
                 )
-            if cfg.loss.gate_weighted_branch_margin.top_k <= 0:
-                raise ValueError(
-                    "train.loss.gate_weighted_branch_margin.top_k must be "
-                    "greater than zero when enabled"
-                )
             if cfg.loss.type != "cross_entropy":
                 raise ValueError(
                     "train.loss.gate_weighted_branch_margin is supported only "
@@ -1346,6 +1356,85 @@ class JsonConfigLoader:
             if evidence_pooling_type != "class_aware_branch_gated":
                 raise ValueError(
                     "train.loss.gate_weighted_branch_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+        if not isinstance(cfg.loss.gate_branch_regret.enabled, bool):
+            raise ValueError("train.loss.gate_branch_regret.enabled must be a boolean")
+        if (
+            cfg.loss.gate_branch_regret.target
+            not in JsonConfigLoader._GATE_BRANCH_REGRET_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_regret.target must be 'true_class_gate'"
+            )
+        if (
+            cfg.loss.gate_branch_regret.source
+            not in JsonConfigLoader._GATE_BRANCH_REGRET_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_regret.source must be 'branch_logits'"
+            )
+        if (
+            cfg.loss.gate_branch_regret.mode
+            not in JsonConfigLoader._GATE_BRANCH_REGRET_MODES
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_regret.mode must be 'best_margin_regret'"
+            )
+        if (
+            cfg.loss.gate_branch_regret.margin_mode
+            not in JsonConfigLoader._GATE_BRANCH_REGRET_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_regret.margin_mode must be "
+                "'true_vs_hardest_negative'"
+            )
+        if not isinstance(cfg.loss.gate_branch_regret.warmup_epochs, int):
+            raise TypeError(
+                "train.loss.gate_branch_regret.warmup_epochs must be an integer"
+            )
+        if cfg.loss.gate_branch_regret.warmup_epochs < 0:
+            raise ValueError(
+                "train.loss.gate_branch_regret.warmup_epochs must be greater "
+                "than or equal to zero"
+            )
+        if not isinstance(
+            cfg.loss.gate_branch_regret.positive_threshold,
+            int | float,
+        ) or isinstance(cfg.loss.gate_branch_regret.positive_threshold, bool):
+            raise TypeError(
+                "train.loss.gate_branch_regret.positive_threshold must be numeric"
+            )
+        if cfg.loss.gate_branch_regret.positive_threshold < 0:
+            raise ValueError(
+                "train.loss.gate_branch_regret.positive_threshold must be "
+                "greater than or equal to zero"
+            )
+        if not isinstance(
+            cfg.loss.gate_branch_regret.tolerance,
+            int | float,
+        ) or isinstance(cfg.loss.gate_branch_regret.tolerance, bool):
+            raise TypeError("train.loss.gate_branch_regret.tolerance must be numeric")
+        if cfg.loss.gate_branch_regret.tolerance < 0:
+            raise ValueError(
+                "train.loss.gate_branch_regret.tolerance must be greater than "
+                "or equal to zero"
+            )
+        if cfg.loss.gate_branch_regret.enabled:
+            if cfg.loss.gate_branch_regret.weight <= 0:
+                raise ValueError(
+                    "train.loss.gate_branch_regret.weight must be greater than "
+                    "zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.gate_branch_regret is supported only for "
+                    "cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.gate_branch_regret requires "
                     "model.encoder.architecture.evidence_pooling.type="
                     "'class_aware_branch_gated'"
                 )
@@ -1881,8 +1970,17 @@ class JsonConfigLoader:
                 "train.loss.gate_branch_alignment is no longer supported; "
                 "use train.loss.gate_weighted_branch_margin"
             )
+        gate_weighted_branch_margin = dict(loss.get("gate_weighted_branch_margin", {}))
+        if "top_k" in gate_weighted_branch_margin:
+            raise ValueError(
+                "train.loss.gate_weighted_branch_margin.top_k is no longer "
+                "supported; use branch_selection='gate_weighted'"
+            )
         loss["gate_weighted_branch_margin"] = GateWeightedBranchMarginConfig(
-            **dict(loss.get("gate_weighted_branch_margin", {}))
+            **gate_weighted_branch_margin
+        )
+        loss["gate_branch_regret"] = GateBranchRegretConfig(
+            **dict(loss.get("gate_branch_regret", {}))
         )
         kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))

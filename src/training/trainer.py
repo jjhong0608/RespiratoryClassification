@@ -34,6 +34,7 @@ from src.utils.config import (
     ClassGatedBranchLogitMarginConfig,
     ClassGateDiversityRegularizationConfig,
     EarlyStoppingConfig,
+    GateBranchRegretConfig,
     GateEntropyRegularizationConfig,
     GateWeightedBranchMarginConfig,
     LabelSmoothingConfig,
@@ -89,6 +90,9 @@ class TrainerConfig:
     gate_weighted_branch_margin: GateWeightedBranchMarginConfig = field(
         default_factory=GateWeightedBranchMarginConfig
     )
+    gate_branch_regret: GateBranchRegretConfig = field(
+        default_factory=GateBranchRegretConfig
+    )
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
     checkpointing: CheckpointingConfig | None = None
@@ -114,6 +118,9 @@ class LossComponents:
     class_gated_branch_logit_margin_loss: Tensor | None = None
     gate_weighted_branch_margin: Tensor | None = None
     gate_weighted_branch_margin_loss: Tensor | None = None
+    gate_branch_regret: Tensor | None = None
+    gate_branch_regret_loss: Tensor | None = None
+    gate_branch_regret_eligible_fraction: Tensor | None = None
     branch_binary_aux_weight: float = 0.0
     branch_binary_aux_monitor_weight: float = 0.0
 
@@ -875,6 +882,102 @@ class Trainer(LoggingMixin):
         weighted_loss = float(cfg.weight) * raw_loss
         return raw_loss, weighted_loss
 
+    def _class_aware_branch_margin_inputs(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        loss_name: str,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        if output.branch_logits is None:
+            raise ValueError(
+                f"{loss_name} enabled but model did not return branch_logits"
+            )
+        if output.class_evidence_gate_weights is None:
+            raise ValueError(
+                f"{loss_name} enabled but model did not return "
+                "class_evidence_gate_weights"
+            )
+        branch_logits = output.branch_logits
+        gate_weights = output.class_evidence_gate_weights
+        if branch_logits.ndim != 3:
+            raise ValueError(
+                "branch_logits must have shape (B, R, C) for "
+                f"{loss_name}, got {tuple(branch_logits.shape)}"
+            )
+        if gate_weights.ndim != 3:
+            raise ValueError(
+                "class_evidence_gate_weights must have shape (B, C, R) for "
+                f"{loss_name}, got {tuple(gate_weights.shape)}"
+            )
+        batch_size, num_branches, num_classes = branch_logits.shape
+        if int(num_classes) < 2:
+            raise ValueError(f"{loss_name} requires at least two classes")
+        if tuple(gate_weights.shape) != (batch_size, num_classes, num_branches):
+            raise ValueError(
+                "class_evidence_gate_weights shape must match branch_logits as "
+                "(B, C, R)"
+            )
+        label_indices = labels.to(device=branch_logits.device, dtype=torch.long)
+        if label_indices.ndim != 1:
+            raise ValueError(f"labels must have shape (B,) for {loss_name}")
+        if int(label_indices.shape[0]) != int(batch_size):
+            raise ValueError(
+                f"labels batch size must match branch_logits batch size for {loss_name}"
+            )
+        if label_indices.numel() > 0 and (
+            int(label_indices.min().item()) < 0
+            or int(label_indices.max().item()) >= int(num_classes)
+        ):
+            raise ValueError("labels contain a class index outside branch_logits")
+        return branch_logits, gate_weights, label_indices
+
+    def _true_class_branch_margins(
+        self,
+        branch_logits: Tensor,
+        label_indices: Tensor,
+    ) -> Tensor:
+        batch_size, num_branches, num_classes = branch_logits.shape
+        class_gather = label_indices.view(batch_size, 1, 1).expand(
+            -1,
+            num_branches,
+            1,
+        )
+        true_branch_logits = branch_logits.gather(2, class_gather).squeeze(2)
+        true_class_mask = F.one_hot(
+            label_indices,
+            num_classes=int(num_classes),
+        ).to(dtype=torch.bool, device=branch_logits.device)
+        hardest_negative = (
+            branch_logits.masked_fill(
+                true_class_mask.unsqueeze(1),
+                -torch.inf,
+            )
+            .max(dim=2)
+            .values
+        )
+        return true_branch_logits - hardest_negative
+
+    def _true_class_gate_weights(
+        self,
+        gate_weights: Tensor,
+        label_indices: Tensor,
+        *,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        batch_size, num_classes, num_branches = gate_weights.shape
+        del num_classes
+        gate_gather = label_indices.view(batch_size, 1, 1).expand(
+            -1,
+            1,
+            num_branches,
+        )
+        return (
+            gate_weights.to(device=label_indices.device, dtype=dtype)
+            .gather(1, gate_gather)
+            .squeeze(1)
+        )
+
     def _compute_gate_weighted_branch_margin_loss(
         self,
         output: AstModelOutput,
@@ -896,106 +999,32 @@ class Trainer(LoggingMixin):
                 "gate-weighted branch margin supports only "
                 "mode='true_vs_hardest_negative'"
             )
+        if cfg.branch_selection != "gate_weighted":
+            raise ValueError(
+                "gate-weighted branch margin branch_selection must be 'gate_weighted'"
+            )
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = output.logits.sum() * 0.0
             return raw_loss, raw_loss
-        if output.branch_logits is None:
-            raise ValueError(
-                "gate-weighted branch margin enabled but model did not return "
-                "branch_logits"
+        branch_logits, gate_weights, label_indices = (
+            self._class_aware_branch_margin_inputs(
+                output,
+                labels,
+                loss_name="gate-weighted branch margin",
             )
-        if output.class_evidence_gate_weights is None:
-            raise ValueError(
-                "gate-weighted branch margin enabled but model did not return "
-                "class_evidence_gate_weights"
-            )
-        branch_logits = output.branch_logits
-        gate_weights = output.class_evidence_gate_weights
-        if branch_logits.ndim != 3:
-            raise ValueError(
-                "branch_logits must have shape (B, R, C) for gate-weighted "
-                f"branch margin, got {tuple(branch_logits.shape)}"
-            )
-        if gate_weights.ndim != 3:
-            raise ValueError(
-                "class_evidence_gate_weights must have shape (B, C, R) for "
-                f"gate-weighted branch margin, got {tuple(gate_weights.shape)}"
-            )
-        batch_size, num_branches, num_classes = branch_logits.shape
-        if int(num_classes) < 2:
-            raise ValueError(
-                "gate-weighted branch margin requires at least two classes"
-            )
-        if tuple(gate_weights.shape) != (batch_size, num_classes, num_branches):
-            raise ValueError(
-                "class_evidence_gate_weights shape must match branch_logits as "
-                "(B, C, R)"
-            )
-        label_indices = labels.to(device=branch_logits.device, dtype=torch.long)
-        if label_indices.ndim != 1:
-            raise ValueError(
-                "labels must have shape (B,) for gate-weighted branch margin"
-            )
-        if int(label_indices.shape[0]) != int(batch_size):
-            raise ValueError(
-                "labels batch size must match branch_logits batch size for "
-                "gate-weighted branch margin"
-            )
+        )
         if label_indices.numel() == 0:
             raw_loss = branch_logits.sum() * 0.0
             return raw_loss, raw_loss
-        if int(label_indices.min().item()) < 0 or int(
-            label_indices.max().item()
-        ) >= int(num_classes):
-            raise ValueError("labels contain a class index outside branch_logits")
 
-        class_gather = label_indices.view(batch_size, 1, 1).expand(
-            -1,
-            num_branches,
-            1,
-        )
-        true_branch_logits = branch_logits.gather(2, class_gather).squeeze(2)
-        true_class_mask = F.one_hot(
-            label_indices,
-            num_classes=int(num_classes),
-        ).to(dtype=torch.bool, device=branch_logits.device)
-        hardest_negative = (
-            branch_logits.masked_fill(
-                true_class_mask.unsqueeze(1),
-                -torch.inf,
-            )
-            .max(dim=2)
-            .values
-        )
-        branch_margin = true_branch_logits - hardest_negative
+        branch_margin = self._true_class_branch_margins(branch_logits, label_indices)
         branch_penalty = torch.relu(float(cfg.margin) - branch_margin)
-        gate_gather = label_indices.view(batch_size, 1, 1).expand(
-            -1,
-            1,
-            num_branches,
-        )
-        true_class_gate = (
-            gate_weights.to(device=branch_logits.device, dtype=branch_logits.dtype)
-            .gather(1, gate_gather)
-            .squeeze(1)
-            .detach()
-        )
-        if cfg.branch_selection == "gate_weighted":
-            sample_penalty = (true_class_gate * branch_penalty).sum(dim=1)
-        elif cfg.branch_selection == "topk_gate":
-            top_k = int(cfg.top_k)
-            if top_k > int(num_branches):
-                raise ValueError(
-                    "gate_weighted_branch_margin.top_k must be less than or "
-                    "equal to the number of branches"
-                )
-            top_indices = true_class_gate.topk(top_k, dim=1).indices
-            sample_penalty = branch_penalty.gather(1, top_indices).mean(dim=1)
-        else:
-            raise ValueError(
-                "gate-weighted branch margin branch_selection must be "
-                "'gate_weighted' or 'topk_gate'"
-            )
+        true_class_gate = self._true_class_gate_weights(
+            gate_weights,
+            label_indices,
+            dtype=branch_logits.dtype,
+        ).detach()
+        sample_penalty = (true_class_gate * branch_penalty).sum(dim=1)
         class_weights = self._class_margin_weights(
             label_indices,
             branch_logits[:, 0, :],
@@ -1010,6 +1039,66 @@ class Trainer(LoggingMixin):
         )
         weighted_loss = float(cfg.weight) * raw_loss
         return raw_loss, weighted_loss
+
+    def _compute_gate_branch_regret_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        cfg = self.cfg.gate_branch_regret
+        if cfg.target != "true_class_gate":
+            raise ValueError(
+                "gate-branch regret supports only target='true_class_gate'"
+            )
+        if cfg.source != "branch_logits":
+            raise ValueError("gate-branch regret supports only source='branch_logits'")
+        if cfg.mode != "best_margin_regret":
+            raise ValueError(
+                "gate-branch regret supports only mode='best_margin_regret'"
+            )
+        if cfg.margin_mode != "true_vs_hardest_negative":
+            raise ValueError(
+                "gate-branch regret supports only "
+                "margin_mode='true_vs_hardest_negative'"
+            )
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = output.logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        branch_logits, gate_weights, label_indices = (
+            self._class_aware_branch_margin_inputs(
+                output,
+                labels,
+                loss_name="gate-branch regret",
+            )
+        )
+        if label_indices.numel() == 0:
+            raw_loss = branch_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+
+        branch_margin = self._true_class_branch_margins(
+            branch_logits,
+            label_indices,
+        ).detach()
+        true_class_gate = self._true_class_gate_weights(
+            gate_weights,
+            label_indices,
+            dtype=branch_logits.dtype,
+        )
+        best_margin = branch_margin.max(dim=1).values
+        gate_expected_margin = (true_class_gate * branch_margin).sum(dim=1)
+        eligible = best_margin > float(cfg.positive_threshold)
+        eligible_fraction = eligible.to(dtype=branch_logits.dtype).mean()
+        regret_penalty = torch.relu(
+            best_margin - gate_expected_margin - float(cfg.tolerance)
+        )
+        if bool(eligible.any().item()):
+            raw_loss = regret_penalty[eligible].mean()
+        else:
+            raw_loss = branch_logits.sum() * 0.0
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss, eligible_fraction
 
     def _branch_binary_targets(
         self,
@@ -1185,6 +1274,21 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + gate_weighted_branch_margin_loss
             monitor_total = monitor_total + gate_weighted_branch_margin_loss
+        gate_branch_regret: Tensor | None = None
+        gate_branch_regret_loss: Tensor | None = None
+        gate_branch_regret_eligible_fraction: Tensor | None = None
+        if self.cfg.gate_branch_regret.enabled:
+            (
+                gate_branch_regret,
+                gate_branch_regret_loss,
+                gate_branch_regret_eligible_fraction,
+            ) = self._compute_gate_branch_regret_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + gate_branch_regret_loss
+            monitor_total = monitor_total + gate_branch_regret_loss
         return LossComponents(
             total=monitor_total if use_monitor_total else scheduled_total,
             total_scheduled=scheduled_total,
@@ -1204,6 +1308,9 @@ class Trainer(LoggingMixin):
             class_gated_branch_logit_margin_loss=(class_gated_branch_logit_margin_loss),
             gate_weighted_branch_margin=gate_weighted_branch_margin,
             gate_weighted_branch_margin_loss=gate_weighted_branch_margin_loss,
+            gate_branch_regret=gate_branch_regret,
+            gate_branch_regret_loss=gate_branch_regret_loss,
+            gate_branch_regret_eligible_fraction=(gate_branch_regret_eligible_fraction),
             branch_binary_aux_weight=branch_binary_weight,
             branch_binary_aux_monitor_weight=branch_binary_monitor_weight,
         )
@@ -1241,6 +1348,9 @@ class Trainer(LoggingMixin):
             "class_gated_branch_logit_margin_loss": 0.0,
             "gate_weighted_branch_margin": 0.0,
             "gate_weighted_branch_margin_loss": 0.0,
+            "gate_branch_regret": 0.0,
+            "gate_branch_regret_loss": 0.0,
+            "gate_branch_regret_eligible_fraction": 0.0,
             "branch_binary_aux_weight": 0.0,
             "branch_binary_aux_monitor_weight": 0.0,
         }
@@ -1316,6 +1426,11 @@ class Trainer(LoggingMixin):
                 ),
                 "gate_weighted_branch_margin_loss": (
                     loss_components.gate_weighted_branch_margin_loss
+                ),
+                "gate_branch_regret": loss_components.gate_branch_regret,
+                "gate_branch_regret_loss": loss_components.gate_branch_regret_loss,
+                "gate_branch_regret_eligible_fraction": (
+                    loss_components.gate_branch_regret_eligible_fraction
                 ),
                 "branch_binary_aux_weight": (loss_components.branch_binary_aux_weight),
                 "branch_binary_aux_monitor_weight": (
@@ -1536,6 +1651,20 @@ class Trainer(LoggingMixin):
                         "gate_weighted_branch_margin_loss",
                         0.0,
                     ),
+                    "train_gate_branch_regret": train_components.get(
+                        "gate_branch_regret",
+                        0.0,
+                    ),
+                    "train_loss_gate_branch_regret": train_components.get(
+                        "gate_branch_regret_loss",
+                        0.0,
+                    ),
+                    "train_gate_branch_regret_eligible_fraction": (
+                        train_components.get(
+                            "gate_branch_regret_eligible_fraction",
+                            0.0,
+                        )
+                    ),
                 }
             )
             val_components = dict(val_result.loss_components)
@@ -1608,6 +1737,18 @@ class Trainer(LoggingMixin):
                         "gate_weighted_branch_margin_loss",
                         0.0,
                     ),
+                    "val_gate_branch_regret": val_components.get(
+                        "gate_branch_regret",
+                        0.0,
+                    ),
+                    "val_loss_gate_branch_regret": val_components.get(
+                        "gate_branch_regret_loss",
+                        0.0,
+                    ),
+                    "val_gate_branch_regret_eligible_fraction": val_components.get(
+                        "gate_branch_regret_eligible_fraction",
+                        0.0,
+                    ),
                 }
             )
             train_loss_component_history.append(train_components)
@@ -1638,6 +1779,10 @@ class Trainer(LoggingMixin):
                     "Val Class-Gated Branch Logit Margin: %.4f | "
                     "Train Gate-Weighted Branch Margin: %.4f | "
                     "Val Gate-Weighted Branch Margin: %.4f | "
+                    "Train Gate-Branch Regret: %.4f | "
+                    "Val Gate-Branch Regret: %.4f | "
+                    "Train Gate-Branch Regret Eligible: %.4f | "
+                    "Val Gate-Branch Regret Eligible: %.4f | "
                     "Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
@@ -1673,6 +1818,10 @@ class Trainer(LoggingMixin):
                     val_components.get("class_gated_branch_logit_margin", 0.0),
                     train_components.get("gate_weighted_branch_margin", 0.0),
                     val_components.get("gate_weighted_branch_margin", 0.0),
+                    train_components.get("gate_branch_regret", 0.0),
+                    val_components.get("gate_branch_regret", 0.0),
+                    train_components.get("gate_branch_regret_eligible_fraction", 0.0),
+                    val_components.get("gate_branch_regret_eligible_fraction", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
             else:
@@ -1693,6 +1842,10 @@ class Trainer(LoggingMixin):
                     "Val Class-Gated Branch Logit Margin: %.4f | "
                     "Train Gate-Weighted Branch Margin: %.4f | "
                     "Val Gate-Weighted Branch Margin: %.4f | "
+                    "Train Gate-Branch Regret: %.4f | "
+                    "Val Gate-Branch Regret: %.4f | "
+                    "Train Gate-Branch Regret Eligible: %.4f | "
+                    "Val Gate-Branch Regret Eligible: %.4f | "
                     "Val Scheduled Loss: %.4f",
                     epoch,
                     self.cfg.epochs,
@@ -1725,6 +1878,10 @@ class Trainer(LoggingMixin):
                     val_components.get("class_gated_branch_logit_margin", 0.0),
                     train_components.get("gate_weighted_branch_margin", 0.0),
                     val_components.get("gate_weighted_branch_margin", 0.0),
+                    train_components.get("gate_branch_regret", 0.0),
+                    val_components.get("gate_branch_regret", 0.0),
+                    train_components.get("gate_branch_regret_eligible_fraction", 0.0),
+                    val_components.get("gate_branch_regret_eligible_fraction", 0.0),
                     val_components.get("total_scheduled", val_result.loss),
                 )
 

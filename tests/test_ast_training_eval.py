@@ -49,6 +49,7 @@ from src.utils.config import (
     EvalConfig,
     EvidencePoolingConfig,
     ExperimentConfig,
+    GateBranchRegretConfig,
     GateEntropyRegularizationConfig,
     GateWeightedBranchMarginConfig,
     LabelSmoothingConfig,
@@ -262,11 +263,14 @@ def _trainer_cfg(
         "mean",
         "class_balanced_violating_mean",
     ] = "mean",
-    gate_weighted_branch_margin_branch_selection: Literal[
-        "gate_weighted",
-        "topk_gate",
-    ] = "gate_weighted",
-    gate_weighted_branch_margin_top_k: int = 1,
+    gate_weighted_branch_margin_branch_selection: Literal["gate_weighted"] = (
+        "gate_weighted"
+    ),
+    gate_branch_regret_enabled: bool = False,
+    gate_branch_regret_weight: float = 0.0,
+    gate_branch_regret_positive_threshold: float = 0.0,
+    gate_branch_regret_tolerance: float = 0.0,
+    gate_branch_regret_warmup_epochs: int = 0,
 ) -> TrainerConfig:
     return TrainerConfig(
         device="cpu",
@@ -365,7 +369,17 @@ def _trainer_cfg(
             warmup_epochs=gate_weighted_branch_margin_warmup_epochs,
             reduction=gate_weighted_branch_margin_reduction,
             branch_selection=gate_weighted_branch_margin_branch_selection,
-            top_k=gate_weighted_branch_margin_top_k,
+        ),
+        gate_branch_regret=GateBranchRegretConfig(
+            enabled=gate_branch_regret_enabled,
+            weight=gate_branch_regret_weight,
+            target="true_class_gate",
+            source="branch_logits",
+            mode="best_margin_regret",
+            margin_mode="true_vs_hardest_negative",
+            positive_threshold=gate_branch_regret_positive_threshold,
+            tolerance=gate_branch_regret_tolerance,
+            warmup_epochs=gate_branch_regret_warmup_epochs,
         ),
         analysis=_analysis_cfg(),
         early_stopping=EarlyStoppingConfig(
@@ -1896,67 +1910,189 @@ def test_trainer_gate_weighted_branch_margin_applies_class_weights() -> None:
     assert torch.isclose(weighted_loss, 0.5 * expected_raw)
 
 
-def test_trainer_gate_weighted_branch_margin_topk_gate_selection() -> None:
+def test_trainer_gate_branch_regret_is_zero_during_warmup() -> None:
     trainer = Trainer(
         _trainer_cfg(
             num_classes=3,
             run_dir=Path("unused"),
             loss_type="cross_entropy",
-            class_weights=(1.0, 3.0, 2.0),
-            gate_weighted_branch_margin_enabled=True,
-            gate_weighted_branch_margin_weight=0.5,
-            gate_weighted_branch_margin_value=0.4,
-            gate_weighted_branch_margin_class_weighted=True,
-            gate_weighted_branch_margin_reduction=("class_balanced_violating_mean"),
-            gate_weighted_branch_margin_branch_selection="topk_gate",
-            gate_weighted_branch_margin_top_k=2,
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.01,
+            gate_branch_regret_positive_threshold=0.3,
+            gate_branch_regret_tolerance=0.05,
+            gate_branch_regret_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    raw_loss, weighted_loss, eligible_fraction = (
+        trainer._compute_gate_branch_regret_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+
+    assert torch.isclose(raw_loss, torch.tensor(0.0))
+    assert torch.isclose(weighted_loss, torch.tensor(0.0))
+    assert torch.isclose(eligible_fraction, torch.tensor(0.0))
+
+
+def test_trainer_gate_branch_regret_updates_gate_not_branch_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.5,
+            gate_branch_regret_positive_threshold=0.3,
+            gate_branch_regret_tolerance=0.05,
         )
     )
     branch_logits = torch.tensor(
-        [
-            [[0.8, 0.1, 0.2], [0.2, 0.3, 0.9], [0.1, 0.4, 0.2]],
-            [[0.1, 0.7, 0.3], [0.6, 0.2, 0.1], [0.2, 0.1, 0.5]],
-        ],
+        [[[1.2, 0.2, 0.5], [0.3, 0.1, 0.9]]],
         dtype=torch.float32,
         requires_grad=True,
     )
     gate_weights = torch.tensor(
-        [
-            [[0.1, 0.7, 0.2], [0.2, 0.3, 0.5], [0.4, 0.2, 0.4]],
-            [[0.2, 0.4, 0.4], [0.4, 0.1, 0.5], [0.1, 0.8, 0.1]],
-        ],
+        [[[0.2, 0.8], [0.5, 0.5], [0.6, 0.4]]],
         dtype=torch.float32,
         requires_grad=True,
     )
     output = AstModelOutput(
-        logits=torch.zeros(2, 3, dtype=torch.float32),
-        pooled_embedding=torch.zeros(2, 32),
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
         branch_logits=branch_logits,
         class_evidence_gate_weights=gate_weights,
     )
-    labels = torch.tensor([0, 1], dtype=torch.long)
+    labels = torch.tensor([0], dtype=torch.long)
 
-    raw_loss, weighted_loss = trainer._compute_gate_weighted_branch_margin_loss(
-        output,
-        labels,
-        epoch=1,
+    raw_loss, weighted_loss, eligible_fraction = (
+        trainer._compute_gate_branch_regret_loss(
+            output,
+            labels,
+            epoch=1,
+        )
     )
 
-    expected_sample0 = (max(0.0, 0.4 - (0.2 - 0.9)) + max(0.0, 0.4 - (0.1 - 0.4))) / 2
-    expected_sample1 = (max(0.0, 0.4 - (0.1 - 0.5)) + max(0.0, 0.4 - (0.7 - 0.3))) / 2
-    expected_raw = torch.tensor((expected_sample0 + 3.0 * expected_sample1) / 2)
+    branch_margin = torch.tensor([[0.7, -0.6]])
+    best_margin = torch.tensor(0.7)
+    gate_expected_margin = (torch.tensor([[0.2, 0.8]]) * branch_margin).sum()
+    expected_raw = torch.relu(best_margin - gate_expected_margin - 0.05)
 
     assert torch.isclose(raw_loss, expected_raw)
     assert torch.isclose(weighted_loss, 0.5 * expected_raw)
+    assert torch.isclose(eligible_fraction, torch.tensor(1.0))
 
     weighted_loss.backward()
-    assert branch_logits.grad is not None
-    assert gate_weights.grad is None
+    assert branch_logits.grad is None
+    assert gate_weights.grad is not None
 
 
-def test_trainer_gate_weighted_branch_margin_rejects_topk_larger_than_branches() -> (
-    None
-):
+def test_trainer_gate_branch_regret_is_zero_when_no_positive_branch_margin() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.5,
+            gate_branch_regret_positive_threshold=0.8,
+            gate_branch_regret_tolerance=0.05,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=torch.tensor(
+            [[[1.2, 0.2, 0.5], [0.3, 0.1, 0.9]]],
+            dtype=torch.float32,
+        ),
+        class_evidence_gate_weights=torch.tensor(
+            [[[0.2, 0.8], [0.5, 0.5], [0.6, 0.4]]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    raw_loss, weighted_loss, eligible_fraction = (
+        trainer._compute_gate_branch_regret_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+
+    assert torch.isclose(raw_loss, torch.tensor(0.0))
+    assert torch.isclose(weighted_loss, torch.tensor(0.0))
+    assert torch.isclose(eligible_fraction, torch.tensor(0.0))
+
+
+def test_trainer_raises_when_gate_branch_regret_enabled_without_outputs() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.01,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="gate-branch regret enabled"):
+        trainer._compute_total_loss(criterion, output, labels, epoch=1)
+
+
+def test_trainer_gate_branch_regret_is_recorded_in_loss_components() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.5,
+            gate_branch_regret_positive_threshold=0.3,
+            gate_branch_regret_tolerance=0.05,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=torch.tensor(
+            [[[1.2, 0.2, 0.5], [0.3, 0.1, 0.9]]],
+            dtype=torch.float32,
+        ),
+        class_evidence_gate_weights=torch.tensor(
+            [[[0.2, 0.8], [0.5, 0.5], [0.6, 0.4]]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels, epoch=1)
+
+    assert components.gate_branch_regret is not None
+    assert components.gate_branch_regret_loss is not None
+    assert components.gate_branch_regret_eligible_fraction is not None
+    assert torch.isclose(
+        components.gate_branch_regret_eligible_fraction,
+        torch.tensor(1.0),
+    )
+
+
+def test_trainer_gate_weighted_branch_margin_rejects_unsupported_selection() -> None:
     trainer = Trainer(
         _trainer_cfg(
             num_classes=3,
@@ -1965,9 +2101,12 @@ def test_trainer_gate_weighted_branch_margin_rejects_topk_larger_than_branches()
             gate_weighted_branch_margin_enabled=True,
             gate_weighted_branch_margin_weight=0.5,
             gate_weighted_branch_margin_value=0.4,
-            gate_weighted_branch_margin_branch_selection="topk_gate",
-            gate_weighted_branch_margin_top_k=3,
         )
+    )
+    object.__setattr__(
+        trainer.cfg.gate_weighted_branch_margin,
+        "branch_selection",
+        "topk_gate",
     )
     output = AstModelOutput(
         logits=torch.zeros(1, 3, dtype=torch.float32),
@@ -1980,7 +2119,7 @@ def test_trainer_gate_weighted_branch_margin_rejects_topk_larger_than_branches()
     )
     labels = torch.tensor([0], dtype=torch.long)
 
-    with pytest.raises(ValueError, match="top_k"):
+    with pytest.raises(ValueError, match="branch_selection"):
         trainer._compute_gate_weighted_branch_margin_loss(
             output,
             labels,
@@ -2197,6 +2336,10 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
             gate_weighted_branch_margin_enabled=True,
             gate_weighted_branch_margin_weight=0.01,
             gate_weighted_branch_margin_value=0.3,
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.01,
+            gate_branch_regret_positive_threshold=0.1,
+            gate_branch_regret_tolerance=0.05,
         )
     )
     batch = ClipBatch(
@@ -2224,6 +2367,9 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
     assert "class_gated_branch_logit_margin_loss" in result.loss_components
     assert "gate_weighted_branch_margin" in result.loss_components
     assert "gate_weighted_branch_margin_loss" in result.loss_components
+    assert "gate_branch_regret" in result.loss_components
+    assert "gate_branch_regret_loss" in result.loss_components
+    assert "gate_branch_regret_eligible_fraction" in result.loss_components
 
 
 def test_configured_checkpoint_monitors_keep_top_three(tmp_path: Path) -> None:

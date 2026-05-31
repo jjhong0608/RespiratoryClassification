@@ -753,7 +753,15 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert (
         cfg.train.loss.gate_weighted_branch_margin.branch_selection == "gate_weighted"
     )
-    assert cfg.train.loss.gate_weighted_branch_margin.top_k == 1
+    assert cfg.train.loss.gate_branch_regret.enabled is False
+    assert cfg.train.loss.gate_branch_regret.weight == 0.0
+    assert cfg.train.loss.gate_branch_regret.target == "true_class_gate"
+    assert cfg.train.loss.gate_branch_regret.source == "branch_logits"
+    assert cfg.train.loss.gate_branch_regret.mode == "best_margin_regret"
+    assert cfg.train.loss.gate_branch_regret.margin_mode == ("true_vs_hardest_negative")
+    assert cfg.train.loss.gate_branch_regret.positive_threshold == 0.0
+    assert cfg.train.loss.gate_branch_regret.tolerance == 0.0
+    assert cfg.train.loss.gate_branch_regret.warmup_epochs == 0
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.sampler.weighted_random is True
     assert cfg.train.sampler.enabled is False
@@ -1293,8 +1301,7 @@ def test_valid_gate_weighted_branch_margin_config_loads(tmp_path: Path) -> None:
         "class_weighted": True,
         "warmup_epochs": 10,
         "reduction": "class_balanced_violating_mean",
-        "branch_selection": "topk_gate",
-        "top_k": 2,
+        "branch_selection": "gate_weighted",
     }
     config_path = _write_json(tmp_path / "gate_weighted_branch_margin.json", payload)
 
@@ -1310,8 +1317,36 @@ def test_valid_gate_weighted_branch_margin_config_loads(tmp_path: Path) -> None:
     assert margin_cfg.class_weighted is True
     assert margin_cfg.warmup_epochs == 10
     assert margin_cfg.reduction == "class_balanced_violating_mean"
-    assert margin_cfg.branch_selection == "topk_gate"
-    assert margin_cfg.top_k == 2
+    assert margin_cfg.branch_selection == "gate_weighted"
+
+
+def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_branch_regret"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "best_margin_regret",
+        "margin_mode": "true_vs_hardest_negative",
+        "positive_threshold": 0.3,
+        "tolerance": 0.05,
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "gate_branch_regret.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    regret_cfg = cfg.train.loss.gate_branch_regret
+    assert regret_cfg.enabled is True
+    assert regret_cfg.weight == 0.01
+    assert regret_cfg.target == "true_class_gate"
+    assert regret_cfg.source == "branch_logits"
+    assert regret_cfg.mode == "best_margin_regret"
+    assert regret_cfg.margin_mode == "true_vs_hardest_negative"
+    assert regret_cfg.positive_threshold == 0.3
+    assert regret_cfg.tolerance == 0.05
+    assert regret_cfg.warmup_epochs == 10
 
 
 @pytest.mark.parametrize(
@@ -1448,8 +1483,11 @@ def test_invalid_class_gated_branch_logit_margin_config_is_rejected(
             "soft_oracle",
             "gate_weighted_branch_margin.branch_selection",
         ),
-        ("top_k", 0, "gate_weighted_branch_margin.top_k"),
-        ("top_k", "two", "gate_weighted_branch_margin.top_k"),
+        (
+            "branch_selection",
+            "topk_gate",
+            "gate_weighted_branch_margin.branch_selection",
+        ),
     ],
 )
 def test_invalid_gate_weighted_branch_margin_config_is_rejected(
@@ -1474,6 +1512,71 @@ def test_invalid_gate_weighted_branch_margin_config_is_rejected(
         tmp_path / "bad_gate_weighted_branch_margin.json",
         payload,
     )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_gate_weighted_branch_margin_top_k_is_rejected(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_weighted_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "margin": 0.3,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": False,
+        "warmup_epochs": 10,
+        "top_k": 2,
+    }
+    config_path = _write_json(
+        tmp_path / "bad_gate_weighted_branch_margin_top_k.json",
+        payload,
+    )
+
+    with pytest.raises(ValueError, match="gate_weighted_branch_margin.top_k"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "gate_branch_regret.enabled"),
+        ("weight", 0.0, "gate_branch_regret.weight"),
+        ("weight", -0.001, "gate_branch_regret.weight"),
+        ("target", "class_evidence_gate", "gate_branch_regret.target"),
+        ("source", "branch_logit_margin", "gate_branch_regret.source"),
+        ("mode", "detached_soft_target_kl", "gate_branch_regret.mode"),
+        ("margin_mode", "minority_vs_major", "gate_branch_regret.margin_mode"),
+        ("positive_threshold", "high", "gate_branch_regret.positive_threshold"),
+        ("positive_threshold", -0.1, "gate_branch_regret.positive_threshold"),
+        ("tolerance", "low", "gate_branch_regret.tolerance"),
+        ("tolerance", -0.1, "gate_branch_regret.tolerance"),
+        ("warmup_epochs", -1, "gate_branch_regret.warmup_epochs"),
+        ("warmup_epochs", "ten", "gate_branch_regret.warmup_epochs"),
+    ],
+)
+def test_invalid_gate_branch_regret_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_branch_regret"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "best_margin_regret",
+        "margin_mode": "true_vs_hardest_negative",
+        "positive_threshold": 0.3,
+        "tolerance": 0.05,
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["gate_branch_regret"][field] = value
+    config_path = _write_json(tmp_path / "bad_gate_branch_regret.json", payload)
 
     with pytest.raises((TypeError, ValueError), match=error):
         JsonConfigLoader.load_training(config_path)
@@ -1719,6 +1822,49 @@ def test_gate_weighted_branch_margin_requires_cross_entropy(tmp_path: Path) -> N
     config_path = _write_json(tmp_path / "gate_branch_margin_bce.json", payload)
 
     with pytest.raises(ValueError, match="gate_weighted_branch_margin.*cross_entropy"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_gate_branch_regret_requires_class_aware_pooling(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = {
+        "type": "branch_gated",
+        "gate_hidden_size": None,
+        "dropout": 0.15,
+        "temperature": 1.0,
+    }
+    payload["train"]["loss"]["gate_branch_regret"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "best_margin_regret",
+        "margin_mode": "true_vs_hardest_negative",
+        "positive_threshold": 0.3,
+        "tolerance": 0.05,
+    }
+    config_path = _write_json(tmp_path / "bad_gate_branch_regret_pooling.json", payload)
+
+    with pytest.raises(ValueError, match="gate_branch_regret requires"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_gate_branch_regret_requires_cross_entropy(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["type"] = "bce"
+    payload["train"]["loss"]["gate_branch_regret"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "best_margin_regret",
+        "margin_mode": "true_vs_hardest_negative",
+        "positive_threshold": 0.3,
+        "tolerance": 0.05,
+    }
+    config_path = _write_json(tmp_path / "bad_gate_branch_regret_loss.json", payload)
+
+    with pytest.raises(ValueError, match="gate_branch_regret.*cross_entropy"):
         JsonConfigLoader.load_training(config_path)
 
 
