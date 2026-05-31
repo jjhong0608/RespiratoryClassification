@@ -727,6 +727,7 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.loss.class_evidence_margin.mode == "minority_vs_major"
     assert cfg.train.loss.class_evidence_margin.major_class is None
     assert cfg.train.loss.class_evidence_margin.class_weighted is False
+    assert cfg.train.loss.class_evidence_margin.reduction == "mean"
     assert cfg.train.loss.class_gated_branch_logit_margin.enabled is False
     assert cfg.train.loss.class_gated_branch_logit_margin.weight == 0.0
     assert cfg.train.loss.class_gated_branch_logit_margin.margin == 0.0
@@ -739,16 +740,20 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
         == "true_vs_hardest_negative"
     )
     assert cfg.train.loss.class_gated_branch_logit_margin.class_weighted is False
-    assert cfg.train.loss.gate_branch_alignment.enabled is False
-    assert cfg.train.loss.gate_branch_alignment.weight == 0.0
-    assert cfg.train.loss.gate_branch_alignment.target == "true_class_gate"
-    assert cfg.train.loss.gate_branch_alignment.source == "branch_logit_margin"
-    assert cfg.train.loss.gate_branch_alignment.mode == "detached_soft_target_kl"
+    assert cfg.train.loss.class_gated_branch_logit_margin.reduction == "mean"
+    assert cfg.train.loss.gate_weighted_branch_margin.enabled is False
+    assert cfg.train.loss.gate_weighted_branch_margin.weight == 0.0
+    assert cfg.train.loss.gate_weighted_branch_margin.margin == 0.0
+    assert cfg.train.loss.gate_weighted_branch_margin.target == "true_class_gate"
+    assert cfg.train.loss.gate_weighted_branch_margin.source == "branch_logits"
+    assert cfg.train.loss.gate_weighted_branch_margin.mode == "true_vs_hardest_negative"
+    assert cfg.train.loss.gate_weighted_branch_margin.class_weighted is False
+    assert cfg.train.loss.gate_weighted_branch_margin.warmup_epochs == 0
+    assert cfg.train.loss.gate_weighted_branch_margin.reduction == "mean"
     assert (
-        cfg.train.loss.gate_branch_alignment.margin_mode == "true_vs_hardest_negative"
+        cfg.train.loss.gate_weighted_branch_margin.branch_selection == "gate_weighted"
     )
-    assert cfg.train.loss.gate_branch_alignment.temperature == 1.0
-    assert cfg.train.loss.gate_branch_alignment.warmup_epochs == 0
+    assert cfg.train.loss.gate_weighted_branch_margin.top_k == 1
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.sampler.weighted_random is True
     assert cfg.train.sampler.enabled is False
@@ -1221,6 +1226,7 @@ def test_valid_class_weighted_class_evidence_margin_config_loads(
         "target": "class_evidence_logits",
         "mode": "true_vs_hardest_negative",
         "class_weighted": True,
+        "reduction": "class_balanced_violating_mean",
     }
     config_path = _write_json(
         tmp_path / "class_weighted_class_evidence_margin.json",
@@ -1230,6 +1236,10 @@ def test_valid_class_weighted_class_evidence_margin_config_loads(
     cfg = JsonConfigLoader.load_training(config_path)
 
     assert cfg.train.loss.class_evidence_margin.class_weighted is True
+    assert (
+        cfg.train.loss.class_evidence_margin.reduction
+        == "class_balanced_violating_mean"
+    )
 
 
 def test_valid_class_gated_branch_logit_margin_config_loads(
@@ -1249,6 +1259,7 @@ def test_valid_class_gated_branch_logit_margin_config_loads(
         "target": "class_gated_branch_logits",
         "mode": "true_vs_hardest_negative",
         "class_weighted": True,
+        "reduction": "class_balanced_violating_mean",
     }
     config_path = _write_json(tmp_path / "branch_logit_margin.json", payload)
 
@@ -1261,33 +1272,46 @@ def test_valid_class_gated_branch_logit_margin_config_loads(
     assert margin_cfg.target == "class_gated_branch_logits"
     assert margin_cfg.mode == "true_vs_hardest_negative"
     assert margin_cfg.class_weighted is True
+    assert margin_cfg.reduction == "class_balanced_violating_mean"
 
 
-def test_valid_gate_branch_alignment_config_loads(tmp_path: Path) -> None:
+def test_valid_gate_weighted_branch_margin_config_loads(tmp_path: Path) -> None:
     payload = _class_aware_cross_entropy_payload()
-    payload["train"]["loss"]["gate_branch_alignment"] = {
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["train"]["loss"]["gate_weighted_branch_margin"] = {
         "enabled": True,
         "weight": 0.01,
+        "margin": 0.3,
         "target": "true_class_gate",
-        "source": "branch_logit_margin",
-        "mode": "detached_soft_target_kl",
-        "margin_mode": "true_vs_hardest_negative",
-        "temperature": 1.0,
+        "source": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": True,
         "warmup_epochs": 10,
+        "reduction": "class_balanced_violating_mean",
+        "branch_selection": "topk_gate",
+        "top_k": 2,
     }
-    config_path = _write_json(tmp_path / "gate_branch_alignment.json", payload)
+    config_path = _write_json(tmp_path / "gate_weighted_branch_margin.json", payload)
 
     cfg = JsonConfigLoader.load_training(config_path)
 
-    alignment_cfg = cfg.train.loss.gate_branch_alignment
-    assert alignment_cfg.enabled is True
-    assert alignment_cfg.weight == 0.01
-    assert alignment_cfg.target == "true_class_gate"
-    assert alignment_cfg.source == "branch_logit_margin"
-    assert alignment_cfg.mode == "detached_soft_target_kl"
-    assert alignment_cfg.margin_mode == "true_vs_hardest_negative"
-    assert alignment_cfg.temperature == 1.0
-    assert alignment_cfg.warmup_epochs == 10
+    margin_cfg = cfg.train.loss.gate_weighted_branch_margin
+    assert margin_cfg.enabled is True
+    assert margin_cfg.weight == 0.01
+    assert margin_cfg.margin == 0.3
+    assert margin_cfg.target == "true_class_gate"
+    assert margin_cfg.source == "branch_logits"
+    assert margin_cfg.mode == "true_vs_hardest_negative"
+    assert margin_cfg.class_weighted is True
+    assert margin_cfg.warmup_epochs == 10
+    assert margin_cfg.reduction == "class_balanced_violating_mean"
+    assert margin_cfg.branch_selection == "topk_gate"
+    assert margin_cfg.top_k == 2
 
 
 @pytest.mark.parametrize(
@@ -1335,6 +1359,7 @@ def test_invalid_class_gate_diversity_regularization_config_is_rejected(
         ("mode", "minority_vs_normal", "class_evidence_margin.mode"),
         ("major_class", "airway", "class_evidence_margin.major_class"),
         ("class_weighted", "yes", "class_evidence_margin.class_weighted"),
+        ("reduction", "violating_mean", "class_evidence_margin.reduction"),
     ],
 )
 def test_invalid_class_evidence_margin_config_is_rejected(
@@ -1374,6 +1399,11 @@ def test_invalid_class_evidence_margin_config_is_rejected(
         ),
         ("mode", "minority_vs_major", "class_gated_branch_logit_margin.mode"),
         ("class_weighted", "yes", "class_gated_branch_logit_margin.class_weighted"),
+        (
+            "reduction",
+            "violating_mean",
+            "class_gated_branch_logit_margin.reduction",
+        ),
     ],
 )
 def test_invalid_class_gated_branch_logit_margin_config_is_rejected(
@@ -1401,25 +1431,55 @@ def test_invalid_class_gated_branch_logit_margin_config_is_rejected(
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
-        ("enabled", "yes", "gate_branch_alignment.enabled"),
-        ("weight", 0.0, "gate_branch_alignment.weight"),
-        ("weight", -0.001, "gate_branch_alignment.weight"),
-        ("target", "class_evidence_gate", "gate_branch_alignment.target"),
-        ("source", "attention_margin", "gate_branch_alignment.source"),
-        ("mode", "raw_gate_weighted", "gate_branch_alignment.mode"),
-        ("margin_mode", "minority_vs_major", "gate_branch_alignment.margin_mode"),
-        ("temperature", 0.0, "gate_branch_alignment.temperature"),
-        ("temperature", -1.0, "gate_branch_alignment.temperature"),
-        ("warmup_epochs", -1, "gate_branch_alignment.warmup_epochs"),
-        ("warmup_epochs", "ten", "gate_branch_alignment.warmup_epochs"),
+        ("enabled", "yes", "gate_weighted_branch_margin.enabled"),
+        ("weight", 0.0, "gate_weighted_branch_margin.weight"),
+        ("weight", -0.001, "gate_weighted_branch_margin.weight"),
+        ("margin", 0.0, "gate_weighted_branch_margin.margin"),
+        ("margin", -0.1, "gate_weighted_branch_margin.margin"),
+        ("target", "class_evidence_gate", "gate_weighted_branch_margin.target"),
+        ("source", "branch_logit_margin", "gate_weighted_branch_margin.source"),
+        ("mode", "detached_soft_target_kl", "gate_weighted_branch_margin.mode"),
+        ("class_weighted", "yes", "gate_weighted_branch_margin.class_weighted"),
+        ("warmup_epochs", -1, "gate_weighted_branch_margin.warmup_epochs"),
+        ("warmup_epochs", "ten", "gate_weighted_branch_margin.warmup_epochs"),
+        ("reduction", "violating_mean", "gate_weighted_branch_margin.reduction"),
+        (
+            "branch_selection",
+            "soft_oracle",
+            "gate_weighted_branch_margin.branch_selection",
+        ),
+        ("top_k", 0, "gate_weighted_branch_margin.top_k"),
+        ("top_k", "two", "gate_weighted_branch_margin.top_k"),
     ],
 )
-def test_invalid_gate_branch_alignment_config_is_rejected(
+def test_invalid_gate_weighted_branch_margin_config_is_rejected(
     tmp_path: Path,
     field: str,
     value: object,
     error: str,
 ) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_weighted_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "margin": 0.3,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": False,
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["gate_weighted_branch_margin"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_gate_weighted_branch_margin.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_gate_branch_alignment_config_is_no_longer_supported(tmp_path: Path) -> None:
     payload = _class_aware_cross_entropy_payload()
     payload["train"]["loss"]["gate_branch_alignment"] = {
         "enabled": True,
@@ -1431,10 +1491,11 @@ def test_invalid_gate_branch_alignment_config_is_rejected(
         "temperature": 1.0,
         "warmup_epochs": 10,
     }
-    payload["train"]["loss"]["gate_branch_alignment"][field] = value
-    config_path = _write_json(tmp_path / "bad_gate_branch_alignment.json", payload)
+    config_path = _write_json(tmp_path / "gate_branch_alignment_removed.json", payload)
 
-    with pytest.raises((TypeError, ValueError), match=error):
+    with pytest.raises(
+        ValueError, match="gate_branch_alignment is no longer supported"
+    ):
         JsonConfigLoader.load_training(config_path)
 
 
@@ -1546,6 +1607,32 @@ def test_class_weighted_branch_logit_margin_requires_class_weighting(
         JsonConfigLoader.load_training(config_path)
 
 
+def test_class_weighted_gate_weighted_branch_margin_requires_class_weighting(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_weighted_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "margin": 0.3,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": True,
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(
+        tmp_path / "class_weighted_gate_branch_margin_without_weights.json",
+        payload,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="gate_weighted_branch_margin.class_weighted",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
 def test_class_gated_branch_logit_margin_requires_class_aware_pooling(
     tmp_path: Path,
 ) -> None:
@@ -1590,46 +1677,48 @@ def test_class_gated_branch_logit_margin_requires_cross_entropy(
         JsonConfigLoader.load_training(config_path)
 
 
-def test_gate_branch_alignment_requires_class_aware_pooling(tmp_path: Path) -> None:
+def test_gate_weighted_branch_margin_requires_class_aware_pooling(
+    tmp_path: Path,
+) -> None:
     payload = _base_payload()
     payload["data"]["label_to_index"] = {"normal": 0, "crackle": 1, "wheeze": 2}
     payload["train"]["loss"]["type"] = "cross_entropy"
     payload["train"]["loss"]["auto_pos_weight"] = False
     payload["train"]["loss"]["pos_weight"] = None
-    payload["train"]["loss"]["gate_branch_alignment"] = {
+    payload["train"]["loss"]["gate_weighted_branch_margin"] = {
         "enabled": True,
         "weight": 0.01,
+        "margin": 0.3,
         "target": "true_class_gate",
-        "source": "branch_logit_margin",
-        "mode": "detached_soft_target_kl",
-        "margin_mode": "true_vs_hardest_negative",
-        "temperature": 1.0,
+        "source": "branch_logits",
+        "mode": "true_vs_hardest_negative",
         "warmup_epochs": 10,
     }
-    config_path = _write_json(tmp_path / "alignment_mean_pooling.json", payload)
+    config_path = _write_json(
+        tmp_path / "gate_branch_margin_mean_pooling.json", payload
+    )
 
-    with pytest.raises(ValueError, match="gate_branch_alignment requires"):
+    with pytest.raises(ValueError, match="gate_weighted_branch_margin requires"):
         JsonConfigLoader.load_training(config_path)
 
 
-def test_gate_branch_alignment_requires_cross_entropy(tmp_path: Path) -> None:
+def test_gate_weighted_branch_margin_requires_cross_entropy(tmp_path: Path) -> None:
     payload = _base_payload()
     payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
         _class_aware_evidence_pooling_payload()
     )
-    payload["train"]["loss"]["gate_branch_alignment"] = {
+    payload["train"]["loss"]["gate_weighted_branch_margin"] = {
         "enabled": True,
         "weight": 0.01,
+        "margin": 0.3,
         "target": "true_class_gate",
-        "source": "branch_logit_margin",
-        "mode": "detached_soft_target_kl",
-        "margin_mode": "true_vs_hardest_negative",
-        "temperature": 1.0,
+        "source": "branch_logits",
+        "mode": "true_vs_hardest_negative",
         "warmup_epochs": 10,
     }
-    config_path = _write_json(tmp_path / "alignment_bce.json", payload)
+    config_path = _write_json(tmp_path / "gate_branch_margin_bce.json", payload)
 
-    with pytest.raises(ValueError, match="gate_branch_alignment.*cross_entropy"):
+    with pytest.raises(ValueError, match="gate_weighted_branch_margin.*cross_entropy"):
         JsonConfigLoader.load_training(config_path)
 
 

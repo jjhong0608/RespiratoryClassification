@@ -331,7 +331,9 @@ def main() -> None:
                 class_gated_branch_logit_margin=(
                     cfg.train.loss.class_gated_branch_logit_margin
                 ),
-                gate_branch_alignment=cfg.train.loss.gate_branch_alignment,
+                gate_weighted_branch_margin=(
+                    cfg.train.loss.gate_weighted_branch_margin
+                ),
                 analysis=cfg.analysis,
                 early_stopping=cfg.train.early_stopping,
                 checkpointing=cfg.checkpointing,
