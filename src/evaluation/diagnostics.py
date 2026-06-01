@@ -84,6 +84,21 @@ def build_diagnostic_rows(
         if output.class_evidence_gate_entropy is not None
         else None
     )
+    class_evidence_learned_gate_weights = (
+        output.class_evidence_learned_gate_weights.detach().cpu()
+        if output.class_evidence_learned_gate_weights is not None
+        else None
+    )
+    class_evidence_learned_gate_entropy = (
+        output.class_evidence_learned_gate_entropy.detach().cpu()
+        if output.class_evidence_learned_gate_entropy is not None
+        else None
+    )
+    class_evidence_gate_mixing_alpha = (
+        output.class_evidence_gate_mixing_alpha.detach().cpu()
+        if output.class_evidence_gate_mixing_alpha is not None
+        else None
+    )
     class_evidence_logits = (
         output.class_evidence_logits.detach().cpu()
         if output.class_evidence_logits is not None
@@ -107,6 +122,16 @@ def build_diagnostic_rows(
     global_residual_scale = (
         output.global_residual_scale.detach().cpu()
         if output.global_residual_scale is not None
+        else None
+    )
+    global_residual_schedule_multiplier = (
+        output.global_residual_schedule_multiplier.detach().cpu()
+        if output.global_residual_schedule_multiplier is not None
+        else None
+    )
+    global_residual_effective_scale = (
+        output.global_residual_effective_scale.detach().cpu()
+        if output.global_residual_effective_scale is not None
         else None
     )
     branch_evidence_norms = (
@@ -210,8 +235,40 @@ def build_diagnostic_rows(
             row["class_evidence_gate_entropy"] = class_evidence_gate_entropy[
                 index
             ].tolist()
+        if class_evidence_learned_gate_weights is not None:
+            row["class_evidence_learned_gate_weights"] = (
+                class_evidence_learned_gate_weights[index].tolist()
+            )
+            true_label = int(batch.labels[index].item())
+            if 0 <= true_label < int(class_evidence_learned_gate_weights.shape[1]):
+                row["true_class_learned_gate_weights"] = (
+                    class_evidence_learned_gate_weights[index, true_label].tolist()
+                )
+            if 0 <= predicted_label < int(class_evidence_learned_gate_weights.shape[1]):
+                row["predicted_class_learned_gate_weights"] = (
+                    class_evidence_learned_gate_weights[
+                        index,
+                        predicted_label,
+                    ].tolist()
+                )
+        if class_evidence_learned_gate_entropy is not None:
+            row["class_evidence_learned_gate_entropy"] = (
+                class_evidence_learned_gate_entropy[index].tolist()
+            )
+        if class_evidence_gate_mixing_alpha is not None:
+            row["class_evidence_gate_mixing_alpha"] = float(
+                class_evidence_gate_mixing_alpha.item()
+            )
         if global_residual_scale is not None:
             row["global_residual_scale"] = float(global_residual_scale.item())
+        if global_residual_schedule_multiplier is not None:
+            row["global_residual_schedule_multiplier"] = float(
+                global_residual_schedule_multiplier.item()
+            )
+        if global_residual_effective_scale is not None:
+            row["global_residual_effective_scale"] = float(
+                global_residual_effective_scale.item()
+            )
         if branch_evidence_norms is not None:
             row["branch_evidence_norms"] = branch_evidence_norms[index].tolist()
         if selected_evidence_dropout_mask is not None:

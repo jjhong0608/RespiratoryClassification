@@ -713,6 +713,8 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.loss.gate_entropy_regularization.enabled is False
     assert cfg.train.loss.gate_entropy_regularization.weight == 0.0
     assert cfg.train.loss.gate_entropy_regularization.target == "evidence_gate"
+    assert cfg.train.loss.gate_entropy_regularization.start_epoch == 1
+    assert cfg.train.loss.gate_entropy_regularization.end_epoch is None
     assert cfg.train.loss.class_gate_diversity_regularization.enabled is False
     assert cfg.train.loss.class_gate_diversity_regularization.weight == 0.0
     assert (
@@ -720,6 +722,8 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
         == "class_evidence_gate"
     )
     assert cfg.train.loss.class_gate_diversity_regularization.metric == "js_divergence"
+    assert cfg.train.loss.class_gate_diversity_regularization.start_epoch == 1
+    assert cfg.train.loss.class_gate_diversity_regularization.end_epoch is None
     assert cfg.train.loss.class_evidence_margin.enabled is False
     assert cfg.train.loss.class_evidence_margin.weight == 0.0
     assert cfg.train.loss.class_evidence_margin.margin == 0.0
@@ -758,6 +762,15 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.loss.gate_branch_regret.target == "true_class_gate"
     assert cfg.train.loss.gate_branch_regret.source == "branch_logits"
     assert cfg.train.loss.gate_branch_regret.mode == "best_margin_regret"
+    assert cfg.train.loss.top_branch_margin.enabled is False
+    assert cfg.train.loss.top_branch_margin.weight == 0.0
+    assert cfg.train.loss.top_branch_margin.margin == 0.0
+    assert cfg.train.loss.top_branch_margin.target == "branch_logits"
+    assert cfg.train.loss.top_branch_margin.mode == "true_vs_hardest_negative"
+    assert cfg.train.loss.top_branch_margin.branch_reduction == "max"
+    assert cfg.train.loss.top_branch_margin.class_weighted is False
+    assert cfg.train.loss.top_branch_margin.reduction == "mean"
+    assert cfg.train.loss.top_branch_margin.warmup_epochs == 0
     assert cfg.train.loss.gate_branch_regret.margin_mode == ("true_vs_hardest_negative")
     assert cfg.train.loss.gate_branch_regret.positive_threshold == 0.0
     assert cfg.train.loss.gate_branch_regret.tolerance == 0.0
@@ -822,9 +835,17 @@ def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
     assert class_gate.global_residual.enabled is True
     assert class_gate.global_residual.init_scale == 0.1
     assert class_gate.global_residual.learnable is True
+    assert class_gate.global_residual.warmup.enabled is False
+    assert class_gate.global_residual.warmup.mode == "zero_to_learned"
+    assert class_gate.global_residual.warmup.start_multiplier == 0.0
+    assert class_gate.global_residual.warmup.end_multiplier == 1.0
     assert class_gate.evidence_auxiliary.enabled is False
     assert class_gate.evidence_auxiliary.weight == 0.1
     assert class_gate.branch_logit_feature.mode == "raw"
+    assert class_gate.gate_mixing.enabled is False
+    assert class_gate.gate_mixing.mode == "uniform_to_learned"
+    assert class_gate.gate_mixing.start_alpha == 1.0
+    assert class_gate.gate_mixing.end_alpha == 0.0
 
 
 def test_class_aware_branch_logit_feature_mode_loads(tmp_path: Path) -> None:
@@ -845,6 +866,47 @@ def test_class_aware_branch_logit_feature_mode_loads(tmp_path: Path) -> None:
 
     class_gate = cfg.model.encoder.architecture.evidence_pooling.class_gate
     assert class_gate.branch_logit_feature.mode == "hardest_negative_margin"
+
+
+def test_class_aware_gate_mixing_and_residual_warmup_load(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "wheeze": 1, "crackle": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    evidence_pooling = _class_aware_evidence_pooling_payload()
+    evidence_pooling["class_gate"]["gate_mixing"] = {
+        "enabled": True,
+        "mode": "uniform_to_learned",
+        "start_alpha": 1.0,
+        "end_alpha": 0.0,
+        "hold_epochs": 10,
+        "decay_epochs": 20,
+    }
+    evidence_pooling["class_gate"]["global_residual"]["warmup"] = {
+        "enabled": True,
+        "mode": "zero_to_learned",
+        "start_multiplier": 0.0,
+        "end_multiplier": 1.0,
+        "hold_epochs": 10,
+        "decay_epochs": 20,
+    }
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = evidence_pooling
+    config_path = _write_json(tmp_path / "class_aware_gate_schedules.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    class_gate = cfg.model.encoder.architecture.evidence_pooling.class_gate
+    assert class_gate.gate_mixing.enabled is True
+    assert class_gate.gate_mixing.mode == "uniform_to_learned"
+    assert class_gate.gate_mixing.start_alpha == 1.0
+    assert class_gate.gate_mixing.end_alpha == 0.0
+    assert class_gate.gate_mixing.hold_epochs == 10
+    assert class_gate.gate_mixing.decay_epochs == 20
+    assert class_gate.global_residual.warmup.enabled is True
+    assert class_gate.global_residual.warmup.mode == "zero_to_learned"
+    assert class_gate.global_residual.warmup.start_multiplier == 0.0
+    assert class_gate.global_residual.warmup.end_multiplier == 1.0
+    assert class_gate.global_residual.warmup.hold_epochs == 10
+    assert class_gate.global_residual.warmup.decay_epochs == 20
 
 
 def test_invalid_class_aware_branch_logit_feature_mode_is_rejected(
@@ -989,6 +1051,46 @@ def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) 
         (("class_gate", "global_residual", "init_scale"), -0.1, "init_scale"),
         (("class_gate", "global_residual", "learnable"), "yes", "learnable"),
         (
+            ("class_gate", "global_residual", "warmup", "enabled"),
+            "yes",
+            "global_residual.warmup.enabled",
+        ),
+        (
+            ("class_gate", "global_residual", "warmup", "mode"),
+            "constant",
+            "global_residual.warmup.mode",
+        ),
+        (
+            ("class_gate", "global_residual", "warmup", "start_multiplier"),
+            1.5,
+            "global_residual.warmup.start_multiplier",
+        ),
+        (
+            ("class_gate", "global_residual", "warmup", "hold_epochs"),
+            -1,
+            "global_residual.warmup.hold_epochs",
+        ),
+        (
+            ("class_gate", "gate_mixing", "enabled"),
+            "yes",
+            "gate_mixing.enabled",
+        ),
+        (
+            ("class_gate", "gate_mixing", "mode"),
+            "learned_to_uniform",
+            "gate_mixing.mode",
+        ),
+        (
+            ("class_gate", "gate_mixing", "start_alpha"),
+            -0.1,
+            "gate_mixing.start_alpha",
+        ),
+        (
+            ("class_gate", "gate_mixing", "decay_epochs"),
+            -1,
+            "gate_mixing.decay_epochs",
+        ),
+        (
             ("class_gate", "evidence_auxiliary", "enabled"),
             "yes",
             "evidence_auxiliary.enabled",
@@ -1011,6 +1113,22 @@ def test_invalid_class_aware_evidence_pooling_config_is_rejected(
     payload["train"]["loss"]["type"] = "cross_entropy"
     evidence_pooling = _class_aware_evidence_pooling_payload()
     evidence_pooling["class_gate"]["evidence_auxiliary"]["enabled"] = True
+    evidence_pooling["class_gate"]["global_residual"]["warmup"] = {
+        "enabled": False,
+        "mode": "zero_to_learned",
+        "start_multiplier": 0.0,
+        "end_multiplier": 1.0,
+        "hold_epochs": 0,
+        "decay_epochs": 0,
+    }
+    evidence_pooling["class_gate"]["gate_mixing"] = {
+        "enabled": False,
+        "mode": "uniform_to_learned",
+        "start_alpha": 1.0,
+        "end_alpha": 0.0,
+        "hold_epochs": 0,
+        "decay_epochs": 0,
+    }
     payload["model"]["encoder"]["architecture"]["evidence_pooling"] = evidence_pooling
     target: dict = evidence_pooling
     for key in path[:-1]:
@@ -1114,7 +1232,14 @@ def test_valid_gate_entropy_regularization_config_loads(tmp_path: Path) -> None:
     assert cfg.train.loss.gate_entropy_regularization.target == "evidence_gate"
 
 
-@pytest.mark.parametrize("target", ["class_evidence_gate", "true_class_evidence_gate"])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "class_evidence_gate",
+        "true_class_evidence_gate",
+        "class_evidence_learned_gate",
+    ],
+)
 def test_valid_class_gate_entropy_regularization_targets_load(
     tmp_path: Path,
     target: str,
@@ -1124,6 +1249,8 @@ def test_valid_class_gate_entropy_regularization_targets_load(
         "enabled": True,
         "weight": 0.001,
         "target": target,
+        "start_epoch": 11,
+        "end_epoch": 30,
     }
     config_path = _write_json(
         tmp_path / f"gate_entropy_regularization_{target}.json",
@@ -1133,6 +1260,8 @@ def test_valid_class_gate_entropy_regularization_targets_load(
     cfg = JsonConfigLoader.load_training(config_path)
 
     assert cfg.train.loss.gate_entropy_regularization.target == target
+    assert cfg.train.loss.gate_entropy_regularization.start_epoch == 11
+    assert cfg.train.loss.gate_entropy_regularization.end_epoch == 30
 
 
 def test_valid_class_gate_diversity_regularization_config_loads(
@@ -1141,9 +1270,11 @@ def test_valid_class_gate_diversity_regularization_config_loads(
     payload = _fourclass_branch_binary_payload()
     payload["train"]["loss"]["class_gate_diversity_regularization"] = {
         "enabled": True,
-        "weight": 0.0003,
-        "target": "class_evidence_gate",
+        "weight": 0.003,
+        "target": "class_evidence_learned_gate",
         "metric": "js_divergence",
+        "start_epoch": 11,
+        "end_epoch": 30,
     }
     config_path = _write_json(
         tmp_path / "class_gate_diversity_regularization.json",
@@ -1154,9 +1285,11 @@ def test_valid_class_gate_diversity_regularization_config_loads(
 
     diversity_cfg = cfg.train.loss.class_gate_diversity_regularization
     assert diversity_cfg.enabled is True
-    assert diversity_cfg.weight == 0.0003
-    assert diversity_cfg.target == "class_evidence_gate"
+    assert diversity_cfg.weight == 0.003
+    assert diversity_cfg.target == "class_evidence_learned_gate"
     assert diversity_cfg.metric == "js_divergence"
+    assert diversity_cfg.start_epoch == 11
+    assert diversity_cfg.end_epoch == 30
 
 
 def _class_aware_cross_entropy_payload() -> dict:
@@ -1320,6 +1453,41 @@ def test_valid_gate_weighted_branch_margin_config_loads(tmp_path: Path) -> None:
     assert margin_cfg.branch_selection == "gate_weighted"
 
 
+def test_valid_top_branch_margin_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["train"]["loss"]["top_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.3,
+        "target": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "branch_reduction": "max",
+        "class_weighted": True,
+        "reduction": "class_balanced_violating_mean",
+        "warmup_epochs": 0,
+    }
+    config_path = _write_json(tmp_path / "top_branch_margin.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    margin_cfg = cfg.train.loss.top_branch_margin
+    assert margin_cfg.enabled is True
+    assert margin_cfg.weight == 0.05
+    assert margin_cfg.margin == 0.3
+    assert margin_cfg.target == "branch_logits"
+    assert margin_cfg.mode == "true_vs_hardest_negative"
+    assert margin_cfg.branch_reduction == "max"
+    assert margin_cfg.class_weighted is True
+    assert margin_cfg.reduction == "class_balanced_violating_mean"
+    assert margin_cfg.warmup_epochs == 0
+
+
 def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
     payload = _class_aware_cross_entropy_payload()
     payload["train"]["loss"]["gate_branch_regret"] = {
@@ -1357,6 +1525,8 @@ def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
         ("weight", -0.001, "class_gate_diversity_regularization.weight"),
         ("target", "evidence_gate", "class_gate_diversity_regularization.target"),
         ("metric", "kl_divergence", "class_gate_diversity_regularization.metric"),
+        ("start_epoch", 0, "class_gate_diversity_regularization.start_epoch"),
+        ("end_epoch", 10, "class_gate_diversity_regularization.end_epoch"),
     ],
 )
 def test_invalid_class_gate_diversity_regularization_config_is_rejected(
@@ -1371,6 +1541,8 @@ def test_invalid_class_gate_diversity_regularization_config_is_rejected(
         "weight": 0.0003,
         "target": "class_evidence_gate",
         "metric": "js_divergence",
+        "start_epoch": 11,
+        "end_epoch": 30,
     }
     payload["train"]["loss"]["class_gate_diversity_regularization"][field] = value
     config_path = _write_json(
@@ -1536,6 +1708,47 @@ def test_gate_weighted_branch_margin_top_k_is_rejected(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="gate_weighted_branch_margin.top_k"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "top_branch_margin.enabled"),
+        ("weight", 0.0, "top_branch_margin.weight"),
+        ("weight", -0.001, "top_branch_margin.weight"),
+        ("margin", 0.0, "top_branch_margin.margin"),
+        ("margin", -0.1, "top_branch_margin.margin"),
+        ("target", "class_gated_branch_logits", "top_branch_margin.target"),
+        ("mode", "minority_vs_major", "top_branch_margin.mode"),
+        ("branch_reduction", "mean", "top_branch_margin.branch_reduction"),
+        ("class_weighted", "yes", "top_branch_margin.class_weighted"),
+        ("reduction", "violating_mean", "top_branch_margin.reduction"),
+        ("warmup_epochs", -1, "top_branch_margin.warmup_epochs"),
+        ("warmup_epochs", "ten", "top_branch_margin.warmup_epochs"),
+    ],
+)
+def test_invalid_top_branch_margin_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["top_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.3,
+        "target": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "branch_reduction": "max",
+        "class_weighted": False,
+        "warmup_epochs": 0,
+    }
+    payload["train"]["loss"]["top_branch_margin"][field] = value
+    config_path = _write_json(tmp_path / "bad_top_branch_margin.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
         JsonConfigLoader.load_training(config_path)
 
 
@@ -1736,6 +1949,28 @@ def test_class_weighted_gate_weighted_branch_margin_requires_class_weighting(
         JsonConfigLoader.load_training(config_path)
 
 
+def test_class_weighted_top_branch_margin_requires_class_weighting(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["top_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.3,
+        "target": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "branch_reduction": "max",
+        "class_weighted": True,
+    }
+    config_path = _write_json(
+        tmp_path / "class_weighted_top_branch_margin_without_weights.json",
+        payload,
+    )
+
+    with pytest.raises(ValueError, match="top_branch_margin.class_weighted"):
+        JsonConfigLoader.load_training(config_path)
+
+
 def test_class_gated_branch_logit_margin_requires_class_aware_pooling(
     tmp_path: Path,
 ) -> None:
@@ -1825,6 +2060,45 @@ def test_gate_weighted_branch_margin_requires_cross_entropy(tmp_path: Path) -> N
         JsonConfigLoader.load_training(config_path)
 
 
+def test_top_branch_margin_requires_class_aware_pooling(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "crackle": 1, "wheeze": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["train"]["loss"]["top_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.3,
+        "target": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "branch_reduction": "max",
+    }
+    config_path = _write_json(tmp_path / "top_branch_margin_mean_pooling.json", payload)
+
+    with pytest.raises(ValueError, match="top_branch_margin requires"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_top_branch_margin_requires_cross_entropy(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    payload["train"]["loss"]["top_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.3,
+        "target": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "branch_reduction": "max",
+    }
+    config_path = _write_json(tmp_path / "top_branch_margin_bce.json", payload)
+
+    with pytest.raises(ValueError, match="top_branch_margin.*cross_entropy"):
+        JsonConfigLoader.load_training(config_path)
+
+
 def test_gate_branch_regret_requires_class_aware_pooling(tmp_path: Path) -> None:
     payload = _class_aware_cross_entropy_payload()
     payload["model"]["encoder"]["architecture"]["evidence_pooling"] = {
@@ -1875,6 +2149,8 @@ def test_gate_branch_regret_requires_cross_entropy(tmp_path: Path) -> None:
         ("weight", 0.0, "gate_entropy_regularization.weight"),
         ("weight", -0.001, "gate_entropy_regularization.weight"),
         ("target", "branch_attention", "gate_entropy_regularization.target"),
+        ("start_epoch", 0, "gate_entropy_regularization.start_epoch"),
+        ("end_epoch", 10, "gate_entropy_regularization.end_epoch"),
     ],
 )
 def test_invalid_gate_entropy_regularization_config_is_rejected(
@@ -1888,6 +2164,8 @@ def test_invalid_gate_entropy_regularization_config_is_rejected(
         "enabled": True,
         "weight": 0.001,
         "target": "evidence_gate",
+        "start_epoch": 11,
+        "end_epoch": 30,
     }
     payload["train"]["loss"]["gate_entropy_regularization"][field] = value
     config_path = _write_json(

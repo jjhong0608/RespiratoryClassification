@@ -11,6 +11,8 @@ from src.models.model import (
     ClassGateConfig,
     ClassGateEvidenceAuxiliaryConfig,
     ClassGateGlobalResidualConfig,
+    ClassGateGlobalResidualWarmupConfig,
+    ClassGateMixingConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -95,8 +97,24 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
             "model_cfg.encoder.architecture.evidence_pooling.class_gate."
             "branch_logit_feature must be a dict"
         )
+    gate_mixing_raw = class_gate_kwargs.get("gate_mixing", {})
+    if not isinstance(gate_mixing_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "gate_mixing must be a dict"
+        )
+    global_residual_kwargs = dict(global_residual_raw)
+    warmup_raw = global_residual_kwargs.get("warmup", {})
+    if not isinstance(warmup_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "global_residual.warmup must be a dict"
+        )
+    global_residual_kwargs["warmup"] = ClassGateGlobalResidualWarmupConfig(
+        **dict(warmup_raw)
+    )
     class_gate_kwargs["global_residual"] = ClassGateGlobalResidualConfig(
-        **dict(global_residual_raw)
+        **global_residual_kwargs
     )
     class_gate_kwargs["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(
         **dict(evidence_auxiliary_raw)
@@ -104,6 +122,7 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
     class_gate_kwargs["branch_logit_feature"] = ClassGateBranchLogitFeatureConfig(
         **dict(branch_logit_feature_raw)
     )
+    class_gate_kwargs["gate_mixing"] = ClassGateMixingConfig(**dict(gate_mixing_raw))
     kwargs["class_gate"] = ClassGateConfig(**class_gate_kwargs)
     return EvidencePoolingConfig(**kwargs)
 

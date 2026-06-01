@@ -58,6 +58,7 @@ from src.utils.config import (
     MultiScaleRdtArchitectureConfig,
     PreprocessingConfig,
     RdtConfig,
+    TopBranchMarginConfig,
 )
 
 from conftest import small_patch_branches
@@ -228,11 +229,20 @@ def _trainer_cfg(
         "evidence_gate",
         "class_evidence_gate",
         "true_class_evidence_gate",
+        "class_evidence_learned_gate",
     ] = "evidence_gate",
+    gate_entropy_regularization_start_epoch: int = 1,
+    gate_entropy_regularization_end_epoch: int | None = None,
     class_gate_evidence_auxiliary_enabled: bool = False,
     class_gate_evidence_auxiliary_weight: float = 0.1,
     class_gate_diversity_regularization_enabled: bool = False,
     class_gate_diversity_regularization_weight: float = 0.0,
+    class_gate_diversity_regularization_target: Literal[
+        "class_evidence_gate",
+        "class_evidence_learned_gate",
+    ] = "class_evidence_gate",
+    class_gate_diversity_regularization_start_epoch: int = 1,
+    class_gate_diversity_regularization_end_epoch: int | None = None,
     class_evidence_margin_enabled: bool = False,
     class_evidence_margin_weight: float = 0.0,
     class_evidence_margin_value: float = 0.0,
@@ -271,6 +281,15 @@ def _trainer_cfg(
     gate_branch_regret_positive_threshold: float = 0.0,
     gate_branch_regret_tolerance: float = 0.0,
     gate_branch_regret_warmup_epochs: int = 0,
+    top_branch_margin_enabled: bool = False,
+    top_branch_margin_weight: float = 0.0,
+    top_branch_margin_value: float = 0.0,
+    top_branch_margin_class_weighted: bool = False,
+    top_branch_margin_reduction: Literal[
+        "mean",
+        "class_balanced_violating_mean",
+    ] = "mean",
+    top_branch_margin_warmup_epochs: int = 0,
 ) -> TrainerConfig:
     return TrainerConfig(
         device="cpu",
@@ -325,6 +344,8 @@ def _trainer_cfg(
             enabled=gate_entropy_regularization_enabled,
             weight=gate_entropy_regularization_weight,
             target=gate_entropy_regularization_target,
+            start_epoch=gate_entropy_regularization_start_epoch,
+            end_epoch=gate_entropy_regularization_end_epoch,
         ),
         class_gate_evidence_auxiliary=ClassGateEvidenceAuxiliaryConfig(
             enabled=class_gate_evidence_auxiliary_enabled,
@@ -333,8 +354,10 @@ def _trainer_cfg(
         class_gate_diversity_regularization=ClassGateDiversityRegularizationConfig(
             enabled=class_gate_diversity_regularization_enabled,
             weight=class_gate_diversity_regularization_weight,
-            target="class_evidence_gate",
+            target=class_gate_diversity_regularization_target,
             metric="js_divergence",
+            start_epoch=class_gate_diversity_regularization_start_epoch,
+            end_epoch=class_gate_diversity_regularization_end_epoch,
         ),
         class_evidence_margin=ClassEvidenceMarginConfig(
             enabled=class_evidence_margin_enabled,
@@ -380,6 +403,17 @@ def _trainer_cfg(
             positive_threshold=gate_branch_regret_positive_threshold,
             tolerance=gate_branch_regret_tolerance,
             warmup_epochs=gate_branch_regret_warmup_epochs,
+        ),
+        top_branch_margin=TopBranchMarginConfig(
+            enabled=top_branch_margin_enabled,
+            weight=top_branch_margin_weight,
+            margin=top_branch_margin_value,
+            target="branch_logits",
+            mode="true_vs_hardest_negative",
+            branch_reduction="max",
+            class_weighted=top_branch_margin_class_weighted,
+            reduction=top_branch_margin_reduction,
+            warmup_epochs=top_branch_margin_warmup_epochs,
         ),
         analysis=_analysis_cfg(),
         early_stopping=EarlyStoppingConfig(
@@ -1368,6 +1402,52 @@ def test_trainer_gate_entropy_regularization_supports_all_class_gate_target() ->
     assert torch.isclose(regularization, torch.tensor(-0.1291667), atol=1e-6)
 
 
+def test_trainer_gate_entropy_epoch_window_supports_learned_gate() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_entropy_regularization_enabled=True,
+            gate_entropy_regularization_weight=0.5,
+            gate_entropy_regularization_target="class_evidence_learned_gate",
+            gate_entropy_regularization_start_epoch=11,
+            gate_entropy_regularization_end_epoch=30,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_learned_gate_entropy=torch.tensor(
+            [[0.2, 0.6, 0.4], [0.8, 0.3, 0.7]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    inactive_before = trainer._compute_total_loss(
+        criterion,
+        output,
+        labels,
+        epoch=10,
+    )
+    active = trainer._compute_total_loss(criterion, output, labels, epoch=20)
+    inactive_after = trainer._compute_total_loss(
+        criterion,
+        output,
+        labels,
+        epoch=31,
+    )
+
+    expected_entropy = torch.tensor(0.5)
+    expected_regularization = torch.tensor(-0.25)
+    assert inactive_before.gate_entropy is None
+    assert torch.isclose(active.gate_entropy, expected_entropy)
+    assert torch.isclose(active.gate_entropy_regularization, expected_regularization)
+    assert inactive_after.gate_entropy_regularization is None
+
+
 def test_trainer_gate_entropy_regularization_combines_with_branch_auxiliary() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -1443,6 +1523,58 @@ def test_trainer_class_gate_diversity_regularization_subtracts_js_divergence() -
     assert components.class_gate_diversity is not None
     assert components.class_gate_diversity_regularization is not None
     assert torch.isclose(components.total, final_loss + regularization)
+
+
+def test_trainer_class_gate_diversity_epoch_window_supports_learned_gate() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_gate_diversity_regularization_enabled=True,
+            class_gate_diversity_regularization_weight=0.3,
+            class_gate_diversity_regularization_target="class_evidence_learned_gate",
+            class_gate_diversity_regularization_start_epoch=11,
+            class_gate_diversity_regularization_end_epoch=30,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_learned_gate_weights=torch.tensor(
+            [
+                [[0.8, 0.2], [0.5, 0.5], [0.2, 0.8]],
+                [[0.7, 0.3], [0.6, 0.4], [0.1, 0.9]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([1, 0], dtype=torch.long)
+
+    inactive_before = trainer._compute_total_loss(
+        criterion,
+        output,
+        labels,
+        epoch=10,
+    )
+    active = trainer._compute_total_loss(criterion, output, labels, epoch=20)
+    inactive_after = trainer._compute_total_loss(
+        criterion,
+        output,
+        labels,
+        epoch=31,
+    )
+    diversity, regularization = trainer._compute_class_gate_diversity_regularization(
+        output
+    )
+
+    assert inactive_before.class_gate_diversity is None
+    assert active.class_gate_diversity is not None
+    assert active.class_gate_diversity_regularization is not None
+    assert torch.isclose(active.class_gate_diversity, diversity)
+    assert torch.isclose(active.class_gate_diversity_regularization, regularization)
+    assert inactive_after.class_gate_diversity_regularization is None
 
 
 def test_trainer_class_evidence_margin_minority_vs_major() -> None:
@@ -2151,6 +2283,116 @@ def test_trainer_raises_when_gate_weighted_branch_margin_enabled_without_outputs
         trainer._compute_total_loss(criterion, output, labels, epoch=1)
 
 
+def test_trainer_top_branch_margin_uses_best_branch_margin() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            top_branch_margin_enabled=True,
+            top_branch_margin_weight=0.05,
+            top_branch_margin_value=0.3,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor(
+            [
+                [[0.8, 0.6, 0.5], [0.4, 0.3, 0.2]],
+                [[0.7, 0.6, 0.2], [0.4, 0.5, 0.3]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels, epoch=1)
+    raw_margin, weighted_margin = trainer._compute_top_branch_margin_loss(
+        output,
+        labels,
+        epoch=1,
+    )
+    final_loss = trainer._compute_main_loss(criterion, output.logits, labels)
+
+    expected_raw = torch.tensor((0.1 + 0.2) / 2)
+    assert torch.isclose(raw_margin, expected_raw)
+    assert torch.isclose(weighted_margin, 0.05 * expected_raw)
+    assert torch.isclose(components.total, final_loss + weighted_margin)
+    assert torch.isclose(components.top_branch_margin, raw_margin)
+    assert torch.isclose(components.top_branch_margin_loss, weighted_margin)
+
+
+def test_trainer_top_branch_margin_class_balanced_and_warmup() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(2.0, 3.0, 5.0),
+            top_branch_margin_enabled=True,
+            top_branch_margin_weight=0.05,
+            top_branch_margin_value=0.3,
+            top_branch_margin_class_weighted=True,
+            top_branch_margin_reduction="class_balanced_violating_mean",
+            top_branch_margin_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(3, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(3, 32),
+        branch_logits=torch.tensor(
+            [
+                [[0.8, 0.6, 0.5], [0.4, 0.3, 0.2]],
+                [[0.7, 0.6, 0.2], [0.4, 0.5, 0.3]],
+                [[0.1, 0.2, 0.9], [0.0, 0.1, 1.0]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1, 2], dtype=torch.long)
+
+    warmup_raw, warmup_weighted = trainer._compute_top_branch_margin_loss(
+        output,
+        labels,
+        epoch=10,
+    )
+    raw_margin, weighted_margin = trainer._compute_top_branch_margin_loss(
+        output,
+        labels,
+        epoch=11,
+    )
+
+    expected_raw = torch.tensor(((2.0 * 0.1) + (3.0 * 0.2)) / 2)
+    assert torch.isclose(warmup_raw, torch.tensor(0.0))
+    assert torch.isclose(warmup_weighted, torch.tensor(0.0))
+    assert torch.isclose(raw_margin, expected_raw)
+    assert torch.isclose(weighted_margin, 0.05 * expected_raw)
+
+
+def test_trainer_raises_when_top_branch_margin_enabled_without_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            top_branch_margin_enabled=True,
+            top_branch_margin_weight=0.05,
+            top_branch_margin_value=0.3,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="top branch margin enabled"):
+        trainer._compute_total_loss(criterion, output, labels, epoch=1)
+
+
 def test_trainer_raises_when_class_evidence_margin_enabled_without_logits() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -2340,6 +2582,9 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
             gate_branch_regret_weight=0.01,
             gate_branch_regret_positive_threshold=0.1,
             gate_branch_regret_tolerance=0.05,
+            top_branch_margin_enabled=True,
+            top_branch_margin_weight=0.05,
+            top_branch_margin_value=0.3,
         )
     )
     batch = ClipBatch(
@@ -2370,6 +2615,8 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
     assert "gate_branch_regret" in result.loss_components
     assert "gate_branch_regret_loss" in result.loss_components
     assert "gate_branch_regret_eligible_fraction" in result.loss_components
+    assert "top_branch_margin" in result.loss_components
+    assert "top_branch_margin_loss" in result.loss_components
 
 
 def test_configured_checkpoint_monitors_keep_top_three(tmp_path: Path) -> None:

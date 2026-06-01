@@ -14,6 +14,8 @@ from src.models.model import (
     ClassGateConfig,
     ClassGateEvidenceAuxiliaryConfig,
     ClassGateGlobalResidualConfig,
+    ClassGateGlobalResidualWarmupConfig,
+    ClassGateMixingConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -205,15 +207,23 @@ class GateEntropyRegularizationConfig:
         "evidence_gate",
         "class_evidence_gate",
         "true_class_evidence_gate",
+        "class_evidence_learned_gate",
     ] = "evidence_gate"
+    start_epoch: int = 1
+    end_epoch: int | None = None
 
 
 @dataclass(frozen=True)
 class ClassGateDiversityRegularizationConfig:
     enabled: bool = False
     weight: float = 0.0
-    target: Literal["class_evidence_gate"] = "class_evidence_gate"
+    target: Literal[
+        "class_evidence_gate",
+        "class_evidence_learned_gate",
+    ] = "class_evidence_gate"
     metric: Literal["js_divergence"] = "js_divergence"
+    start_epoch: int = 1
+    end_epoch: int | None = None
 
 
 @dataclass(frozen=True)
@@ -266,6 +276,19 @@ class GateBranchRegretConfig:
     margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
     positive_threshold: float = 0.0
     tolerance: float = 0.0
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class TopBranchMarginConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    margin: float = 0.0
+    target: Literal["branch_logits"] = "branch_logits"
+    mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    branch_reduction: Literal["max"] = "max"
+    class_weighted: bool = False
+    reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
     warmup_epochs: int = 0
 
 
@@ -355,6 +378,9 @@ class LossConfig:
     )
     gate_branch_regret: GateBranchRegretConfig = field(
         default_factory=GateBranchRegretConfig
+    )
+    top_branch_margin: TopBranchMarginConfig = field(
+        default_factory=TopBranchMarginConfig
     )
 
 
@@ -497,12 +523,18 @@ class JsonConfigLoader:
     _CLASS_GATE_MODES = {"query"}
     _CLASS_GATE_SCORERS = {"diagonal"}
     _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
+    _CLASS_GATE_MIXING_MODES = {"uniform_to_learned"}
+    _GLOBAL_RESIDUAL_WARMUP_MODES = {"zero_to_learned"}
     _GATE_ENTROPY_TARGETS = {
         "evidence_gate",
         "class_evidence_gate",
         "true_class_evidence_gate",
+        "class_evidence_learned_gate",
     }
-    _CLASS_GATE_DIVERSITY_TARGETS = {"class_evidence_gate"}
+    _CLASS_GATE_DIVERSITY_TARGETS = {
+        "class_evidence_gate",
+        "class_evidence_learned_gate",
+    }
     _CLASS_GATE_DIVERSITY_METRICS = {"js_divergence"}
     _CLASS_EVIDENCE_MARGIN_TARGETS = {"class_evidence_logits"}
     _CLASS_EVIDENCE_MARGIN_MODES = {
@@ -520,6 +552,9 @@ class JsonConfigLoader:
     _GATE_BRANCH_REGRET_SOURCES = {"branch_logits"}
     _GATE_BRANCH_REGRET_MODES = {"best_margin_regret"}
     _GATE_BRANCH_REGRET_MARGIN_MODES = {"true_vs_hardest_negative"}
+    _TOP_BRANCH_MARGIN_TARGETS = {"branch_logits"}
+    _TOP_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
+    _TOP_BRANCH_MARGIN_BRANCH_REDUCTIONS = {"max"}
     _TIME_SHIFT_MODES = {"zero_pad", "roll"}
     _AUGMENTATION_POLICY_TYPES = {"independent", "one_of"}
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
@@ -543,6 +578,51 @@ class JsonConfigLoader:
     def _validate_probability(value: float, *, field_name: str) -> None:
         if not (0.0 <= value <= 1.0):
             raise ValueError(f"{field_name} must be within [0, 1]")
+
+    @staticmethod
+    def _validate_epoch_window(
+        *,
+        start_epoch: int,
+        end_epoch: int | None,
+        field_name: str,
+    ) -> None:
+        if not isinstance(start_epoch, int):
+            raise TypeError(f"{field_name}.start_epoch must be an integer")
+        if start_epoch <= 0:
+            raise ValueError(f"{field_name}.start_epoch must be greater than zero")
+        if end_epoch is not None and not isinstance(end_epoch, int):
+            raise TypeError(f"{field_name}.end_epoch must be an integer or null")
+        if end_epoch is not None and end_epoch < start_epoch:
+            raise ValueError(
+                f"{field_name}.end_epoch must be greater than or equal to start_epoch"
+            )
+
+    @staticmethod
+    def _validate_hold_decay_schedule(
+        *,
+        enabled: bool,
+        hold_epochs: int,
+        decay_epochs: int,
+        field_name: str,
+    ) -> None:
+        if not isinstance(enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if not isinstance(hold_epochs, int):
+            raise TypeError(f"{field_name}.hold_epochs must be an integer")
+        if not isinstance(decay_epochs, int):
+            raise TypeError(f"{field_name}.decay_epochs must be an integer")
+        if hold_epochs < 0:
+            raise ValueError(
+                f"{field_name}.hold_epochs must be greater than or equal to zero"
+            )
+        if decay_epochs < 0:
+            raise ValueError(
+                f"{field_name}.decay_epochs must be greater than or equal to zero"
+            )
+        if enabled and hold_epochs == 0 and decay_epochs == 0:
+            raise ValueError(
+                f"{field_name} requires hold_epochs or decay_epochs when enabled"
+            )
 
     @staticmethod
     def load_json(path: str | Path) -> dict[str, Any]:
@@ -862,6 +942,33 @@ class JsonConfigLoader:
                 "branch_logit_feature.mode must be one of "
                 f"{sorted(JsonConfigLoader._CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES)}"
             )
+        JsonConfigLoader._validate_hold_decay_schedule(
+            enabled=class_gate.gate_mixing.enabled,
+            hold_epochs=class_gate.gate_mixing.hold_epochs,
+            decay_epochs=class_gate.gate_mixing.decay_epochs,
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate.gate_mixing"
+            ),
+        )
+        if class_gate.gate_mixing.mode not in JsonConfigLoader._CLASS_GATE_MIXING_MODES:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "gate_mixing.mode must be 'uniform_to_learned'"
+            )
+        JsonConfigLoader._validate_probability(
+            float(class_gate.gate_mixing.start_alpha),
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "gate_mixing.start_alpha"
+            ),
+        )
+        JsonConfigLoader._validate_probability(
+            float(class_gate.gate_mixing.end_alpha),
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "gate_mixing.end_alpha"
+            ),
+        )
         if not isinstance(class_gate.global_residual.enabled, bool):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
@@ -877,6 +984,35 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "global_residual.learnable must be a boolean"
             )
+        warmup = class_gate.global_residual.warmup
+        JsonConfigLoader._validate_hold_decay_schedule(
+            enabled=warmup.enabled,
+            hold_epochs=warmup.hold_epochs,
+            decay_epochs=warmup.decay_epochs,
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.warmup"
+            ),
+        )
+        if warmup.mode not in JsonConfigLoader._GLOBAL_RESIDUAL_WARMUP_MODES:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.warmup.mode must be 'zero_to_learned'"
+            )
+        JsonConfigLoader._validate_probability(
+            float(warmup.start_multiplier),
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.warmup.start_multiplier"
+            ),
+        )
+        JsonConfigLoader._validate_probability(
+            float(warmup.end_multiplier),
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.warmup.end_multiplier"
+            ),
+        )
         if not isinstance(class_gate.evidence_auxiliary.enabled, bool):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
@@ -1110,6 +1246,11 @@ class JsonConfigLoader:
                 "train.loss.gate_entropy_regularization.target must be one of "
                 f"{sorted(JsonConfigLoader._GATE_ENTROPY_TARGETS)}"
             )
+        JsonConfigLoader._validate_epoch_window(
+            start_epoch=cfg.loss.gate_entropy_regularization.start_epoch,
+            end_epoch=cfg.loss.gate_entropy_regularization.end_epoch,
+            field_name="train.loss.gate_entropy_regularization",
+        )
         if (
             cfg.loss.gate_entropy_regularization.enabled
             and cfg.loss.gate_entropy_regularization.weight <= 0
@@ -1127,7 +1268,7 @@ class JsonConfigLoader:
         ):
             raise ValueError(
                 "train.loss.class_gate_diversity_regularization.target must be "
-                "'class_evidence_gate'"
+                f"one of {sorted(JsonConfigLoader._CLASS_GATE_DIVERSITY_TARGETS)}"
             )
         if (
             cfg.loss.class_gate_diversity_regularization.metric
@@ -1137,6 +1278,11 @@ class JsonConfigLoader:
                 "train.loss.class_gate_diversity_regularization.metric must be "
                 "'js_divergence'"
             )
+        JsonConfigLoader._validate_epoch_window(
+            start_epoch=cfg.loss.class_gate_diversity_regularization.start_epoch,
+            end_epoch=cfg.loss.class_gate_diversity_regularization.end_epoch,
+            field_name="train.loss.class_gate_diversity_regularization",
+        )
         if (
             cfg.loss.class_gate_diversity_regularization.enabled
             and cfg.loss.class_gate_diversity_regularization.weight <= 0
@@ -1438,6 +1584,72 @@ class JsonConfigLoader:
                     "model.encoder.architecture.evidence_pooling.type="
                     "'class_aware_branch_gated'"
                 )
+        if not isinstance(cfg.loss.top_branch_margin.enabled, bool):
+            raise ValueError("train.loss.top_branch_margin.enabled must be a boolean")
+        if not isinstance(cfg.loss.top_branch_margin.class_weighted, bool):
+            raise ValueError(
+                "train.loss.top_branch_margin.class_weighted must be a boolean"
+            )
+        if (
+            cfg.loss.top_branch_margin.target
+            not in JsonConfigLoader._TOP_BRANCH_MARGIN_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.top_branch_margin.target must be 'branch_logits'"
+            )
+        if (
+            cfg.loss.top_branch_margin.mode
+            not in JsonConfigLoader._TOP_BRANCH_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.top_branch_margin.mode must be 'true_vs_hardest_negative'"
+            )
+        if (
+            cfg.loss.top_branch_margin.branch_reduction
+            not in JsonConfigLoader._TOP_BRANCH_MARGIN_BRANCH_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.top_branch_margin.branch_reduction must be 'max'"
+            )
+        if (
+            cfg.loss.top_branch_margin.reduction
+            not in JsonConfigLoader._MARGIN_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.top_branch_margin.reduction must be one of "
+                f"{sorted(JsonConfigLoader._MARGIN_REDUCTIONS)}"
+            )
+        if not isinstance(cfg.loss.top_branch_margin.warmup_epochs, int):
+            raise TypeError(
+                "train.loss.top_branch_margin.warmup_epochs must be an integer"
+            )
+        if cfg.loss.top_branch_margin.warmup_epochs < 0:
+            raise ValueError(
+                "train.loss.top_branch_margin.warmup_epochs must be greater than "
+                "or equal to zero"
+            )
+        if cfg.loss.top_branch_margin.enabled:
+            if cfg.loss.top_branch_margin.weight <= 0:
+                raise ValueError(
+                    "train.loss.top_branch_margin.weight must be greater than zero "
+                    "when enabled"
+                )
+            if cfg.loss.top_branch_margin.margin <= 0:
+                raise ValueError(
+                    "train.loss.top_branch_margin.margin must be greater than zero "
+                    "when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.top_branch_margin is supported only for "
+                    "cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.top_branch_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
         if not isinstance(cfg.loss.class_weighting.enabled, bool):
             raise ValueError("train.loss.class_weighting.enabled must be a boolean")
         if cfg.loss.class_weighting.type not in JsonConfigLoader._CLASS_WEIGHTING_TYPES:
@@ -1481,6 +1693,15 @@ class JsonConfigLoader:
             raise ValueError(
                 "train.loss.gate_weighted_branch_margin.class_weighted "
                 "requires train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.top_branch_margin.enabled
+            and cfg.loss.top_branch_margin.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.top_branch_margin.class_weighted requires "
+                "train.loss.class_weighting.enabled=true"
             )
         if not isinstance(cfg.loss.label_smoothing.enabled, bool):
             raise ValueError("train.loss.label_smoothing.enabled must be a boolean")
@@ -1836,14 +2057,19 @@ class JsonConfigLoader:
     def _parse_evidence_pooling(raw: Mapping[str, Any]) -> EvidencePoolingConfig:
         kwargs = dict(raw)
         class_gate = dict(kwargs.get("class_gate", {}))
-        class_gate["global_residual"] = ClassGateGlobalResidualConfig(
-            **dict(class_gate.get("global_residual", {}))
+        global_residual = dict(class_gate.get("global_residual", {}))
+        global_residual["warmup"] = ClassGateGlobalResidualWarmupConfig(
+            **dict(global_residual.get("warmup", {}))
         )
+        class_gate["global_residual"] = ClassGateGlobalResidualConfig(**global_residual)
         class_gate["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(
             **dict(class_gate.get("evidence_auxiliary", {}))
         )
         class_gate["branch_logit_feature"] = ClassGateBranchLogitFeatureConfig(
             **dict(class_gate.get("branch_logit_feature", {}))
+        )
+        class_gate["gate_mixing"] = ClassGateMixingConfig(
+            **dict(class_gate.get("gate_mixing", {}))
         )
         kwargs["class_gate"] = ClassGateConfig(**class_gate)
         return EvidencePoolingConfig(**kwargs)
@@ -1981,6 +2207,9 @@ class JsonConfigLoader:
         )
         loss["gate_branch_regret"] = GateBranchRegretConfig(
             **dict(loss.get("gate_branch_regret", {}))
+        )
+        loss["top_branch_margin"] = TopBranchMarginConfig(
+            **dict(loss.get("top_branch_margin", {}))
         )
         kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))

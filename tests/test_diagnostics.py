@@ -64,7 +64,14 @@ def _class_aware_output() -> AstModelOutput:
             [[[0.8, 0.2], [0.25, 0.75], [0.5, 0.5]]]
         ),
         class_evidence_gate_entropy=torch.tensor([[0.50, 0.56, 0.69]]),
+        class_evidence_learned_gate_weights=torch.tensor(
+            [[[0.7, 0.3], [0.35, 0.65], [0.45, 0.55]]]
+        ),
+        class_evidence_learned_gate_entropy=torch.tensor([[0.61, 0.65, 0.69]]),
+        class_evidence_gate_mixing_alpha=torch.tensor(0.5),
         global_residual_scale=torch.tensor(0.1),
+        global_residual_schedule_multiplier=torch.tensor(0.5),
+        global_residual_effective_scale=torch.tensor(0.05),
     )
 
 
@@ -212,7 +219,25 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
     assert row["true_class_gate_weights"] == [0.25, 0.75]
     assert row["predicted_class_gate_weights"] == [0.25, 0.75]
     assert row["class_evidence_gate_entropy"] == pytest.approx([0.50, 0.56, 0.69])
+    assert row["class_evidence_learned_gate_weights"][1] == [
+        0.3499999940395355,
+        0.6499999761581421,
+    ]
+    assert row["true_class_learned_gate_weights"] == [
+        0.3499999940395355,
+        0.6499999761581421,
+    ]
+    assert row["predicted_class_learned_gate_weights"] == [
+        0.3499999940395355,
+        0.6499999761581421,
+    ]
+    assert row["class_evidence_learned_gate_entropy"] == pytest.approx(
+        [0.61, 0.65, 0.69]
+    )
+    assert row["class_evidence_gate_mixing_alpha"] == pytest.approx(0.5)
     assert row["global_residual_scale"] == pytest.approx(0.1)
+    assert row["global_residual_schedule_multiplier"] == pytest.approx(0.5)
+    assert row["global_residual_effective_scale"] == pytest.approx(0.05)
 
 
 def test_diagnostics_include_selected_evidence_dropout_metadata() -> None:

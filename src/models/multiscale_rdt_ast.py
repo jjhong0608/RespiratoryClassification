@@ -11,6 +11,33 @@ from src.models.classifier import ClassifierDims, LinearClassifier, MlpClassifie
 PATCH_INIT_STD = 0.02
 
 
+def _resolve_hold_decay_schedule(
+    *,
+    enabled: bool,
+    start_value: float,
+    end_value: float,
+    hold_epochs: int,
+    decay_epochs: int,
+    epoch: int | None,
+) -> float:
+    if not enabled:
+        return end_value
+    if epoch is None:
+        return end_value
+    current_epoch = int(epoch)
+    if current_epoch <= int(hold_epochs):
+        return start_value
+    if int(decay_epochs) <= 0:
+        return end_value
+    if int(decay_epochs) == 1:
+        return end_value
+    decay_epoch = current_epoch - int(hold_epochs)
+    if decay_epoch >= int(decay_epochs):
+        return end_value
+    progress = float(decay_epoch - 1) / float(int(decay_epochs) - 1)
+    return start_value + ((end_value - start_value) * progress)
+
+
 @dataclass(frozen=True)
 class AstFeatureDims:
     num_mel_bins: int
@@ -57,10 +84,23 @@ class MilConfig:
 
 
 @dataclass(frozen=True)
+class ClassGateGlobalResidualWarmupConfig:
+    enabled: bool = False
+    mode: Literal["zero_to_learned"] = "zero_to_learned"
+    start_multiplier: float = 0.0
+    end_multiplier: float = 1.0
+    hold_epochs: int = 0
+    decay_epochs: int = 0
+
+
+@dataclass(frozen=True)
 class ClassGateGlobalResidualConfig:
     enabled: bool = True
     init_scale: float = 0.1
     learnable: bool = True
+    warmup: ClassGateGlobalResidualWarmupConfig = field(
+        default_factory=ClassGateGlobalResidualWarmupConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -75,9 +115,20 @@ class ClassGateBranchLogitFeatureConfig:
 
 
 @dataclass(frozen=True)
+class ClassGateMixingConfig:
+    enabled: bool = False
+    mode: Literal["uniform_to_learned"] = "uniform_to_learned"
+    start_alpha: float = 1.0
+    end_alpha: float = 0.0
+    hold_epochs: int = 0
+    decay_epochs: int = 0
+
+
+@dataclass(frozen=True)
 class ClassGateConfig:
     mode: Literal["query"] = "query"
     scorer: Literal["diagonal"] = "diagonal"
+    gate_mixing: ClassGateMixingConfig = field(default_factory=ClassGateMixingConfig)
     global_residual: ClassGateGlobalResidualConfig = field(
         default_factory=ClassGateGlobalResidualConfig
     )
@@ -192,10 +243,15 @@ class AstModelOutput:
     global_residual_logits: Tensor | None = None
     class_evidence_gate_weights: Tensor | None = None
     class_evidence_gate_entropy: Tensor | None = None
+    class_evidence_learned_gate_weights: Tensor | None = None
+    class_evidence_learned_gate_entropy: Tensor | None = None
+    class_evidence_gate_mixing_alpha: Tensor | None = None
     class_gated_branch_logits: Tensor | None = None
     class_gated_branch_logit_features: Tensor | None = None
     class_gated_branch_logit_feature_mode: str | None = None
     global_residual_scale: Tensor | None = None
+    global_residual_schedule_multiplier: Tensor | None = None
+    global_residual_effective_scale: Tensor | None = None
     branch_evidence_norms: Tensor | None = None
     selected_evidence_dropout_mask: Tensor | None = None
     selected_evidence_keep_ratio: Tensor | None = None
@@ -232,6 +288,9 @@ class EvidencePoolingOutput:
     class_evidence_logits: Tensor | None = None
     class_gate_weights: Tensor | None = None
     class_gate_entropy: Tensor | None = None
+    learned_class_gate_weights: Tensor | None = None
+    learned_class_gate_entropy: Tensor | None = None
+    class_gate_mixing_alpha: Tensor | None = None
     branch_evidence_summary: Tensor | None = None
     branch_evidence_norms: Tensor | None = None
 
@@ -432,6 +491,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             )
         self.temperature = cfg.temperature
         self.num_classes = num_classes
+        self.gate_mixing = cfg.class_gate.gate_mixing
+        self._runtime_epoch: int | None = None
         gate_hidden_size = cfg.gate_hidden_size or max(hidden_size // 2, 1)
         self.branch_key = nn.Sequential(
             nn.LayerNorm(hidden_size),
@@ -445,6 +506,19 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         self.class_scorer_bias = nn.Parameter(torch.zeros(num_classes))
         nn.init.normal_(self.class_queries, std=PATCH_INIT_STD)
         nn.init.normal_(self.class_scorer_weight, std=PATCH_INIT_STD)
+
+    def set_runtime_epoch(self, epoch: int | None) -> None:
+        self._runtime_epoch = None if epoch is None else int(epoch)
+
+    def _gate_mixing_alpha(self) -> float:
+        return _resolve_hold_decay_schedule(
+            enabled=self.gate_mixing.enabled,
+            start_value=float(self.gate_mixing.start_alpha),
+            end_value=float(self.gate_mixing.end_alpha),
+            hold_epochs=int(self.gate_mixing.hold_epochs),
+            decay_epochs=int(self.gate_mixing.decay_epochs),
+            epoch=self._runtime_epoch,
+        )
 
     def forward(
         self,
@@ -485,11 +559,40 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             ~branch_present_mask.unsqueeze(1),
             float("-inf"),
         )
-        class_gate_weights = torch.softmax(gate_logits / self.temperature, dim=-1)
+        learned_class_gate_weights = torch.softmax(
+            gate_logits / self.temperature,
+            dim=-1,
+        )
+        alpha = self._gate_mixing_alpha()
+        if alpha == 0.0:
+            class_gate_weights = learned_class_gate_weights
+        else:
+            branch_counts = branch_present_mask.sum(dim=1, keepdim=True).clamp_min(1)
+            uniform_gate = branch_present_mask.to(
+                dtype=learned_class_gate_weights.dtype
+            ) / branch_counts.to(dtype=learned_class_gate_weights.dtype)
+            uniform_gate = uniform_gate.unsqueeze(1).expand_as(
+                learned_class_gate_weights
+            )
+            class_gate_weights = (float(alpha) * uniform_gate) + (
+                (1.0 - float(alpha)) * learned_class_gate_weights
+            )
         class_gate_entropy = -(
             class_gate_weights
             * (class_gate_weights + torch.finfo(class_gate_weights.dtype).eps).log()
         ).sum(dim=-1)
+        learned_class_gate_entropy = -(
+            learned_class_gate_weights
+            * (
+                learned_class_gate_weights
+                + torch.finfo(learned_class_gate_weights.dtype).eps
+            ).log()
+        ).sum(dim=-1)
+        class_gate_mixing_alpha = torch.tensor(
+            float(alpha),
+            device=class_gate_weights.device,
+            dtype=class_gate_weights.dtype,
+        )
         class_evidence_embeddings = torch.einsum(
             "bcr,brd->bcd",
             class_gate_weights,
@@ -515,6 +618,9 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             class_evidence_logits=class_evidence_logits,
             class_gate_weights=class_gate_weights,
             class_gate_entropy=class_gate_entropy,
+            learned_class_gate_weights=learned_class_gate_weights,
+            learned_class_gate_entropy=learned_class_gate_entropy,
+            class_gate_mixing_alpha=class_gate_mixing_alpha,
             branch_evidence_summary=branch_evidence_summary,
             branch_evidence_norms=branch_evidence_norms,
         )
@@ -530,11 +636,21 @@ class GlobalResidualLogitCombiner(nn.Module):
         else:
             self.register_buffer("scale", scale)
 
-    def forward(self, evidence_logits: Tensor, residual_logits: Tensor) -> Tensor:
+    def scale_tensor(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+        return self.scale.to(device=device, dtype=dtype)
+
+    def forward(
+        self,
+        evidence_logits: Tensor,
+        residual_logits: Tensor,
+        *,
+        multiplier: float = 1.0,
+    ) -> Tensor:
         scale = self.scale.to(
             device=residual_logits.device, dtype=residual_logits.dtype
         )
-        return evidence_logits + scale * residual_logits
+        effective_scale = scale * float(multiplier)
+        return evidence_logits + effective_scale * residual_logits
 
 
 class TransformerBlock(nn.Module):
@@ -993,6 +1109,7 @@ class MultiScaleRdtAstModel(nn.Module):
     def __init__(self, cfg: MultiScaleRdtAstModelConfig) -> None:
         super().__init__()
         self.cfg = cfg
+        self._runtime_epoch: int | None = None
         architecture = cfg.encoder.architecture
         self.encoder = MultiScalePatchStemAdapterEncoder(cfg.encoder)
         self.class_aware_evidence_pooling = (
@@ -1084,6 +1201,12 @@ class MultiScaleRdtAstModel(nn.Module):
         else:
             raise ValueError(f"Unsupported classifier type: {cfg.classifier.type}")
 
+    def set_runtime_epoch(self, epoch: int | None) -> None:
+        self._runtime_epoch = None if epoch is None else int(epoch)
+        set_runtime_epoch = getattr(self.evidence_pooler, "set_runtime_epoch", None)
+        if callable(set_runtime_epoch):
+            set_runtime_epoch(self._runtime_epoch)
+
     def encoder_side_modules(self) -> tuple[nn.Module, ...]:
         return (self.encoder, self.branch_mil_heads, self.branch_binary_head)
 
@@ -1143,6 +1266,20 @@ class MultiScaleRdtAstModel(nn.Module):
             .values
         )
         return raw_scores - hardest_negative
+
+    def _global_residual_schedule_multiplier(self) -> float:
+        residual_cfg = (
+            self.cfg.encoder.architecture.evidence_pooling.class_gate.global_residual
+        )
+        warmup = residual_cfg.warmup
+        return _resolve_hold_decay_schedule(
+            enabled=warmup.enabled,
+            start_value=float(warmup.start_multiplier),
+            end_value=float(warmup.end_multiplier),
+            hold_epochs=int(warmup.hold_epochs),
+            decay_epochs=int(warmup.decay_epochs),
+            epoch=self._runtime_epoch,
+        )
 
     def forward(self, input_values: Tensor) -> AstModelOutput:
         if input_values.ndim != 3:
@@ -1250,6 +1387,8 @@ class MultiScaleRdtAstModel(nn.Module):
         evidence_embedding = pooling_output.pooled_embedding
         global_residual_logits: Tensor | None = None
         global_residual_scale: Tensor | None = None
+        global_residual_schedule_multiplier: Tensor | None = None
+        global_residual_effective_scale: Tensor | None = None
         class_gated_branch_logits: Tensor | None = None
         class_gated_branch_logit_features: Tensor | None = None
         class_gated_branch_logit_feature_mode: str | None = None
@@ -1325,11 +1464,25 @@ class MultiScaleRdtAstModel(nn.Module):
                 )
                 pooled_embedding = self.fusion_projector(fusion_input)
                 global_residual_logits = self.classifier(pooled_embedding)
+                residual_multiplier = self._global_residual_schedule_multiplier()
                 logits = self.global_residual_combiner(
                     class_evidence_logits,
                     global_residual_logits,
+                    multiplier=residual_multiplier,
                 )
-                global_residual_scale = self.global_residual_combiner.scale.detach()
+                raw_scale = self.global_residual_combiner.scale_tensor(
+                    device=global_residual_logits.device,
+                    dtype=global_residual_logits.dtype,
+                )
+                global_residual_scale = raw_scale.detach()
+                global_residual_schedule_multiplier = torch.tensor(
+                    float(residual_multiplier),
+                    device=global_residual_logits.device,
+                    dtype=global_residual_logits.dtype,
+                )
+                global_residual_effective_scale = (
+                    raw_scale * float(residual_multiplier)
+                ).detach()
         else:
             branch_logit_features = stacked_branch_logits.reshape(
                 stacked_branch_logits.shape[0],
@@ -1363,12 +1516,21 @@ class MultiScaleRdtAstModel(nn.Module):
             global_residual_logits=global_residual_logits,
             class_evidence_gate_weights=pooling_output.class_gate_weights,
             class_evidence_gate_entropy=pooling_output.class_gate_entropy,
+            class_evidence_learned_gate_weights=(
+                pooling_output.learned_class_gate_weights
+            ),
+            class_evidence_learned_gate_entropy=(
+                pooling_output.learned_class_gate_entropy
+            ),
+            class_evidence_gate_mixing_alpha=pooling_output.class_gate_mixing_alpha,
             class_gated_branch_logits=class_gated_branch_logits,
             class_gated_branch_logit_features=class_gated_branch_logit_features,
             class_gated_branch_logit_feature_mode=(
                 class_gated_branch_logit_feature_mode
             ),
             global_residual_scale=global_residual_scale,
+            global_residual_schedule_multiplier=global_residual_schedule_multiplier,
+            global_residual_effective_scale=global_residual_effective_scale,
             branch_evidence_norms=pooling_output.branch_evidence_norms,
             selected_evidence_dropout_mask=selected_evidence_dropout_mask,
             selected_evidence_keep_ratio=selected_evidence_keep_ratio,

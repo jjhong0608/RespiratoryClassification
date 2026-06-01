@@ -798,7 +798,10 @@ absent in the training split, training fails fast with a clear error.
 When `train.loss.gate_entropy_regularization.enabled = true`, the trainer uses
 the requested target: `evidence_gate` for legacy branch-gated pooling,
 `class_evidence_gate` for all class-aware gates, or `true_class_evidence_gate`
-for the gate corresponding to the ground-truth class. It subtracts
+for the gate corresponding to the ground-truth class. Class-aware curriculum
+runs can target `class_evidence_learned_gate`, which applies the entropy term
+to the learned gate before uniform-gate mixing. Optional `start_epoch` and
+`end_epoch` fields restrict the term to a phase window. The trainer subtracts
 `weight * mean(entropy)` from the scheduled and monitor loss. This is an
 entropy bonus rather than a hard cap, so it does not guarantee
 `max(gate_weights) <= 0.5`. Check gate-weight distributions, high-confidence
@@ -807,9 +810,12 @@ setting.
 
 When `train.loss.class_gate_diversity_regularization.enabled = true`, the
 trainer computes pairwise Jensen-Shannon divergence among the class-specific
-branch-gate distributions and subtracts the weighted mean from the loss. This
-encourages label-specific branch usage but does not force every class to choose
-a unique branch.
+branch-gate distributions and subtracts the weighted mean from the loss. The
+default target is the used class gate; curriculum runs can target
+`class_evidence_learned_gate` so the learned gate separates during a uniform
+mixing phase. Optional `start_epoch` and `end_epoch` fields restrict the term to
+a phase window. This encourages label-specific branch usage but does not force
+every class to choose a unique branch.
 
 When `train.loss.class_evidence_margin.enabled = true`, the trainer adds
 `weight * margin_loss` on `class_evidence_logits` before the global residual is
@@ -844,6 +850,14 @@ the same train-derived class weights used by cross-entropy, so
 `train.loss.class_weighting.enabled` must also be true. Top-k, all-branch,
 oracle, and soft-oracle branch-margin modes are not supported.
 
+When `train.loss.top_branch_margin.enabled = true`, the trainer computes the
+true-vs-hardest-negative branch margin for every branch and applies the margin
+penalty only to the best branch per sample (`branch_reduction = "max"`). This
+supervises the existence of at least one branch that can rank the true class
+above the hardest negative without assigning a fixed branch to a label. It
+supports the same `class_weighted`, `reduction`, and `warmup_epochs` semantics
+as the other margin losses.
+
 When `train.loss.gate_branch_regret.enabled = true`, the trainer computes the
 best detached branch margin for the true class and penalizes the true-class gate
 when its gate-weighted expected margin falls behind that best branch by more
@@ -865,6 +879,29 @@ Training keeps two AdamW parameter groups:
 
 If `adaptation.mode = "frozen"`, the encoder group is frozen and only the head
 parameters are trainable.
+
+## Class-Aware Gate Curriculum
+
+For `class_aware_branch_gated`, `class_gate.gate_mixing` can mix the learned
+class gate with a uniform gate over the present branches:
+
+```text
+used_gate = alpha * uniform_gate + (1 - alpha) * learned_gate
+```
+
+With `mode = "uniform_to_learned"`, `start_alpha = 1.0`, `end_alpha = 0.0`,
+`hold_epochs = 10`, and `decay_epochs = 20`, epochs 1-10 use a uniform gate,
+epochs 11-30 linearly move from uniform to learned, and epoch 31 onward uses
+the learned gate. `class_evidence_gate_weights` remains the used gate for
+pooling and diagnostics; `class_evidence_learned_gate_weights`,
+`class_evidence_gate_mixing_alpha`, and
+`class_evidence_learned_gate_entropy` expose the learned-gate path.
+
+`class_gate.global_residual.warmup` can schedule the residual classifier scale.
+With `mode = "zero_to_learned"` and the same hold/decay epochs, the residual
+contribution is zero in phase 1, linearly restored in phase 2, and fully active
+in phase 3. Diagnostics store the raw `global_residual_scale`,
+`global_residual_schedule_multiplier`, and `global_residual_effective_scale`.
 
 ## Initialization
 
@@ -920,10 +957,16 @@ When enabled, diagnostics now include:
   `branch_evidence_norms` when branch-aware gated pooling is active
 - `class_evidence_gate_weights`, `class_evidence_gate_entropy`,
   `true_class_gate_weights`, `predicted_class_gate_weights`,
+  `class_evidence_learned_gate_weights`,
+  `true_class_learned_gate_weights`,
+  `predicted_class_learned_gate_weights`,
+  `class_evidence_gate_mixing_alpha`,
+  `class_evidence_learned_gate_entropy`,
   `class_evidence_logits`, `class_gated_branch_logits`,
   `class_gated_branch_logit_features`,
-  `class_gated_branch_logit_feature_mode`, `global_residual_logits`, and
-  `global_residual_scale` when class-aware branch-gated pooling is active
+  `class_gated_branch_logit_feature_mode`, `global_residual_logits`,
+  `global_residual_scale`, `global_residual_schedule_multiplier`, and
+  `global_residual_effective_scale` when class-aware branch-gated pooling is active
 - `selected_evidence_tokens` with the saved embedding payload only when
   `save_embeddings=true`
 

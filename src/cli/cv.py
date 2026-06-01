@@ -335,6 +335,7 @@ def main() -> None:
                     cfg.train.loss.gate_weighted_branch_margin
                 ),
                 gate_branch_regret=cfg.train.loss.gate_branch_regret,
+                top_branch_margin=cfg.train.loss.top_branch_margin,
                 analysis=cfg.analysis,
                 early_stopping=cfg.train.early_stopping,
                 checkpointing=cfg.checkpointing,

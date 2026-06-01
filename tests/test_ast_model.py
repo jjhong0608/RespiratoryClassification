@@ -16,6 +16,8 @@ from src.models.model import (
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
     ClassGateGlobalResidualConfig,
+    ClassGateGlobalResidualWarmupConfig,
+    ClassGateMixingConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -305,6 +307,61 @@ def test_class_aware_gated_pooling_returns_class_gate_outputs(
         output.class_gate_weights.sum(dim=-1),
         torch.ones(2, num_classes),
         atol=1e-5,
+    )
+    assert output.learned_class_gate_weights is not None
+    assert output.learned_class_gate_weights.shape == (2, num_classes, 3)
+    assert output.learned_class_gate_entropy is not None
+    assert output.learned_class_gate_entropy.shape == (2, num_classes)
+    assert output.class_gate_mixing_alpha is not None
+    assert torch.isclose(output.class_gate_mixing_alpha, torch.tensor(0.0))
+
+
+def test_class_aware_gated_pooling_uniform_gate_mixing_schedule() -> None:
+    torch.manual_seed(0)
+    pooler = ClassAwareBranchGatedEvidencePooling(
+        hidden_size=16,
+        num_classes=3,
+        cfg=EvidencePoolingConfig(
+            type="class_aware_branch_gated",
+            dropout=0.0,
+            class_gate=ClassGateConfig(
+                gate_mixing=ClassGateMixingConfig(
+                    enabled=True,
+                    start_alpha=1.0,
+                    end_alpha=0.0,
+                    hold_epochs=10,
+                    decay_epochs=20,
+                )
+            ),
+        ),
+    )
+    evidence_tokens = torch.randn(2, 6, 16)
+    branch_ids = torch.tensor([[0, 0, 1, 1, 2, 2], [0, 0, 1, 1, 2, 2]])
+
+    pooler.set_runtime_epoch(1)
+    phase1 = pooler(evidence_tokens, branch_ids)
+    pooler.set_runtime_epoch(20)
+    phase2 = pooler(evidence_tokens, branch_ids)
+    pooler.set_runtime_epoch(31)
+    phase3 = pooler(evidence_tokens, branch_ids)
+
+    uniform_gate = torch.full((2, 3, 3), 1.0 / 3.0)
+    assert phase1.class_gate_weights is not None
+    assert phase1.learned_class_gate_weights is not None
+    assert torch.allclose(phase1.class_gate_weights, uniform_gate, atol=1e-6)
+    assert torch.isclose(phase1.class_gate_mixing_alpha, torch.tensor(1.0))
+    expected_alpha = torch.tensor(10.0 / 19.0)
+    assert torch.isclose(phase2.class_gate_mixing_alpha, expected_alpha)
+    expected_phase2_gate = (
+        float(expected_alpha) * uniform_gate
+        + (1.0 - float(expected_alpha)) * phase2.learned_class_gate_weights
+    )
+    assert torch.allclose(phase2.class_gate_weights, expected_phase2_gate, atol=1e-6)
+    assert torch.isclose(phase3.class_gate_mixing_alpha, torch.tensor(0.0))
+    assert torch.allclose(
+        phase3.class_gate_weights,
+        phase3.learned_class_gate_weights,
+        atol=1e-6,
     )
 
 
@@ -605,8 +662,21 @@ def test_model_forward_uses_class_aware_branch_gated_evidence_pooling(
     assert output.global_residual_logits is not None
     assert output.global_residual_logits.shape == (2, num_classes)
     assert output.global_residual_scale is not None
+    assert output.global_residual_schedule_multiplier is not None
+    assert torch.isclose(output.global_residual_schedule_multiplier, torch.tensor(1.0))
+    assert output.global_residual_effective_scale is not None
+    assert torch.allclose(
+        output.global_residual_effective_scale,
+        output.global_residual_scale,
+    )
     assert output.class_evidence_gate_weights is not None
     assert output.class_evidence_gate_weights.shape == (2, num_classes, 4)
+    assert output.class_evidence_learned_gate_weights is not None
+    assert output.class_evidence_learned_gate_weights.shape == (2, num_classes, 4)
+    assert output.class_evidence_learned_gate_entropy is not None
+    assert output.class_evidence_learned_gate_entropy.shape == (2, num_classes)
+    assert output.class_evidence_gate_mixing_alpha is not None
+    assert torch.isclose(output.class_evidence_gate_mixing_alpha, torch.tensor(0.0))
     assert output.class_gated_branch_logits is not None
     assert output.class_gated_branch_logits.shape == (2, num_classes)
     assert torch.allclose(
@@ -735,6 +805,63 @@ def test_class_aware_model_fixed_residual_scale_is_not_trainable() -> None:
     assert "global_residual_combiner.scale" not in named_parameters
     assert model.global_residual_combiner is not None
     assert torch.isclose(model.global_residual_combiner.scale, torch.tensor(0.2))
+
+
+def test_class_aware_model_applies_residual_warmup_schedule() -> None:
+    model = MultiScaleRdtAstModel(
+        _small_model_config(
+            num_classes=3,
+            evidence_pooling=EvidencePoolingConfig(
+                type="class_aware_branch_gated",
+                dropout=0.0,
+                class_gate=ClassGateConfig(
+                    global_residual=ClassGateGlobalResidualConfig(
+                        enabled=True,
+                        init_scale=0.2,
+                        learnable=False,
+                        warmup=ClassGateGlobalResidualWarmupConfig(
+                            enabled=True,
+                            start_multiplier=0.0,
+                            end_multiplier=1.0,
+                            hold_epochs=10,
+                            decay_epochs=20,
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+    model.eval()
+    input_values = torch.randn(2, 32, 32)
+
+    model.set_runtime_epoch(1)
+    phase1 = model(input_values)
+    model.set_runtime_epoch(20)
+    phase2 = model(input_values)
+    model.set_runtime_epoch(31)
+    phase3 = model(input_values)
+
+    assert phase1.class_evidence_logits is not None
+    assert torch.allclose(phase1.logits, phase1.class_evidence_logits)
+    assert phase1.global_residual_schedule_multiplier is not None
+    assert torch.isclose(phase1.global_residual_schedule_multiplier, torch.tensor(0.0))
+    assert phase1.global_residual_effective_scale is not None
+    assert torch.isclose(phase1.global_residual_effective_scale, torch.tensor(0.0))
+    expected_phase2_multiplier = torch.tensor(9.0 / 19.0)
+    assert phase2.global_residual_schedule_multiplier is not None
+    assert torch.isclose(
+        phase2.global_residual_schedule_multiplier,
+        expected_phase2_multiplier,
+    )
+    assert phase2.global_residual_effective_scale is not None
+    assert torch.isclose(
+        phase2.global_residual_effective_scale,
+        torch.tensor(0.2) * expected_phase2_multiplier,
+    )
+    assert phase3.global_residual_schedule_multiplier is not None
+    assert torch.isclose(phase3.global_residual_schedule_multiplier, torch.tensor(1.0))
+    assert phase3.global_residual_effective_scale is not None
+    assert torch.isclose(phase3.global_residual_effective_scale, torch.tensor(0.2))
 
 
 def test_class_aware_model_rejects_invalid_class_count() -> None:
