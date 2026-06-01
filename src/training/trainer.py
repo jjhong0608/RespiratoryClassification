@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
@@ -56,6 +56,7 @@ class TrainerConfig:
     top_k: int
     run_dir: Path
     num_classes: int
+    class_names: tuple[str, ...] = ()
     loss_type: str = "bce"
     gamma: float = 2.0
     pos_weight: float | None = None
@@ -94,9 +95,11 @@ class TrainerConfig:
     gate_branch_regret: GateBranchRegretConfig = field(
         default_factory=GateBranchRegretConfig
     )
+    gate_branch_regret_positive_threshold_by_class: tuple[float, ...] | None = None
     top_branch_margin: TopBranchMarginConfig = field(
         default_factory=TopBranchMarginConfig
     )
+    top_branch_margin_by_class: tuple[float, ...] | None = None
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
     checkpointing: CheckpointingConfig | None = None
@@ -134,7 +137,7 @@ class LossComponents:
 @dataclass(frozen=True)
 class EpochResult:
     loss: float
-    loss_components: dict[str, float]
+    loss_components: dict[str, Any]
     metrics: EvalMetrics
     probabilities: np.ndarray
     predictions: np.ndarray
@@ -147,6 +150,23 @@ class MonitorRecord:
     score: float
     epoch: int
     path: Path | None
+
+
+@dataclass
+class AdaptiveBranchObjectiveState:
+    top_branch_margin_by_class: list[float] | None
+    gate_branch_regret_positive_threshold_by_class: list[float] | None
+    top_branch_violation_rate_ema_by_class: list[float | None]
+    gate_branch_regret_eligible_rate_ema_by_class: list[float | None]
+    last_update_epoch: int = 0
+
+
+@dataclass
+class BranchObjectiveEpochStats:
+    top_counts: list[int]
+    top_violation_counts: list[int]
+    regret_counts: list[int]
+    regret_eligible_counts: list[int]
 
 
 def resolve_branch_binary_aux_weight(
@@ -382,6 +402,40 @@ class Trainer(LoggingMixin):
             cfg.top_k,
             checkpointing=cfg.checkpointing,
         )
+        self._adaptive_branch_objective_state = (
+            self._init_adaptive_branch_objective_state()
+        )
+
+    def _init_adaptive_branch_objective_state(self) -> AdaptiveBranchObjectiveState:
+        num_classes = int(self.cfg.num_classes)
+        top_margin_by_class: list[float] | None = None
+        if self.cfg.top_branch_margin.enabled:
+            top_margin_by_class = list(
+                self.cfg.top_branch_margin_by_class
+                or (float(self.cfg.top_branch_margin.margin),) * num_classes
+            )
+            if len(top_margin_by_class) != num_classes:
+                raise ValueError(
+                    "top_branch_margin_by_class length must match num_classes"
+                )
+        regret_threshold_by_class: list[float] | None = None
+        if self.cfg.gate_branch_regret.enabled:
+            regret_threshold_by_class = list(
+                self.cfg.gate_branch_regret_positive_threshold_by_class
+                or (float(self.cfg.gate_branch_regret.positive_threshold),)
+                * num_classes
+            )
+            if len(regret_threshold_by_class) != num_classes:
+                raise ValueError(
+                    "gate_branch_regret_positive_threshold_by_class length must "
+                    "match num_classes"
+                )
+        return AdaptiveBranchObjectiveState(
+            top_branch_margin_by_class=top_margin_by_class,
+            gate_branch_regret_positive_threshold_by_class=regret_threshold_by_class,
+            top_branch_violation_rate_ema_by_class=[None] * num_classes,
+            gate_branch_regret_eligible_rate_ema_by_class=[None] * num_classes,
+        )
 
     @staticmethod
     def _epoch_window_active(
@@ -396,6 +450,120 @@ class Trainer(LoggingMixin):
         if int(epoch) < int(start_epoch):
             return False
         return not (end_epoch is not None and int(epoch) > int(end_epoch))
+
+    def _class_names(self) -> tuple[str, ...]:
+        if self.cfg.class_names:
+            return self.cfg.class_names
+        return tuple(f"class_{index}" for index in range(int(self.cfg.num_classes)))
+
+    def _label_value_dict(
+        self, values: Sequence[float | None] | None
+    ) -> dict[str, float | None]:
+        if values is None:
+            return {}
+        return {
+            label_name: values[index]
+            for index, label_name in enumerate(self._class_names())
+        }
+
+    def _branch_objective_state_dict(self) -> dict[str, Any]:
+        state = self._adaptive_branch_objective_state
+        return {
+            "top_branch_margin_by_class": (
+                list(state.top_branch_margin_by_class)
+                if state.top_branch_margin_by_class is not None
+                else None
+            ),
+            "top_branch_margin_by_label": self._label_value_dict(
+                state.top_branch_margin_by_class
+            ),
+            "gate_branch_regret_positive_threshold_by_class": (
+                list(state.gate_branch_regret_positive_threshold_by_class)
+                if state.gate_branch_regret_positive_threshold_by_class is not None
+                else None
+            ),
+            "gate_branch_regret_positive_threshold_by_label": self._label_value_dict(
+                state.gate_branch_regret_positive_threshold_by_class
+            ),
+            "top_branch_violation_rate_ema_by_class": list(
+                state.top_branch_violation_rate_ema_by_class
+            ),
+            "top_branch_violation_rate_ema_by_label": self._label_value_dict(
+                state.top_branch_violation_rate_ema_by_class
+            ),
+            "gate_branch_regret_eligible_rate_ema_by_class": list(
+                state.gate_branch_regret_eligible_rate_ema_by_class
+            ),
+            "gate_branch_regret_eligible_rate_ema_by_label": self._label_value_dict(
+                state.gate_branch_regret_eligible_rate_ema_by_class
+            ),
+            "last_update_epoch": state.last_update_epoch,
+        }
+
+    def _format_label_values(self, values: Mapping[str, float | None]) -> str:
+        if not values:
+            return "{}"
+        return (
+            "{"
+            + ", ".join(
+                f"{label}=" + ("None" if value is None else f"{float(value):.4f}")
+                for label, value in values.items()
+            )
+            + "}"
+        )
+
+    def _class_values_tensor(
+        self,
+        values_by_class: list[float] | None,
+        label_indices: Tensor,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        fallback: float,
+    ) -> Tensor:
+        if values_by_class is None:
+            return torch.full_like(label_indices, float(fallback), dtype=dtype).to(
+                device=device
+            )
+        values = torch.tensor(values_by_class, device=device, dtype=dtype)
+        if label_indices.numel() > 0 and int(label_indices.max().item()) >= len(
+            values_by_class
+        ):
+            raise ValueError("labels contain a class index outside adaptive values")
+        return values[label_indices.to(device=device, dtype=torch.long)]
+
+    def _top_branch_margin_targets(
+        self, label_indices: Tensor, reference: Tensor
+    ) -> Tensor:
+        return self._class_values_tensor(
+            self._adaptive_branch_objective_state.top_branch_margin_by_class,
+            label_indices,
+            device=reference.device,
+            dtype=reference.dtype,
+            fallback=float(self.cfg.top_branch_margin.margin),
+        )
+
+    def _gate_branch_regret_thresholds(
+        self,
+        label_indices: Tensor,
+        reference: Tensor,
+    ) -> Tensor:
+        return self._class_values_tensor(
+            self._adaptive_branch_objective_state.gate_branch_regret_positive_threshold_by_class,
+            label_indices,
+            device=reference.device,
+            dtype=reference.dtype,
+            fallback=float(self.cfg.gate_branch_regret.positive_threshold),
+        )
+
+    def _new_branch_objective_epoch_stats(self) -> BranchObjectiveEpochStats:
+        num_classes = int(self.cfg.num_classes)
+        return BranchObjectiveEpochStats(
+            top_counts=[0] * num_classes,
+            top_violation_counts=[0] * num_classes,
+            regret_counts=[0] * num_classes,
+            regret_eligible_counts=[0] * num_classes,
+        )
 
     def _criterion_on(self, device: torch.device) -> nn.Module:
         if self.cfg.loss_type == "bce":
@@ -1138,7 +1306,8 @@ class Trainer(LoggingMixin):
 
         branch_margin = self._true_class_branch_margins(branch_logits, label_indices)
         top_margin = branch_margin.max(dim=1).values
-        penalties = torch.relu(float(cfg.margin) - top_margin)
+        margin_targets = self._top_branch_margin_targets(label_indices, top_margin)
+        penalties = torch.relu(margin_targets - top_margin)
         class_weights = self._class_margin_weights(
             label_indices,
             branch_logits[:, 0, :],
@@ -1202,7 +1371,11 @@ class Trainer(LoggingMixin):
         )
         best_margin = branch_margin.max(dim=1).values
         gate_expected_margin = (true_class_gate * branch_margin).sum(dim=1)
-        eligible = best_margin > float(cfg.positive_threshold)
+        positive_thresholds = self._gate_branch_regret_thresholds(
+            label_indices,
+            best_margin,
+        )
+        eligible = best_margin > positive_thresholds
         eligible_fraction = eligible.to(dtype=branch_logits.dtype).mean()
         regret_penalty = torch.relu(
             best_margin - gate_expected_margin - float(cfg.tolerance)
@@ -1453,6 +1626,268 @@ class Trainer(LoggingMixin):
             branch_binary_aux_monitor_weight=branch_binary_monitor_weight,
         )
 
+    def _add_counts_by_label(
+        self,
+        label_indices: Tensor,
+        flags: Tensor,
+        *,
+        counts: list[int],
+        flag_counts: list[int],
+    ) -> None:
+        labels_cpu = label_indices.detach().cpu()
+        flags_cpu = flags.detach().cpu().to(torch.bool)
+        for class_index in range(int(self.cfg.num_classes)):
+            class_mask = labels_cpu == class_index
+            count = int(class_mask.sum().item())
+            if count == 0:
+                continue
+            counts[class_index] += count
+            flag_counts[class_index] += int(flags_cpu[class_mask].sum().item())
+
+    def _observe_branch_objective_stats(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        stats: BranchObjectiveEpochStats,
+    ) -> None:
+        if self.cfg.top_branch_margin.auto_margin_by_train_stats.enabled:
+            branch_logits, label_indices = self._branch_margin_inputs(
+                output,
+                labels,
+                loss_name="top branch margin adaptive stats",
+            )
+            if label_indices.numel() > 0:
+                branch_margin = self._true_class_branch_margins(
+                    branch_logits,
+                    label_indices,
+                ).detach()
+                top_margin = branch_margin.max(dim=1).values
+                margin_targets = self._top_branch_margin_targets(
+                    label_indices,
+                    top_margin,
+                )
+                violations = top_margin < margin_targets
+                self._add_counts_by_label(
+                    label_indices,
+                    violations,
+                    counts=stats.top_counts,
+                    flag_counts=stats.top_violation_counts,
+                )
+        if self.cfg.gate_branch_regret.auto_positive_threshold_by_train_stats.enabled:
+            branch_logits, _, label_indices = self._class_aware_branch_margin_inputs(
+                output,
+                labels,
+                loss_name="gate-branch regret adaptive stats",
+            )
+            if label_indices.numel() > 0:
+                branch_margin = self._true_class_branch_margins(
+                    branch_logits,
+                    label_indices,
+                ).detach()
+                best_margin = branch_margin.max(dim=1).values
+                positive_thresholds = self._gate_branch_regret_thresholds(
+                    label_indices,
+                    best_margin,
+                )
+                eligible = best_margin > positive_thresholds
+                self._add_counts_by_label(
+                    label_indices,
+                    eligible,
+                    counts=stats.regret_counts,
+                    flag_counts=stats.regret_eligible_counts,
+                )
+
+    def _update_adaptive_rate(
+        self,
+        previous: float | None,
+        observed: float,
+        *,
+        ema: float,
+    ) -> float:
+        if previous is None:
+            return observed
+        return (float(ema) * previous) + ((1.0 - float(ema)) * observed)
+
+    def _update_adaptive_branch_objective_state(
+        self,
+        *,
+        epoch: int,
+        stats: BranchObjectiveEpochStats,
+    ) -> None:
+        state = self._adaptive_branch_objective_state
+        top_cfg = self.cfg.top_branch_margin.auto_margin_by_train_stats
+        if (
+            top_cfg.enabled
+            and state.top_branch_margin_by_class is not None
+            and epoch >= int(top_cfg.start_epoch)
+            and (epoch - int(top_cfg.start_epoch)) % int(top_cfg.update_interval_epochs)
+            == 0
+        ):
+            for class_index, count in enumerate(stats.top_counts):
+                if count == 0:
+                    continue
+                observed = stats.top_violation_counts[class_index] / float(count)
+                previous = state.top_branch_violation_rate_ema_by_class[class_index]
+                ema_rate = self._update_adaptive_rate(
+                    previous,
+                    observed,
+                    ema=float(top_cfg.ema),
+                )
+                state.top_branch_violation_rate_ema_by_class[class_index] = ema_rate
+                label_name = self._class_names()[class_index]
+                target_rate = float(top_cfg.target_violation_rate_by_label[label_name])
+                current = state.top_branch_margin_by_class[class_index]
+                if ema_rate < target_rate:
+                    current += float(top_cfg.step)
+                else:
+                    current -= float(top_cfg.step)
+                current = min(
+                    max(current, float(top_cfg.min_margin_by_label[label_name])),
+                    float(top_cfg.max_margin_by_label[label_name]),
+                )
+                state.top_branch_margin_by_class[class_index] = current
+        regret_cfg = self.cfg.gate_branch_regret.auto_positive_threshold_by_train_stats
+        if (
+            regret_cfg.enabled
+            and state.gate_branch_regret_positive_threshold_by_class is not None
+            and epoch >= int(regret_cfg.start_epoch)
+            and (epoch - int(regret_cfg.start_epoch))
+            % int(regret_cfg.update_interval_epochs)
+            == 0
+        ):
+            for class_index, count in enumerate(stats.regret_counts):
+                if count == 0:
+                    continue
+                observed = stats.regret_eligible_counts[class_index] / float(count)
+                previous = state.gate_branch_regret_eligible_rate_ema_by_class[
+                    class_index
+                ]
+                ema_rate = self._update_adaptive_rate(
+                    previous,
+                    observed,
+                    ema=float(regret_cfg.ema),
+                )
+                state.gate_branch_regret_eligible_rate_ema_by_class[class_index] = (
+                    ema_rate
+                )
+                label_name = self._class_names()[class_index]
+                target_rate = float(
+                    regret_cfg.target_eligible_rate_by_label[label_name]
+                )
+                current = state.gate_branch_regret_positive_threshold_by_class[
+                    class_index
+                ]
+                if ema_rate < target_rate:
+                    current -= float(regret_cfg.step)
+                else:
+                    current += float(regret_cfg.step)
+                current = min(
+                    max(current, float(regret_cfg.min_threshold_by_label[label_name])),
+                    float(regret_cfg.max_threshold_by_label[label_name]),
+                )
+                state.gate_branch_regret_positive_threshold_by_class[class_index] = (
+                    current
+                )
+        state.last_update_epoch = int(epoch)
+
+    def _branch_objective_stats_summary(
+        self,
+        stats: BranchObjectiveEpochStats,
+    ) -> dict[str, dict[str, float | None]]:
+        labels = self._class_names()
+
+        def rates(counts: list[int], flag_counts: list[int]) -> dict[str, float | None]:
+            return {
+                label_name: (
+                    flag_counts[index] / float(counts[index])
+                    if counts[index] > 0
+                    else None
+                )
+                for index, label_name in enumerate(labels)
+            }
+
+        return {
+            "top_branch_violation_rate_by_label": rates(
+                stats.top_counts,
+                stats.top_violation_counts,
+            ),
+            "gate_branch_regret_eligible_rate_by_label": rates(
+                stats.regret_counts,
+                stats.regret_eligible_counts,
+            ),
+        }
+
+    def _branch_objective_diagnostic_rows(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+    ) -> list[dict[str, Any]]:
+        if output.branch_logits is None:
+            return [{} for _ in range(int(labels.numel()))]
+        rows: list[dict[str, Any]] = [{} for _ in range(int(labels.numel()))]
+        branch_logits = output.branch_logits.detach()
+        if branch_logits.ndim != 3:
+            return rows
+        label_indices = labels.to(device=branch_logits.device, dtype=torch.long)
+        if label_indices.ndim != 1 or int(label_indices.shape[0]) != int(
+            branch_logits.shape[0]
+        ):
+            return rows
+        branch_margin = self._true_class_branch_margins(
+            branch_logits,
+            label_indices,
+        ).detach()
+        top_margin = branch_margin.max(dim=1).values
+        if self.cfg.top_branch_margin.enabled:
+            margin_targets = self._top_branch_margin_targets(label_indices, top_margin)
+            top_violations = top_margin < margin_targets
+            for index, row in enumerate(rows):
+                row["top_branch_margin_target"] = float(
+                    margin_targets[index].detach().cpu().item()
+                )
+                row["top_branch_margin_value"] = float(
+                    top_margin[index].detach().cpu().item()
+                )
+                row["top_branch_margin_violation"] = bool(
+                    top_violations[index].detach().cpu().item()
+                )
+        if (
+            self.cfg.gate_branch_regret.enabled
+            and output.class_evidence_gate_weights is not None
+        ):
+            gate_weights = output.class_evidence_gate_weights.detach()
+            if tuple(gate_weights.shape) == (
+                int(branch_logits.shape[0]),
+                int(branch_logits.shape[2]),
+                int(branch_logits.shape[1]),
+            ):
+                true_class_gate = self._true_class_gate_weights(
+                    gate_weights,
+                    label_indices,
+                    dtype=branch_logits.dtype,
+                )
+                best_margin = branch_margin.max(dim=1).values
+                gate_expected_margin = (true_class_gate * branch_margin).sum(dim=1)
+                thresholds = self._gate_branch_regret_thresholds(
+                    label_indices,
+                    best_margin,
+                )
+                eligible = best_margin > thresholds
+                for index, row in enumerate(rows):
+                    row["gate_branch_regret_positive_threshold"] = float(
+                        thresholds[index].detach().cpu().item()
+                    )
+                    row["gate_branch_regret_best_margin"] = float(
+                        best_margin[index].detach().cpu().item()
+                    )
+                    row["gate_branch_regret_gate_expected_margin"] = float(
+                        gate_expected_margin[index].detach().cpu().item()
+                    )
+                    row["gate_branch_regret_eligible"] = bool(
+                        eligible[index].detach().cpu().item()
+                    )
+        return rows
+
     def _epoch(
         self,
         model: nn.Module,
@@ -1501,6 +1936,15 @@ class Trainer(LoggingMixin):
         branch_binary_probabilities: list[list[float]] = []
         branch_binary_targets: list[int] = []
         diagnostics: list[dict[str, Any]] = []
+        branch_objective_stats = (
+            self._new_branch_objective_epoch_stats()
+            if optimizer is not None
+            and (
+                self.cfg.top_branch_margin.auto_margin_by_train_stats.enabled
+                or self.cfg.gate_branch_regret.auto_positive_threshold_by_train_stats.enabled
+            )
+            else None
+        )
         set_runtime_epoch = getattr(model, "set_runtime_epoch", None)
         if callable(set_runtime_epoch):
             set_runtime_epoch(epoch)
@@ -1520,6 +1964,13 @@ class Trainer(LoggingMixin):
                 use_monitor_total=use_monitor_total,
             )
             loss = loss_components.total
+            if branch_objective_stats is not None:
+                with torch.no_grad():
+                    self._observe_branch_objective_stats(
+                        output,
+                        batch.labels,
+                        branch_objective_stats,
+                    )
 
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
@@ -1609,20 +2060,29 @@ class Trainer(LoggingMixin):
                 )
 
             if any(asdict(self.cfg.analysis.outputs).values()):
-                diagnostics.extend(
-                    build_diagnostic_rows(
-                        batch,
-                        output,
-                        probabilities=batch_probs.cpu(),
-                        predicted_labels=batch_preds.cpu(),
-                        analysis=self.cfg.analysis.outputs,
-                        binary_auxiliary_targets=(
-                            binary_targets_for_batch.detach().cpu()
-                            if binary_targets_for_batch is not None
-                            else None
-                        ),
-                    )
+                diagnostic_rows = build_diagnostic_rows(
+                    batch,
+                    output,
+                    probabilities=batch_probs.cpu(),
+                    predicted_labels=batch_preds.cpu(),
+                    analysis=self.cfg.analysis.outputs,
+                    binary_auxiliary_targets=(
+                        binary_targets_for_batch.detach().cpu()
+                        if binary_targets_for_batch is not None
+                        else None
+                    ),
                 )
+                objective_rows = self._branch_objective_diagnostic_rows(
+                    output,
+                    batch.labels,
+                )
+                for row, objective_row in zip(
+                    diagnostic_rows,
+                    objective_rows,
+                    strict=True,
+                ):
+                    row.update(objective_row)
+                diagnostics.extend(diagnostic_rows)
 
         target_arr = np.asarray(targets, dtype=np.int64)
         prob_arr = np.asarray(probabilities, dtype=np.float64)
@@ -1644,11 +2104,36 @@ class Trainer(LoggingMixin):
             branch_binary_probabilities=branch_binary_prob_arr,
             branch_binary_targets=branch_binary_target_arr,
         )
-        averaged_components = {
+        averaged_components: dict[str, Any] = {
             name: value / float(max(1, component_counts[name]))
             for name, value in component_totals.items()
             if component_counts[name] > 0
         }
+        if branch_objective_stats is not None:
+            self._update_adaptive_branch_objective_state(
+                epoch=epoch,
+                stats=branch_objective_stats,
+            )
+            averaged_components.update(
+                self._branch_objective_stats_summary(branch_objective_stats)
+            )
+        adaptive_state = self._branch_objective_state_dict()
+        averaged_components.update(
+            {
+                "adaptive_top_branch_margin_by_label": adaptive_state[
+                    "top_branch_margin_by_label"
+                ],
+                "adaptive_gate_branch_regret_positive_threshold_by_label": (
+                    adaptive_state["gate_branch_regret_positive_threshold_by_label"]
+                ),
+                "adaptive_top_branch_violation_rate_ema_by_label": adaptive_state[
+                    "top_branch_violation_rate_ema_by_label"
+                ],
+                "adaptive_gate_branch_regret_eligible_rate_ema_by_label": (
+                    adaptive_state["gate_branch_regret_eligible_rate_ema_by_label"]
+                ),
+            }
+        )
         return EpochResult(
             loss=total_loss / float(max(1, total_examples)),
             loss_components=averaged_components,
@@ -1679,8 +2164,8 @@ class Trainer(LoggingMixin):
         train_metrics_history: list[dict[str, Any]] = []
         val_metrics_history: list[dict[str, Any]] = []
         val_metrics_optimized_history: list[dict[str, Any]] = []
-        train_loss_component_history: list[dict[str, float]] = []
-        val_loss_component_history: list[dict[str, float]] = []
+        train_loss_component_history: list[dict[str, Any]] = []
+        val_loss_component_history: list[dict[str, Any]] = []
         best_monitor_value: float | None = None
         epochs_without_improvement = 0
 
@@ -1921,6 +2406,35 @@ class Trainer(LoggingMixin):
                 if len(lrs) == 1
                 else "[" + ", ".join(f"{lr:.8f}" for lr in lrs) + "]"
             )
+            adaptive_state = self._branch_objective_state_dict()
+            if (
+                self.cfg.top_branch_margin.enabled
+                or self.cfg.gate_branch_regret.enabled
+            ):
+                self.logger.info(
+                    "Adaptive branch objectives | Top Branch Margin: %s | "
+                    "Gate-Branch Regret Threshold: %s | "
+                    "Train Top Branch Violation Rate: %s | "
+                    "Train Gate-Branch Regret Eligible Rate: %s",
+                    self._format_label_values(
+                        adaptive_state["top_branch_margin_by_label"]
+                    ),
+                    self._format_label_values(
+                        adaptive_state["gate_branch_regret_positive_threshold_by_label"]
+                    ),
+                    self._format_label_values(
+                        train_components.get(
+                            "top_branch_violation_rate_by_label",
+                            {},
+                        )
+                    ),
+                    self._format_label_values(
+                        train_components.get(
+                            "gate_branch_regret_eligible_rate_by_label",
+                            {},
+                        )
+                    ),
+                )
             if val_result.probabilities.ndim == 1:
                 self.logger.info(
                     "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
@@ -2129,6 +2643,9 @@ class Trainer(LoggingMixin):
                 "branch_binary_aux_monitor_weight": val_components.get(
                     "branch_binary_aux_monitor_weight",
                     0.0,
+                ),
+                "adaptive_branch_objective_state": (
+                    self._branch_objective_state_dict()
                 ),
                 "current_epoch_loss_components": {
                     "train": train_components,

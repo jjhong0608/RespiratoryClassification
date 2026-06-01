@@ -267,6 +267,32 @@ class GateWeightedBranchMarginConfig:
 
 
 @dataclass(frozen=True)
+class AutoMarginByTrainStatsConfig:
+    enabled: bool = False
+    strategy: Literal["ema_violation_controller"] = "ema_violation_controller"
+    start_epoch: int = 1
+    update_interval_epochs: int = 1
+    ema: float = 0.9
+    step: float = 0.0
+    target_violation_rate_by_label: Mapping[str, float] = field(default_factory=dict)
+    min_margin_by_label: Mapping[str, float] = field(default_factory=dict)
+    max_margin_by_label: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AutoPositiveThresholdByTrainStatsConfig:
+    enabled: bool = False
+    strategy: Literal["ema_eligible_controller"] = "ema_eligible_controller"
+    start_epoch: int = 1
+    update_interval_epochs: int = 1
+    ema: float = 0.9
+    step: float = 0.0
+    target_eligible_rate_by_label: Mapping[str, float] = field(default_factory=dict)
+    min_threshold_by_label: Mapping[str, float] = field(default_factory=dict)
+    max_threshold_by_label: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GateBranchRegretConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -275,8 +301,12 @@ class GateBranchRegretConfig:
     mode: Literal["best_margin_regret"] = "best_margin_regret"
     margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
     positive_threshold: float = 0.0
+    positive_threshold_by_label: Mapping[str, float] = field(default_factory=dict)
     tolerance: float = 0.0
     warmup_epochs: int = 0
+    auto_positive_threshold_by_train_stats: AutoPositiveThresholdByTrainStatsConfig = (
+        field(default_factory=AutoPositiveThresholdByTrainStatsConfig)
+    )
 
 
 @dataclass(frozen=True)
@@ -290,6 +320,10 @@ class TopBranchMarginConfig:
     class_weighted: bool = False
     reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
     warmup_epochs: int = 0
+    margin_by_label: Mapping[str, float] = field(default_factory=dict)
+    auto_margin_by_train_stats: AutoMarginByTrainStatsConfig = field(
+        default_factory=AutoMarginByTrainStatsConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -511,6 +545,18 @@ class CvRunConfig:
     checkpointing: CheckpointingConfig | None = None
 
 
+def resolve_label_float_overrides(
+    *,
+    default: float,
+    overrides: Mapping[str, float],
+    label_to_index: Mapping[str, int],
+) -> tuple[float, ...]:
+    values = [float(default)] * len(label_to_index)
+    for label_name, value in overrides.items():
+        values[int(label_to_index[label_name])] = float(value)
+    return tuple(values)
+
+
 class JsonConfigLoader:
     _THRESHOLD_METRICS = {"f1", "balanced_accuracy", "youden_j"}
     _EARLY_STOPPING_MONITORS = {"val_loss"}
@@ -555,6 +601,8 @@ class JsonConfigLoader:
     _TOP_BRANCH_MARGIN_TARGETS = {"branch_logits"}
     _TOP_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
     _TOP_BRANCH_MARGIN_BRANCH_REDUCTIONS = {"max"}
+    _AUTO_MARGIN_STRATEGIES = {"ema_violation_controller"}
+    _AUTO_POSITIVE_THRESHOLD_STRATEGIES = {"ema_eligible_controller"}
     _TIME_SHIFT_MODES = {"zero_pad", "roll"}
     _AUGMENTATION_POLICY_TYPES = {"independent", "one_of"}
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
@@ -596,6 +644,199 @@ class JsonConfigLoader:
             raise ValueError(
                 f"{field_name}.end_epoch must be greater than or equal to start_epoch"
             )
+
+    @staticmethod
+    def _validate_numeric_label_mapping(
+        values: Mapping[str, float],
+        *,
+        field_name: str,
+        label_to_index: Mapping[str, int],
+        min_value: float,
+        strict_min: bool,
+        require_all_labels: bool = False,
+    ) -> None:
+        if not isinstance(values, Mapping):
+            raise TypeError(f"{field_name} must be an object")
+        if require_all_labels and set(values) != set(label_to_index):
+            missing = sorted(set(label_to_index) - set(values))
+            extra = sorted(set(values) - set(label_to_index))
+            raise ValueError(
+                f"{field_name} must contain exactly data.label_to_index keys; "
+                f"missing={missing}, extra={extra}"
+            )
+        for label_name, value in values.items():
+            if not isinstance(label_name, str):
+                raise TypeError(f"{field_name} keys must be label names")
+            if label_name not in label_to_index:
+                raise ValueError(f"{field_name} contains unknown label {label_name!r}")
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{label_name} must be numeric")
+            if strict_min and value <= min_value:
+                raise ValueError(
+                    f"{field_name}.{label_name} must be greater than {min_value}"
+                )
+            if not strict_min and value < min_value:
+                raise ValueError(
+                    f"{field_name}.{label_name} must be greater than or equal to "
+                    f"{min_value}"
+                )
+
+    @staticmethod
+    def _validate_rate_label_mapping(
+        values: Mapping[str, float],
+        *,
+        field_name: str,
+        label_to_index: Mapping[str, int],
+    ) -> None:
+        JsonConfigLoader._validate_numeric_label_mapping(
+            values,
+            field_name=field_name,
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+            require_all_labels=True,
+        )
+        for label_name, value in values.items():
+            if value > 1.0:
+                raise ValueError(f"{field_name}.{label_name} must be within [0, 1]")
+
+    @staticmethod
+    def _validate_auto_margin_by_train_stats(
+        cfg: AutoMarginByTrainStatsConfig,
+        *,
+        label_to_index: Mapping[str, int],
+    ) -> None:
+        field_name = "train.loss.top_branch_margin.auto_margin_by_train_stats"
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if cfg.strategy not in JsonConfigLoader._AUTO_MARGIN_STRATEGIES:
+            raise ValueError(
+                f"{field_name}.strategy must be 'ema_violation_controller'"
+            )
+        if not isinstance(cfg.start_epoch, int):
+            raise TypeError(f"{field_name}.start_epoch must be an integer")
+        if cfg.start_epoch <= 0:
+            raise ValueError(f"{field_name}.start_epoch must be greater than zero")
+        if not isinstance(cfg.update_interval_epochs, int):
+            raise TypeError(f"{field_name}.update_interval_epochs must be an integer")
+        if cfg.update_interval_epochs <= 0:
+            raise ValueError(
+                f"{field_name}.update_interval_epochs must be greater than zero"
+            )
+        if not isinstance(cfg.ema, int | float) or isinstance(cfg.ema, bool):
+            raise TypeError(f"{field_name}.ema must be numeric")
+        if not (0.0 < float(cfg.ema) < 1.0):
+            raise ValueError(f"{field_name}.ema must be within (0, 1)")
+        if not isinstance(cfg.step, int | float) or isinstance(cfg.step, bool):
+            raise TypeError(f"{field_name}.step must be numeric")
+        if cfg.enabled and cfg.step <= 0:
+            raise ValueError(f"{field_name}.step must be greater than zero")
+        has_label_settings = any(
+            (
+                cfg.target_violation_rate_by_label,
+                cfg.min_margin_by_label,
+                cfg.max_margin_by_label,
+            )
+        )
+        if not cfg.enabled and not has_label_settings:
+            return
+        JsonConfigLoader._validate_rate_label_mapping(
+            cfg.target_violation_rate_by_label,
+            field_name=f"{field_name}.target_violation_rate_by_label",
+            label_to_index=label_to_index,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            cfg.min_margin_by_label,
+            field_name=f"{field_name}.min_margin_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=True,
+            require_all_labels=True,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            cfg.max_margin_by_label,
+            field_name=f"{field_name}.max_margin_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=True,
+            require_all_labels=True,
+        )
+        for label_name, min_value in cfg.min_margin_by_label.items():
+            max_value = cfg.max_margin_by_label[label_name]
+            if min_value > max_value:
+                raise ValueError(
+                    f"{field_name}.min_margin_by_label.{label_name} must be less "
+                    "than or equal to max_margin_by_label"
+                )
+
+    @staticmethod
+    def _validate_auto_positive_threshold_by_train_stats(
+        cfg: AutoPositiveThresholdByTrainStatsConfig,
+        *,
+        label_to_index: Mapping[str, int],
+    ) -> None:
+        field_name = (
+            "train.loss.gate_branch_regret.auto_positive_threshold_by_train_stats"
+        )
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if cfg.strategy not in JsonConfigLoader._AUTO_POSITIVE_THRESHOLD_STRATEGIES:
+            raise ValueError(f"{field_name}.strategy must be 'ema_eligible_controller'")
+        if not isinstance(cfg.start_epoch, int):
+            raise TypeError(f"{field_name}.start_epoch must be an integer")
+        if cfg.start_epoch <= 0:
+            raise ValueError(f"{field_name}.start_epoch must be greater than zero")
+        if not isinstance(cfg.update_interval_epochs, int):
+            raise TypeError(f"{field_name}.update_interval_epochs must be an integer")
+        if cfg.update_interval_epochs <= 0:
+            raise ValueError(
+                f"{field_name}.update_interval_epochs must be greater than zero"
+            )
+        if not isinstance(cfg.ema, int | float) or isinstance(cfg.ema, bool):
+            raise TypeError(f"{field_name}.ema must be numeric")
+        if not (0.0 < float(cfg.ema) < 1.0):
+            raise ValueError(f"{field_name}.ema must be within (0, 1)")
+        if not isinstance(cfg.step, int | float) or isinstance(cfg.step, bool):
+            raise TypeError(f"{field_name}.step must be numeric")
+        if cfg.enabled and cfg.step <= 0:
+            raise ValueError(f"{field_name}.step must be greater than zero")
+        has_label_settings = any(
+            (
+                cfg.target_eligible_rate_by_label,
+                cfg.min_threshold_by_label,
+                cfg.max_threshold_by_label,
+            )
+        )
+        if not cfg.enabled and not has_label_settings:
+            return
+        JsonConfigLoader._validate_rate_label_mapping(
+            cfg.target_eligible_rate_by_label,
+            field_name=f"{field_name}.target_eligible_rate_by_label",
+            label_to_index=label_to_index,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            cfg.min_threshold_by_label,
+            field_name=f"{field_name}.min_threshold_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+            require_all_labels=True,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            cfg.max_threshold_by_label,
+            field_name=f"{field_name}.max_threshold_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+            require_all_labels=True,
+        )
+        for label_name, min_value in cfg.min_threshold_by_label.items():
+            max_value = cfg.max_threshold_by_label[label_name]
+            if min_value > max_value:
+                raise ValueError(
+                    f"{field_name}.min_threshold_by_label.{label_name} must be "
+                    "less than or equal to max_threshold_by_label"
+                )
 
     @staticmethod
     def _validate_hold_decay_schedule(
@@ -1557,6 +1798,45 @@ class JsonConfigLoader:
                 "train.loss.gate_branch_regret.positive_threshold must be "
                 "greater than or equal to zero"
             )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            cfg.loss.gate_branch_regret.positive_threshold_by_label,
+            field_name="train.loss.gate_branch_regret.positive_threshold_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_auto_positive_threshold_by_train_stats(
+            cfg.loss.gate_branch_regret.auto_positive_threshold_by_train_stats,
+            label_to_index=label_to_index,
+        )
+        if (
+            cfg.loss.gate_branch_regret.auto_positive_threshold_by_train_stats.enabled
+            and not cfg.loss.gate_branch_regret.enabled
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_regret.auto_positive_threshold_by_train_stats "
+                "requires train.loss.gate_branch_regret.enabled=true"
+            )
+        if cfg.loss.gate_branch_regret.auto_positive_threshold_by_train_stats.enabled:
+            threshold_auto_cfg = (
+                cfg.loss.gate_branch_regret.auto_positive_threshold_by_train_stats
+            )
+            for (
+                label_name,
+                min_value,
+            ) in threshold_auto_cfg.min_threshold_by_label.items():
+                initial_value = (
+                    cfg.loss.gate_branch_regret.positive_threshold_by_label.get(
+                        label_name,
+                        cfg.loss.gate_branch_regret.positive_threshold,
+                    )
+                )
+                max_value = threshold_auto_cfg.max_threshold_by_label[label_name]
+                if initial_value < min_value or initial_value > max_value:
+                    raise ValueError(
+                        "train.loss.gate_branch_regret initial threshold for "
+                        f"{label_name!r} must be within auto min/max bounds"
+                    )
         if not isinstance(
             cfg.loss.gate_branch_regret.tolerance,
             int | float,
@@ -1628,6 +1908,38 @@ class JsonConfigLoader:
                 "train.loss.top_branch_margin.warmup_epochs must be greater than "
                 "or equal to zero"
             )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            cfg.loss.top_branch_margin.margin_by_label,
+            field_name="train.loss.top_branch_margin.margin_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=True,
+        )
+        JsonConfigLoader._validate_auto_margin_by_train_stats(
+            cfg.loss.top_branch_margin.auto_margin_by_train_stats,
+            label_to_index=label_to_index,
+        )
+        if (
+            cfg.loss.top_branch_margin.auto_margin_by_train_stats.enabled
+            and not cfg.loss.top_branch_margin.enabled
+        ):
+            raise ValueError(
+                "train.loss.top_branch_margin.auto_margin_by_train_stats requires "
+                "train.loss.top_branch_margin.enabled=true"
+            )
+        if cfg.loss.top_branch_margin.auto_margin_by_train_stats.enabled:
+            margin_auto_cfg = cfg.loss.top_branch_margin.auto_margin_by_train_stats
+            for label_name, min_value in margin_auto_cfg.min_margin_by_label.items():
+                initial_value = cfg.loss.top_branch_margin.margin_by_label.get(
+                    label_name,
+                    cfg.loss.top_branch_margin.margin,
+                )
+                max_value = margin_auto_cfg.max_margin_by_label[label_name]
+                if initial_value < min_value or initial_value > max_value:
+                    raise ValueError(
+                        "train.loss.top_branch_margin initial margin for "
+                        f"{label_name!r} must be within auto min/max bounds"
+                    )
         if cfg.loss.top_branch_margin.enabled:
             if cfg.loss.top_branch_margin.weight <= 0:
                 raise ValueError(
@@ -2205,12 +2517,29 @@ class JsonConfigLoader:
         loss["gate_weighted_branch_margin"] = GateWeightedBranchMarginConfig(
             **gate_weighted_branch_margin
         )
-        loss["gate_branch_regret"] = GateBranchRegretConfig(
-            **dict(loss.get("gate_branch_regret", {}))
+        gate_branch_regret = dict(loss.get("gate_branch_regret", {}))
+        gate_branch_regret["positive_threshold_by_label"] = dict(
+            gate_branch_regret.get("positive_threshold_by_label", {})
         )
-        loss["top_branch_margin"] = TopBranchMarginConfig(
-            **dict(loss.get("top_branch_margin", {}))
+        gate_branch_regret["auto_positive_threshold_by_train_stats"] = (
+            AutoPositiveThresholdByTrainStatsConfig(
+                **dict(
+                    gate_branch_regret.get(
+                        "auto_positive_threshold_by_train_stats",
+                        {},
+                    )
+                )
+            )
         )
+        loss["gate_branch_regret"] = GateBranchRegretConfig(**gate_branch_regret)
+        top_branch_margin = dict(loss.get("top_branch_margin", {}))
+        top_branch_margin["margin_by_label"] = dict(
+            top_branch_margin.get("margin_by_label", {})
+        )
+        top_branch_margin["auto_margin_by_train_stats"] = AutoMarginByTrainStatsConfig(
+            **dict(top_branch_margin.get("auto_margin_by_train_stats", {}))
+        )
+        loss["top_branch_margin"] = TopBranchMarginConfig(**top_branch_margin)
         kwargs["loss"] = LossConfig(**loss)
         kwargs["sampler"] = SamplerConfig(**dict(raw.get("sampler", {})))
         kwargs["early_stopping"] = EarlyStoppingConfig(

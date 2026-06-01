@@ -1,996 +1,332 @@
-# Multi-Scale Event-MIL Respiratory Classification
+# Multi-Scale RDT-AST Respiratory Classification
 
-This repo trains and evaluates clip-level respiratory sound classifiers with a
-single supported encoder type: `multiscale_rdt_ast`.
+This repository trains and evaluates clip-level respiratory sound classifiers
+with a config-driven PyTorch pipeline. The active encoder is
+`multiscale_rdt_ast`: a multi-scale AST-style frontend with branch adapters,
+RDT refinement, MIL evidence heads, and optional class-aware branch gating.
 
-- One `.wav` file is one training example.
-- The frontend still uses local AST-style `fbank` extraction.
-- Hugging Face `ASTModel`, latent-query pooling, and branch-summary-token
-  initialization are intentionally removed from the active path.
-- Training, evaluation, cross-validation, checkpointing, diagnostics, and
-  threshold optimization remain config-driven.
+The current documentation is intentionally limited to the maintained config
+surface and model behavior. Historical experiment catalogs are not kept in
+`README.md`; experiment outputs belong under `checkpoints/`.
 
 ## Setup
 
+Use the project respiratory environment:
+
 ```bash
 mamba activate respiratory
-pip install -r requirements.txt
 ```
 
-## Canonical Configs
+or run commands directly with the known interpreter:
 
-- Binary B0: `configs/training_event_mil_b0.json`
-- Binary B1: `configs/training_event_mil_b1.json`
-- Binary B2: `configs/training_event_mil_b2.json`
-- Binary B3: `configs/training_event_mil_b3.json`
-- Binary training example: `configs/training_multiscale_rdt.json`
-- Binary CV example: `configs/cv_multiscale_rdt.json`
-- Binary evaluation: `configs/eval_multiscale_rdt.json`
-- Multiclass training example: `configs/training_multiclass.json`
-- 4-class pretraining: `configs/training_4class_pretrain_weighted_ce_branch_bin_aux.json`
-- 4-class pretraining with cosine branch-binary schedule:
-  `configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030.json`
-- 4-class pretraining with cosine schedule and sqrt-inverse sampler:
-  `configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030_sqrt_sampler.json`
-
-`training_multiscale_rdt.json`, `cv_multiscale_rdt.json`, and
-`training_multiclass.json` are the "full" event-MIL examples with branch
-auxiliary supervision enabled and RDT refinement active.
-
-## 4-Class Supervised Pretraining
-
-`configs/training_4class_pretrain_weighted_ce_branch_bin_aux.json` trains a
-single-label 4-class model over `normal`, `crackle`, `wheeze`, and `rhonchi`.
-It is not a multilabel setup: every clip has exactly one main class target.
-
-The canonical pretraining objective is:
-
-- Main loss: 4-class cross entropy.
-- Class weights: `1 / sqrt(train_count)` normalized so the mean class weight is
-  exactly `1.0`.
-- Weight source: training split only; validation loss reuses the train-derived
-  class weights.
-- Branch binary auxiliary: normal-vs-abnormal BCE on one shared branch-level
-  binary head, with `normal -> 0` and `crackle/wheeze/rhonchi -> 1`.
-- Branch binary `pos_weight`: `sqrt(normal_count / abnormal_count)` computed
-  from the training split.
-
-`branch_binary_auxiliary` is separate from the older `branch_auxiliary`. The
-canonical 4-class pretraining config disables the older branch auxiliary, so
-the total loss is weighted CE plus `0.3 * branch_binary_bce`.
-
-`configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030.json`
-keeps the same 4-class model and train-derived weights, but schedules the
-branch-binary auxiliary weight during training:
-
-- Schedule: `cosine_floor`.
-- Epoch 1 branch-binary weight: `0.4`.
-- Epoch 120 branch-binary weight: `0.1`.
-- Formula:
-  `min_weight + (max_weight - min_weight) * 0.5 * (1 + cos(pi * progress))`.
-- `progress = (epoch - 1) / (total_epochs - 1)`, clamped to `[0, 1]`.
-
-Training uses the scheduled objective:
-
-```text
-L_train = L_4cls + lambda(epoch) * L_branch_binary
+```bash
+PYTHONPATH=. /Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m pytest tests/test_ast_config.py
 ```
 
-Validation logs both the scheduled total and a fixed monitor total. `val_loss`
-and `best_loss` are intentionally tied to the fixed monitor total, not the
-decreasing scheduled validation objective:
+The dataset paths are provided by JSON config files. One `.wav` file is treated
+as one clip-level sample.
 
-```text
-L_monitor = L_4cls + 0.3 * L_branch_binary
-```
+## Config Files
 
-The config also enables monitor-based checkpoint retention:
+Only the active config files are kept under `configs/`.
 
-- `val_macro_f1`: maximize and keep top 3.
-- `val_macro_recall`: maximize and keep top 3.
-- `val_loss` or `val_loss_total_monitor`: minimize and keep top 3.
-- `last`: keep the latest 3 epoch checkpoints while also updating `last.pt`.
-
-## Sqrt-Inverse Class Sampler
-
-`configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030_sqrt_sampler.json`
-adds train-only exposure correction to the cosine-scheduled 4-class pretraining
-setup. It keeps weighted CE, branch-binary BCE, the `0.4 -> 0.1` cosine
-schedule, and fixed monitor loss unchanged.
-
-For each training sample, the sampler weight is:
-
-```text
-s_i = 1 / sqrt(n_yi)
-```
-
-`n_yi` is the training-split count for the sample's class. Validation,
-evaluation, and test loaders never use this sampler. When the sampler is
-enabled, the train loader uses `WeightedRandomSampler` and disables shuffle.
-
-This sampler corrects input exposure imbalance, while weighted CE still
-corrects loss contribution imbalance. Using both is intentional for this
-experiment. It is less aggressive than full inverse-frequency balancing because
-expected class sampling mass is proportional to `sqrt(class_count)`, not equal
-for every class.
-
-Monitor normal false positives, normal recall, macro recall, Brier score, and
-confusion matrices. The sampler plus weighted CE strengthens minority classes,
-so calibration and normal-class specificity can move in the opposite direction
-from minority recall.
-
-## C0-C5 Experiments
-
-Use `best_loss_*.pt` checkpoints as the primary comparison target for C0-C5.
-`best_f1_*.pt` checkpoints are still saved, but treat them as diagnostic or
-reference artifacts because validation-threshold tuning can overfit binary F1.
-
-| Study | Config | Purpose |
-|---|---|---|
-| C0 | `configs/training_c0_b3_focal_patience8.json` | B3 reproduction with focal loss and shorter patience |
-| C1 | `configs/training_c1_b3_bce_aux01_patience8.json` | B3 with BCE and branch auxiliary weight `0.1` |
-| C2 | `configs/training_c2_b1_bce_aux01_patience8.json` | B1 event-MIL baseline without RDT |
-| C3 stage 1 | `configs/training_c3_stage1_b1_bce_aux01.json` | Train event detectors without RDT |
-| C3 stage 2 | `configs/training_c3_stage2_b3_from_stage1.json` | Warm-start B3 RDT from stage 1 |
-| C4 3-scale | `configs/training_c4_3scale_bce_aux01_rdt3.json` | Remove the `(2, 128)` branch |
-| C4 4-scale | `configs/training_c4_4scale_bce_aux01_rdt3.json` | Matched 4-scale comparator |
-| C5 top-2 | `configs/training_c5_top2_bce_aux01_rdt3.json` | Default top-2 evidence bottleneck |
-| C5 top-4 | `configs/training_c5_top4_bce_aux01_rdt3.json` | Wider top-4 evidence bottleneck |
-
-C3 staged training:
-
-1. Run `python -m src.cli.training --config configs/training_c3_stage1_b1_bce_aux01.json`.
-2. Find the stage-1 `best_loss_*.pt` checkpoint under `checkpoints/respiratory_c3_stage1_b1_bce_aux01/`.
-3. Put that path into `train.initialization.checkpoint_path` in `configs/training_c3_stage2_b3_from_stage1.json`.
-4. Run `python -m src.cli.training --config configs/training_c3_stage2_b3_from_stage1.json`.
-
-Stage 2 intentionally uses `strict=false` and `load_optimizer_state=false`
-because it turns on RDT and uses different learning rates.
-
-For transfer-style warm-starts where the checkpoint and target model share most
-layers but differ in class-dependent heads, set
-`train.initialization.skip_mismatched_shapes=true`. This loads only tensors with
-matching keys and shapes, keeps mismatched target tensors newly initialized, and
-requires `load_optimizer_state=false`.
-
-## Next Experiment Series: D/E/F
-
-Use the same checkpoint-selection policy as C0-C5: compare experiments with
-`best_loss_*.pt`, and treat `best_f1_*.pt` as a diagnostic or reference
-checkpoint because validation-threshold tuning can overfit F1.
-
-| Study | Config | Purpose |
-|---|---|---|
-| D1 stage 1 | `configs/training_d1_c3_3scale_stage1.json` | Three-scale B1 detector warm-start stage |
-| D1 stage 2 | `configs/training_d1_c3_3scale_stage2.json` | Three-scale B3 warm-start from D1 stage 1 |
-| D2 | `configs/training_d2_stage2_no_rdt_from_stage1.json` | Warm-started stage 2 with RDT still disabled |
-| D3 | `configs/training_d3_direct_b3_low_lr.json` | Direct B3 training with lower learning rates |
-| D4 top-1 | `configs/training_d4_c3_top1_stage2.json` | C3 stage 2 with one selected token per branch |
-| D4 top-3 | `configs/training_d4_c3_top3_stage2.json` | C3 stage 2 with three selected tokens per branch |
-| D5 seed 0 stage 1 | `configs/training_d5_c3_stage1_seed0.json` | C3 stage 1 seed-0 repeat |
-| D5 seed 0 stage 2 | `configs/training_d5_c3_stage2_seed0.json` | C3 stage 2 seed-0 repeat |
-| D5 seed 1 stage 1 | `configs/training_d5_c3_stage1_seed1.json` | C3 stage 1 seed-1 repeat |
-| D5 seed 1 stage 2 | `configs/training_d5_c3_stage2_seed1.json` | C3 stage 2 seed-1 repeat |
-| D5 seed 2 stage 1 | `configs/training_d5_c3_stage1_seed2.json` | C3 stage 1 seed-2 repeat |
-| D5 seed 2 stage 2 | `configs/training_d5_c3_stage2_seed2.json` | C3 stage 2 seed-2 repeat |
-| E1 | `configs/training_e1_c3_attention_logit_stage2.json` | Select evidence with pre-softmax MIL attention logits |
-| E2 | `configs/training_e2_c3_instance_logit_stage2.json` | Select evidence with token-level instance logits |
-| E3 | `configs/training_e3_c3_attention_temp05_stage2.json` | Use MIL attention temperature `0.5` |
-| E4 | `configs/training_e4_c3_entropy001_stage2.json` | Add attention entropy loss with weight `0.001` |
-| F1 | `configs/training_f1_c3_branch_aux_weights_stage2.json` | Use branch-specific auxiliary-loss weights |
-| F2 | `configs/training_f2_c3_exclude_branch4_evidence_stage2.json` | Exclude the fourth scale from selected evidence only |
-
-Staged D/E/F runs follow the C3 workflow:
-
-1. Run the matching stage-1 config.
-2. Find that run's `best_loss_*.pt` checkpoint.
-3. Put the checkpoint path into the stage-2 config at `train.initialization.checkpoint_path`.
-4. Run the stage-2 config.
-
-Stage-2 templates keep `train.initialization.checkpoint_path = null` until you
-choose the stage-1 checkpoint manually.
-
-## Round G Experiments
-
-Round G treats `configs/training_d3_direct_b3_low_lr.json` as the current
-mainline: direct low-LR B3 training with RDT on, four scales, top-2 evidence,
-BCE loss, branch auxiliary weight `0.1`, and no warm-start.
-
-Use `best_loss_*.pt` as the primary comparison checkpoint. `best_f1_*.pt`
-remains useful as a diagnostic/reference checkpoint, but do not use it as the
-main model-selection criterion for Round G.
-
-| Study | Config | Purpose |
-|---|---|---|
-| G1 seed0/1/2/42/43 | `configs/training_g1_d3_seed*.json` | Repeat D3 direct low-LR across seeds |
-| G2 | `configs/training_g2_direct_low_lr_no_rdt.json` | Direct no-RDT low-LR control |
-| G3 | `configs/training_g3_direct_low_lr_3scale.json` | Direct 3-scale control without the `2x128` branch |
-| G4 | `configs/training_g4_direct_low_lr_aux005.json` | Branch auxiliary weight `0.05` |
-| G5 | `configs/training_g5_direct_low_lr_no_aux.json` | Disable branch auxiliary loss |
-| G6 | `configs/training_g6_direct_low_lr_focal_gamma1.json` | Focal loss with gamma `1.0` |
-| G7 | `configs/training_g7_direct_low_lr_focal_gamma2.json` | Focal loss with gamma `2.0` |
-
-Interpretation:
-
-- `G1` checks whether D3 is robust across seeds.
-- `G2` tests whether RDT contributes under direct low-LR training.
-- `G3` tests whether the `2x128` branch is necessary.
-- `G4/G5` test branch auxiliary sensitivity.
-- `G6/G7` retest focal loss under the low-LR setting.
-
-Report these metrics from the `best_loss_*.pt` checkpoint:
-
-- `F1@0.5`
-- `F1@opt`
-- `ROC-AUC`
-- `PR-AUC`
-- `Brier`
-- `balanced accuracy`
-- `optimal threshold`
-
-Suggested execution order:
-
-1. `G2`
-2. `G3`
-3. `G4` and `G5`
-4. `G6` and `G7`
-5. `G1` seed repeats
-
-## H Round: 5-Seed Final Candidate Ablation
-
-H Round uses the existing G1/D3 5-seed mainline as H0 reference: four scales,
-RDT on, top-2 evidence, BCE loss, branch auxiliary weight `0.1`, low learning
-rates, no warm-start, and seeds `0`, `1`, `2`, `42`, and `43`.
-
-Use `best_loss_*.pt` as the primary checkpoint for H Round comparisons.
-`best_f1_*.pt` remains diagnostic/reference only. Compare mean, standard
-deviation, min, max, and worst seed; do not select the final candidate from a
-single best seed.
-
-| Round | Configs | Purpose |
-|---|---|---|
-| H0 gated | `configs/training_h0_branch_gated_seed*.json` | Compare branch-aware gated evidence pooling against H0/G1 mean pooling |
-| H1 | `configs/training_h1_no_rdt_seed*.json` | Test RDT necessity |
-| H2 | `configs/training_h2_no_aux_seed*.json` | Test branch auxiliary necessity |
-| H3 | `configs/training_h3_3scale_seed*.json` | Test `2x128` branch necessity |
-
-Interpretation:
-
-- `H1` vs `H0/G1` decides whether RDT remains in the final candidate.
-- `H2` vs `H0/G1` decides whether branch auxiliary loss remains.
-- `H3` vs `H0/G1` decides whether the `2x128` branch remains.
-- H0 branch-gated vs H0/G1 decides whether branch-aware evidence pooling
-  improves the final readout.
-
-Dynamic shapes:
-
-- 4-scale top-2 -> `U0: [B, 8, D]`, `H_ctx` length `1916`
-- 3-scale top-2 -> `U0: [B, 6, D]`, `H_ctx` length `893`
-
-## Data Augmentation
-
-AUG0-AUG3 isolate train-time augmentation effects on the same H0 branch-gated
-model. Keep model, optimizer, loss, early stopping, and seed policy fixed across
-the four configs.
-
-| Study | Config | Purpose |
-|---|---|---|
-| AUG0 | `configs/training_aug0_h0_gated_no_aug.json` | H0 gated baseline without augmentation |
-| AUG1 | `configs/training_aug1_h0_gated_waveform_aug.json` | Waveform augmentation only |
-| AUG2 | `configs/training_aug2_h0_gated_fbank_aug.json` | Fbank augmentation only |
-| AUG3 | `configs/training_aug3_h0_gated_waveform_fbank_aug.json` | Combined waveform and fbank augmentation |
-
-Placement:
-
-- Waveform augmentation runs after waveform preprocessing and before AST fbank
-  extraction.
-- Fbank augmentation runs after normalized fbank extraction and transpose to
-  `[1024, 128]`.
-- Augmentation is train-only. Validation, evaluation, and test splits are never
-  augmented.
-- CV train folds may augment; CV validation folds do not.
-
-Compare AUG0-AUG3 with `best_loss_*.pt` checkpoints. Report `F1@0.5`,
-`F1@opt`, `ROC-AUC`, `PR-AUC`, `Brier`, `balanced accuracy`, and optimal
-threshold.
-
-## One-of and Token-Level Augmentation
-
-AUG4/PT1/PT2/PT3 keep the same H0 branch-aware gated model as AUG0-AUG3. Only
-input augmentation policy and model-internal token regularization differ.
-
-| Config | Purpose |
+| File | Role |
 |---|---|
-| `configs/training_aug4_h0_gated_oneof.json` | One-of augmentation only |
-| `configs/training_pt1_h0_gated_oneof_branch_event_dropout.json` | One-of + branch event token dropout |
-| `configs/training_pt2_h0_gated_oneof_selected_evidence_dropout.json` | One-of + selected evidence dropout |
-| `configs/training_pt3_h0_gated_oneof_both_token_dropouts.json` | One-of + both token dropouts |
+| `configs/training_CNUH_new_test_CNUH_3classes.json` | Current CNUH 3-class class-aware training run. |
+| `configs/training_CNUH.json` | Baseline CNUH 3-class training config. |
+| `configs/cv_multiscale_rdt.json` | Cross-validation config for disease-group experiments. |
+| `configs/eval_multiscale_rdt.json` | Evaluation config for a saved checkpoint. |
 
-The one-of policy samples exactly one recipe per training clip: `none`,
-`waveform`, `fbank`, or `both_light`. This keeps augmentation diversity without
-always stacking waveform and fbank perturbations on the same sample.
+Training and CV configs share the same main schema: `experiment`, `data`,
+`model`, `train`, and `analysis`. CV adds `folds`; evaluation adds
+`checkpoint_path` and `threshold_optimization`.
 
-Token-level regularizers are train-only:
+## Running
 
-- Branch event token dropout runs after frequency-attention pooling and before
-  branch MIL. Dropped event tokens are zeroed and masked so branch MIL cannot
-  attend to them.
-- Selected evidence dropout runs after top-k evidence selection and before RDT.
-  It zeros selected evidence state tokens `U0` while leaving `H_ctx`, selected
-  indices, scores, and branch IDs unchanged.
-- Both dropouts guarantee at least one kept token at their configured branch
-  granularity.
-
-## Train
-
-Binary example:
+Run training:
 
 ```bash
-python -m src.cli.training --config configs/training_multiscale_rdt.json
+PYTHONPATH=. /Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python src/cli/training.py --config configs/training_CNUH_new_test_CNUH_3classes.json
 ```
 
-Multiclass example:
+Run the baseline training config:
 
 ```bash
-python -m src.cli.training --config configs/training_multiclass.json
+PYTHONPATH=. /Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python src/cli/training.py --config configs/training_CNUH.json
 ```
 
-Artifacts are written under `experiment.output_dir/experiment.name/`.
-
-Training keeps:
-
-- `last.pt`
-- `best_loss_*.pt`
-- `best_f1_*.pt`
-
-For C0-C5, D/E/F, and Round G analysis and evaluation, start from
-`best_loss_*.pt`.
-
-## Evaluate
+Run cross-validation:
 
 ```bash
-python -m src.cli.evaluate --config configs/eval_multiscale_rdt.json
+PYTHONPATH=. /Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python src/cli/cv.py --config configs/cv_multiscale_rdt.json
 ```
 
-Evaluation writes:
-
-- `eval_metrics.json`
-- `eval_predictions.csv`
-- `eval_diagnostics.jsonl` when diagnostics are enabled
-
-Binary evaluation keeps fixed-threshold (`0.5`) metrics at the top level and
-also stores:
-
-- `decision_threshold`
-- `threshold_optimization`
-- `optimized_metrics`
-
-Threshold optimization is checkpoint-driven and only applies to one-logit binary
-outputs. Two-class class-aware CE uses softmax + argmax, so it is reported as
-disabled with `decision_threshold = null`.
-
-## Cross-Validation
+Run evaluation:
 
 ```bash
-python -m src.cli.cv --config configs/cv_multiscale_rdt.json
+PYTHONPATH=. /Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python src/cli/evaluate.py --config configs/eval_multiscale_rdt.json
 ```
 
-Each fold is trained independently under
-`experiment.output_dir/experiment.name/fold_x/`.
+Outputs are written under `experiment.output_dir/experiment.name/` unless the
+CLI config specifies a fold-specific subdirectory.
 
-## Architecture
+## Model Architecture
 
-The default model consumes:
+`model.encoder.type` must be `multiscale_rdt_ast`.
+
+The encoder consumes local AST-style fbank tensors shaped by
+`data.preprocessing.ast_fbank`. The current path does not use Hugging Face
+`ASTModel`; the frontend, branch processing, and evidence pooling are local
+modules.
+
+The main components are:
+
+- `patch_branches`: multi-scale patch streams over the fbank input.
+- `shared_stem_depth`: common Transformer blocks shared before branch-specific processing.
+- `adapter_depth`: branch-specific Transformer depth after the shared stem.
+- `rdt`: recurrent refinement over branch evidence tokens.
+- `branch MIL heads`: branch-level instance logits, attention, and pooled evidence.
+- `branch_binary_auxiliary`: optional normal-vs-abnormal branch supervision.
+- `evidence_pooling`: combines branch evidence into model-level evidence.
+- `classifier`: in class-aware mode, acts as the global residual classifier.
+
+`model.encoder.adaptation.mode` controls trainability. `full` trains the
+encoder; `frozen` freezes the encoder adaptation path while leaving heads and
+new task-specific modules trainable according to model construction.
+
+## Evidence Pooling and Gates
+
+`model.encoder.architecture.evidence_pooling.type` selects how branch evidence
+is combined.
+
+- `mean`: averages branch evidence without a learned evidence gate.
+- `branch_gated`: learns one branch gate per sample, shaped `[B, R]`.
+- `class_aware_branch_gated`: learns one gate per sample and class, shaped `[B, C, R]`.
+
+In `class_aware_branch_gated`, the model computes class-specific evidence
+embeddings and class evidence logits. The final logits are:
 
 ```text
-input_values: [B, 1024, 128]
+final_logits = class_evidence_logits + effective_residual_scale * global_residual_logits
 ```
 
-It applies this event-MIL-first flow:
+The global residual path reuses `model.classifier`. Its input combines
+class-aware gated evidence features and class-gated branch-logit features.
 
-```text
-[B, 1024, 128]
-  -> unsqueeze channel
-[B, 1, 1024, 128]
-  -> four patch tokenizers
-  -> learned patch position + scale embeddings
-  -> shared branch-wise transformer stem
-  -> scale-specific transformer adapters
-  -> reshape each branch to [B, T_s, F_s, D]
-  -> learned frequency-attention pooling
-  -> branch event tokens
-  -> branch MIL attention heads
-  -> top-k evidence tokens per branch
-U0: [B, 8, D], H_ctx: [B, 1916, D]
-  -> optional recurrent RDT refinement over U using H_ctx
-  -> evidence pooling: mean or branch-aware gated
-  -> fuse evidence embedding, mean branch embedding, and branch logits
-  -> fusion projector
-[B, D]
-  -> classifier
-```
+### Class Gate Options
 
-Default patch token geometry:
+The active class-aware gate config lives under
+`model.encoder.architecture.evidence_pooling.class_gate`.
 
-- `(16, 16)` patch with `(8, 16)` stride -> `1016` patch tokens -> `127`
-  temporal event tokens
-- `(8, 32)` patch with `(4, 32)` stride -> `1020` patch tokens -> `255`
-  temporal event tokens
-- `(4, 64)` patch with `(2, 64)` stride -> `1022` patch tokens -> `511`
-  temporal event tokens
-- `(2, 128)` patch with `(1, 128)` stride -> `1023` patch tokens -> `1023`
-  temporal event tokens
+- `mode="query"` uses learnable class queries.
+- `scorer="diagonal"` scores each class-specific evidence embedding with a class-specific diagonal scorer.
+- `global_residual.enabled` controls whether the residual classifier contributes to final logits.
+- `global_residual.warmup` can hold residual contribution near zero early and increase it later.
+- `evidence_auxiliary.enabled` adds cross entropy on `class_evidence_logits`.
+- `branch_logit_feature.mode="raw"` feeds raw class-gated branch logits to the residual path.
+- `branch_logit_feature.mode="hardest_negative_margin"` feeds label-free class margin features.
+- `gate_mixing.enabled` mixes uniform gates into learned gates during early epochs.
 
-The concatenated event context length is `1916`. With the default
-`top_tokens_per_branch = 2`, the initial evidence state is `U0: [B, 8, D]`.
-The C4 3-scale ablation removes the final branch, so the event context length
-becomes `893` and top-2 evidence selection yields `U0: [B, 6, D]`. The C5
-top-4 ablation keeps four branches and yields `U0: [B, 16, D]`.
-
-Dynamic selected-evidence lengths:
-
-- 3-scale top-2 -> `6`
-- 4-scale top-1 -> `4`
-- 4-scale top-2 -> `8`
-- 4-scale top-3 -> `12`
-- 4-scale top-4 -> `16`
-- 4-scale top-2 with `exclude_branches_from_evidence = [3]` -> `6`
-
-`exclude_branches_from_evidence` uses zero-based branch indices. Excluding
-branch `3` removes the fourth scale from `U0` only; it still contributes to
-`H_ctx`, branch logits, branch embeddings, auxiliary loss, and final fusion.
-For that F2 setting, `H_ctx` remains length `1916`.
-
-Default encoder hyperparameters:
-
-- `hidden_size = 192`
-- `num_attention_heads = 4`
-- `mlp_ratio = 2.0`
-- `hidden_dropout_prob = 0.1`
-- `attention_probs_dropout_prob = 0.1`
-- `layer_norm_eps = 1e-6`
-- `shared_stem_depth = 2`
-- `adapter_depth = 1`
-- `rdt.enabled = false`
-- `rdt.steps = 3`
-- `rdt.top_tokens_per_branch = 2`
-- `rdt.gated_residual = true`
-- `rdt.layerscale_init = 0.01`
-
-Classifier pooling remains config-visible as `latent_mean`, but evidence
-readout is controlled by `model.encoder.architecture.evidence_pooling`.
-
-## Evidence Pooling
-
-`evidence_pooling.type = "mean"` is the default legacy behavior. Selected
-evidence tokens, after optional RDT refinement, are averaged uniformly.
-
-`evidence_pooling.type = "branch_gated"` groups selected evidence tokens by
-their source branch, averages each branch's selected tokens into a branch
-evidence summary, computes a gate from those branch evidence summaries only,
-and uses the gated weighted sum as the evidence embedding.
-
-`evidence_pooling.type = "class_aware_branch_gated"` keeps the branch summaries
-but computes class-specific gate weights with shape `[batch, class, branch]`.
-The class gate uses learnable class queries and a diagonal class evidence scorer.
-Its evidence logits can be combined with the configured classifier as a global
-residual: `final_logits = class_evidence_logits + scale * global_residual_logits`.
-
-Branch logits are not used as gate input. Mean branch embeddings are not used as
-gate input. For `class_aware_branch_gated`, the residual classifier reuses the
-class-aware gated evidence embeddings by flattening `[batch, class, hidden]` to
-`[batch, class * hidden]`, then concatenates branch logits after applying the
-same class-aware gate into `class_gated_branch_logits` with shape
-`[batch, class]`. The raw mean branch embedding and raw flattened branch logits
-are only used by the legacy `mean` and `branch_gated` fusion paths.
-
-The residual classifier can choose how to consume the class-gated branch-logit
-feature through
-`model.encoder.architecture.evidence_pooling.class_gate.branch_logit_feature.mode`.
-`"raw"` preserves the original `class_gated_branch_logits`. The optional
-`"hardest_negative_margin"` mode is label-free and replaces the residual input
-feature with `score[c] - max(score[j] for j != c)`, so train and evaluation use
-the same feature semantics. Diagnostics keep both the raw score and the actual
-residual feature.
-
-H0 branch-gated configs:
-
-- `configs/training_h0_branch_gated_seed0.json`
-- `configs/training_h0_branch_gated_seed1.json`
-- `configs/training_h0_branch_gated_seed2.json`
-- `configs/training_h0_branch_gated_seed42.json`
-- `configs/training_h0_branch_gated_seed43.json`
-
-Compare H0 mean pooling against H0 branch-gated pooling with `best_loss_*.pt`
-checkpoints. Report mean, standard deviation, min, max, and worst seed; do not
-choose a final candidate from a single best seed.
-
-## B0 / B1 / B2 / B3 Modes
-
-The experiment family is controlled by config only:
-
-- `B0`: `rdt.enabled = false`, `branch_auxiliary.enabled = false`
-- `B1`: `rdt.enabled = false`, `branch_auxiliary.enabled = true`
-- `B2`: `rdt.enabled = true`, `rdt.steps = 2`, `branch_auxiliary.enabled = true`
-- `B3`: `rdt.enabled = true`, `rdt.steps = 3`, `branch_auxiliary.enabled = true`
-
-`rdt.enabled` is the switch that disables refinement. `steps` is still stored
-in the config when RDT is off, but it is ignored by the forward path.
-
-## Config Shape
-
-The active schema is:
-
-```json
-{
-  "model": {
-    "encoder": {
-      "type": "multiscale_rdt_ast",
-      "adaptation": {
-        "mode": "full",
-        "num_layers": 0
-      },
-      "architecture": {
-        "hidden_size": 192,
-        "num_attention_heads": 4,
-        "mlp_ratio": 2.0,
-        "hidden_dropout_prob": 0.1,
-        "attention_probs_dropout_prob": 0.1,
-        "layer_norm_eps": 1e-6,
-        "shared_stem_depth": 2,
-        "adapter_depth": 1,
-        "rdt": {
-          "enabled": true,
-          "steps": 3,
-          "top_tokens_per_branch": 2,
-          "gated_residual": true,
-          "layerscale_init": 0.01,
-          "evidence_score_source": "attention_weight",
-          "exclude_branches_from_evidence": []
-        },
-        "mil": {
-          "attention_temperature": 1.0
-        },
-        "evidence_pooling": {
-          "type": "mean",
-          "gate_hidden_size": null,
-          "dropout": 0.1,
-          "temperature": 1.0,
-          "class_gate": {
-            "mode": "query",
-            "scorer": "diagonal",
-            "global_residual": {
-              "enabled": true,
-              "init_scale": 0.1,
-              "learnable": true
-            },
-            "evidence_auxiliary": {
-              "enabled": false,
-              "weight": 0.1
-            },
-            "branch_logit_feature": {
-              "mode": "raw"
-            }
-          }
-        },
-        "patch_branches": [
-          {"patch_size": [16, 16], "stride": [8, 16]},
-          {"patch_size": [8, 32], "stride": [4, 32]},
-          {"patch_size": [4, 64], "stride": [2, 64]},
-          {"patch_size": [2, 128], "stride": [1, 128]}
-        ]
-      }
-    },
-    "classifier": {
-      "type": "linear",
-      "hidden_dim": 256,
-      "dropout": 0.1,
-      "pooling": "latent_mean"
-    }
-  },
-  "train": {
-    "loss": {
-      "type": "focal",
-      "branch_auxiliary": {
-        "enabled": true,
-        "weight": 0.3,
-        "aggregation": "mean",
-        "weights": null
-      },
-      "class_weighting": {
-        "enabled": false,
-        "type": "sqrt_inverse_frequency",
-        "normalize": "mean_one",
-        "source": "train"
-      },
-      "label_smoothing": {
-        "enabled": false,
-        "value": 0.0
-      },
-      "branch_binary_auxiliary": {
-        "enabled": false,
-        "weight": 0.3,
-        "label_to_index": {},
-        "pos_weight": {
-          "enabled": false,
-          "type": "sqrt_normal_over_abnormal",
-          "source": "train"
-        },
-        "aggregation": "mean"
-      },
-      "attention_entropy": {
-        "enabled": false,
-        "weight": 0.0
-      },
-      "gate_entropy_regularization": {
-        "enabled": false,
-        "weight": 0.0,
-        "target": "evidence_gate"
-      },
-      "class_gate_diversity_regularization": {
-        "enabled": false,
-        "weight": 0.0,
-        "target": "class_evidence_gate",
-        "metric": "js_divergence"
-      },
-      "class_evidence_margin": {
-        "enabled": false,
-        "weight": 0.0,
-        "margin": 0.0,
-        "target": "class_evidence_logits",
-        "mode": "minority_vs_major",
-        "major_class": null,
-        "class_weighted": false,
-        "reduction": "mean"
-      },
-      "class_gated_branch_logit_margin": {
-        "enabled": false,
-        "weight": 0.0,
-        "margin": 0.0,
-        "target": "class_gated_branch_logits",
-        "mode": "true_vs_hardest_negative",
-        "class_weighted": false,
-        "reduction": "mean"
-      },
-      "gate_weighted_branch_margin": {
-        "enabled": false,
-        "weight": 0.0,
-        "margin": 0.0,
-        "target": "true_class_gate",
-        "source": "branch_logits",
-        "mode": "true_vs_hardest_negative",
-        "class_weighted": false,
-        "warmup_epochs": 0,
-        "reduction": "mean",
-        "branch_selection": "gate_weighted"
-      },
-      "gate_branch_regret": {
-        "enabled": false,
-        "weight": 0.0,
-        "target": "true_class_gate",
-        "source": "branch_logits",
-        "mode": "best_margin_regret",
-        "margin_mode": "true_vs_hardest_negative",
-        "positive_threshold": 0.0,
-        "tolerance": 0.0,
-        "warmup_epochs": 0
-      }
-    },
-    "initialization": {
-      "checkpoint_path": null,
-      "load_model_state": true,
-      "strict": false,
-      "load_optimizer_state": false,
-      "skip_mismatched_shapes": false
-    },
-    "sampler": {
-      "weighted_random": false,
-      "enabled": false,
-      "type": "none",
-      "replacement": true,
-      "num_samples": "dataset_size",
-      "source": "train"
-    }
-  }
-}
-```
-
-Strict compatibility rules:
-
-- `model.encoder.type` must stay `multiscale_rdt_ast`
-- `adaptation.mode` supports only `full` and `frozen`
-- `adaptation.num_layers` must be `0`
-- `classifier.pooling` must be `latent_mean`
-- legacy `latent_query_count`, `summary_tokens_per_scale`, and flat `rdt_steps`
-  are rejected
-
-Additional experiment knobs:
-
-- `rdt.evidence_score_source` supports `attention_weight`, `attention_logit`,
-  and `instance_logit`
-- `rdt.exclude_branches_from_evidence` removes zero-based branches only from
-  selected evidence `U0`
-- `architecture.mil.attention_temperature` must be greater than zero and scales
-  branch MIL attention softmax logits
-- `architecture.evidence_pooling.type` supports `mean`, `branch_gated`, and
-  `class_aware_branch_gated`
-- `architecture.evidence_pooling.class_gate.evidence_auxiliary.enabled = true`
-  adds `weight * CE(class_evidence_logits, labels)` for class-aware pooling
-- `architecture.evidence_pooling.class_gate.branch_logit_feature.mode` supports
-  `raw` and `hardest_negative_margin` for the class-aware residual classifier
-- `data.augmentation` is disabled by default and applies only to train datasets
-- `data.augmentation.policy.type` supports `independent` and `one_of`
-- `architecture.token_augmentation` controls branch event and selected evidence
-  token dropout
-- `train.loss.attention_entropy.enabled = true` adds
-  `weight * mean_branch(entropy(attention))`
-- `train.loss.gate_entropy_regularization.enabled = true` adds
-  `-weight * entropy` from branch-gated or class-aware evidence pooling
-- `train.loss.class_gate_diversity_regularization.enabled = true` adds
-  `-weight * mean_pairwise_js(class_evidence_gate_weights)` for class-aware
-  pooling
-- `train.loss.class_evidence_margin.enabled = true` adds a weighted margin
-  penalty on `class_evidence_logits` for class-aware CE runs
-- `train.loss.class_gated_branch_logit_margin.enabled = true` adds a
-  true-vs-hardest-negative margin penalty on `class_gated_branch_logits`
-- `train.loss.gate_weighted_branch_margin.enabled = true` uses detached
-  true-class gates to weight branch-logit margin penalties after warmup
-- `train.loss.gate_branch_regret.enabled = true` updates true-class gates when
-  they underuse a branch with a strong detached branch-logit margin
-- `train.loss.branch_auxiliary.weights` overrides scalar
-  `branch_auxiliary.weight` with normalized per-branch weighting
-- `train.loss.class_weighting.enabled = true` adds train-derived
-  sqrt-inverse-frequency CE weights for multiclass pretraining
-- `train.loss.label_smoothing.enabled = true` adds configurable label smoothing
-  to cross-entropy only
-- `train.loss.branch_binary_auxiliary.enabled = true` adds branch-level
-  normal-vs-abnormal BCE using its own binary label map
-- `train.loss.branch_binary_auxiliary.schedule.enabled = true` supports the
-  `cosine_floor` schedule for the branch-binary loss weight
-- `train.loss.branch_binary_auxiliary.monitor.loss_weight` fixes the
-  branch-binary contribution used by `val_loss_total_monitor`
-- `train.sampler.enabled = true` with `type = "sqrt_inverse_class"` enables
-  train-only sqrt-inverse sample exposure correction
-
-## Loss Rules
-
-Loss behavior depends on both the label count and the output semantics:
-
-- One-logit binary (`len(label_to_index) == 2`, `loss.type = "bce"` or
-  `"focal"`)
-  - supported pooling: `mean` or `branch_gated`
-  - logits shape: `[batch]`
-  - prediction: sigmoid + fixed `0.5` threshold during normal evaluation
-  - optional threshold optimization is available from validation scores
-  - optional `auto_pos_weight` / `pos_weight`
-  - optional branch auxiliary loss uses the same binary criterion on each
-    branch logit
-- Two-class class-aware CE (`len(label_to_index) == 2`,
-  `loss.type = "cross_entropy"`, `evidence_pooling.type =
-  "class_aware_branch_gated"`)
-  - logits shape: `[batch, 2]`
-  - prediction: softmax + argmax
-  - threshold optimization is disabled and `decision_threshold` is `null`
-  - `auto_pos_weight` / `pos_weight` are rejected
-  - optional `class_weighting` uses train-only class counts
-- Multi-class CE (`len(label_to_index) > 2`)
-  - required loss: `cross_entropy`
-  - binary-only weighting options are rejected
-  - branch auxiliary loss applies cross-entropy to each branch head and then
-    averages across branches
-  - optional `class_weighting` uses train-only class counts and applies the
-    same weights to training and validation loss
-  - optional `label_smoothing` applies only to the final cross-entropy criterion;
-    the 4-class pretraining configs explicitly use `0.05` to preserve prior behavior
-  - optional `branch_binary_auxiliary` maps each main class to `0` or `1` and
-    trains branch-level binary logits; this does not add a global binary output
-
-When `train.loss.branch_auxiliary.weights` is absent, the scalar
-`branch_auxiliary.weight` is applied to the mean branch loss. When `weights` is
-present, the scalar is ignored and the auxiliary term is
-`sum(weights[i] * branch_loss[i]) / sum(weights)`.
-
-When `train.loss.branch_binary_auxiliary.pos_weight.enabled = true`, the binary
-auxiliary BCE uses `sqrt(n_normal / n_abnormal)`, computed from the training
-targets after applying the configured binary map. If either binary side is
-absent in the training split, training fails fast with a clear error.
-
-When `train.loss.gate_entropy_regularization.enabled = true`, the trainer uses
-the requested target: `evidence_gate` for legacy branch-gated pooling,
-`class_evidence_gate` for all class-aware gates, or `true_class_evidence_gate`
-for the gate corresponding to the ground-truth class. Class-aware curriculum
-runs can target `class_evidence_learned_gate`, which applies the entropy term
-to the learned gate before uniform-gate mixing. Optional `start_epoch` and
-`end_epoch` fields restrict the term to a phase window. The trainer subtracts
-`weight * mean(entropy)` from the scheduled and monitor loss. This is an
-entropy bonus rather than a hard cap, so it does not guarantee
-`max(gate_weights) <= 0.5`. Check gate-weight distributions, high-confidence
-errors, Brier score, balanced accuracy, and macro recall when comparing this
-setting.
-
-When `train.loss.class_gate_diversity_regularization.enabled = true`, the
-trainer computes pairwise Jensen-Shannon divergence among the class-specific
-branch-gate distributions and subtracts the weighted mean from the loss. The
-default target is the used class gate; curriculum runs can target
-`class_evidence_learned_gate` so the learned gate separates during a uniform
-mixing phase. Optional `start_epoch` and `end_epoch` fields restrict the term to
-a phase window. This encourages label-specific branch usage but does not force
-every class to choose a unique branch.
-
-When `train.loss.class_evidence_margin.enabled = true`, the trainer adds
-`weight * margin_loss` on `class_evidence_logits` before the global residual is
-combined. `mode = "minority_vs_major"` applies only to samples whose label is
-not `major_class`, requiring their true-class evidence logit to exceed the
-major-class evidence logit by `margin`. `mode = "true_vs_hardest_negative"`
-requires every true-class evidence logit to exceed the largest non-true evidence
-logit by `margin`. This is a training-only auxiliary term; evaluation still uses
-`final_logits` with softmax + argmax. When `class_weighted = true`, the
-per-sample margin penalty is multiplied by the same train-derived class weights
-used by cross-entropy, so `train.loss.class_weighting.enabled` must also be
-true. `reduction = "mean"` keeps the original batch mean, while
-`reduction = "class_balanced_violating_mean"` averages only positive margin
-violations within each active class and then averages those active class losses.
-
-When `train.loss.class_gated_branch_logit_margin.enabled = true`, the trainer
-applies the same true-vs-hardest-negative margin idea to
-`class_gated_branch_logits`. This targets the class-gated branch-score path that
-feeds the global residual classifier. It supports `class_weighted = true` with
-the same class-weighting requirement and `reduction` choices as
-`class_evidence_margin`.
-
-When `train.loss.gate_weighted_branch_margin.enabled = true`, the trainer
-computes per-branch true-vs-hardest-negative penalties from `branch_logits` and
-uses the detached true-class gate to decide which branch penalties to apply.
-`branch_selection = "gate_weighted"` applies the detached gate-weighted sum and
-is the only supported selection mode. This trains branch logits selected by the
-gate instead of moving the gate toward a branch-derived teacher target.
-`warmup_epochs` keeps the term at zero through the specified epoch. When
-`class_weighted = true`, the per-sample branch-margin penalty is multiplied by
-the same train-derived class weights used by cross-entropy, so
-`train.loss.class_weighting.enabled` must also be true. Top-k, all-branch,
-oracle, and soft-oracle branch-margin modes are not supported.
-
-When `train.loss.top_branch_margin.enabled = true`, the trainer computes the
-true-vs-hardest-negative branch margin for every branch and applies the margin
-penalty only to the best branch per sample (`branch_reduction = "max"`). This
-supervises the existence of at least one branch that can rank the true class
-above the hardest negative without assigning a fixed branch to a label. It
-supports the same `class_weighted`, `reduction`, and `warmup_epochs` semantics
-as the other margin losses.
-
-When `train.loss.gate_branch_regret.enabled = true`, the trainer computes the
-best detached branch margin for the true class and penalizes the true-class gate
-when its gate-weighted expected margin falls behind that best branch by more
-than `tolerance`. Branch margins are detached in this term, so it updates the
-gate path rather than using the gate to train branch logits. Samples contribute
-only when their best detached branch margin is greater than
-`positive_threshold`; the logged eligible fraction helps confirm that the term
-is active. `warmup_epochs` keeps the term at zero through the specified epoch.
-
-## Optimizer Layout
-
-Training keeps two AdamW parameter groups:
-
-- encoder parameters -> patch tokenizers, shared stem, adapters,
-  frequency-attention poolers, branch MIL heads, branch binary head ->
-  `train.optimizer.encoder_lr`
-- head parameters -> optional RDT, fusion projector, final classifier ->
-  `train.optimizer.head_lr`
-
-If `adaptation.mode = "frozen"`, the encoder group is frozen and only the head
-parameters are trainable.
-
-## Class-Aware Gate Curriculum
-
-For `class_aware_branch_gated`, `class_gate.gate_mixing` can mix the learned
-class gate with a uniform gate over the present branches:
+Gate mixing uses:
 
 ```text
 used_gate = alpha * uniform_gate + (1 - alpha) * learned_gate
 ```
 
-With `mode = "uniform_to_learned"`, `start_alpha = 1.0`, `end_alpha = 0.0`,
-`hold_epochs = 10`, and `decay_epochs = 20`, epochs 1-10 use a uniform gate,
-epochs 11-30 linearly move from uniform to learned, and epoch 31 onward uses
-the learned gate. `class_evidence_gate_weights` remains the used gate for
-pooling and diagnostics; `class_evidence_learned_gate_weights`,
-`class_evidence_gate_mixing_alpha`, and
-`class_evidence_learned_gate_entropy` expose the learned-gate path.
+Diagnostics keep both the used gate and learned gate when the model produces
+both fields.
 
-`class_gate.global_residual.warmup` can schedule the residual classifier scale.
-With `mode = "zero_to_learned"` and the same hold/decay epochs, the residual
-contribution is zero in phase 1, linearly restored in phase 2, and fully active
-in phase 3. Diagnostics store the raw `global_residual_scale`,
-`global_residual_schedule_multiplier`, and `global_residual_effective_scale`.
+## Config Shape
+
+### `experiment`
+
+Defines run identity and execution target.
+
+- `name`: output directory name under `output_dir`.
+- `task`: task label stored with checkpoints and logs.
+- `mode`: currently `clip`.
+- `seed`: random seed.
+- `device`: `cpu`, `mps`, or CUDA device string.
+- `output_dir`: checkpoint and log root.
+
+### `data`
+
+Defines splits, labels, frontend preprocessing, and augmentation.
+
+- `train_dirs`, `val_dirs`, `eval_dirs`: one or more directories of `.wav` files.
+- `label_to_index`: public label mapping used by loss and metrics.
+- `batch_size`, `num_workers`: dataloader settings.
+- `audio`: sample rate and clip duration.
+- `preprocessing.ast_fbank`: mel-bin count, sequence length, normalization mean, and std.
+- `augmentation`: optional waveform and fbank augmentation policy.
+
+CV configs keep `data.train_dirs` and `data.val_dirs` empty at top level and
+fill them through `folds`.
+
+### `model`
+
+Defines encoder architecture and classifier head.
+
+The class-aware CNUH config uses a deeper adapter than shared stem so branch
+specialization can develop after a small common frontend. `classifier.pooling`
+remains `latent_mean`; in class-aware mode this classifier is the residual
+classifier rather than the only logits source.
+
+### `train`
+
+Defines epochs, optimizer, scheduler, checkpoint initialization, sampling,
+early stopping, and losses.
+
+Use `train.loss.type="cross_entropy"` for multiclass tasks and for
+two-label tasks that intentionally use `class_aware_branch_gated`. Use
+`bce` or `focal` only for one-logit binary models.
+
+### `analysis`
+
+Controls saved diagnostics:
+
+- `save_logits`
+- `save_probabilities`
+- `save_embeddings`
+- `save_clip_metadata`
+
+## Loss Rules
+
+The trainer computes a main loss and then adds enabled auxiliary or
+regularization terms. Disabled terms keep backward-compatible defaults.
+
+### Main Loss
+
+- `cross_entropy`: uses integer class labels and logits shaped `[B, C]`.
+- `bce`: uses one-logit binary output and sigmoid probabilities.
+- `focal`: uses one-logit binary output with focal weighting.
+
+Threshold optimization is meaningful only for one-logit binary output.
+Class-aware two-label CE uses softmax plus argmax.
+
+### Class Weighting and Label Smoothing
+
+`class_weighting` can compute train-derived class weights for CE losses.
+`label_smoothing` applies CE label smoothing when enabled.
+
+### Branch Auxiliary Losses
+
+`branch_auxiliary` applies the main task loss to branch logits when enabled.
+`branch_binary_auxiliary` applies a separate normal-vs-abnormal branch BCE
+target. This binary auxiliary is independent of the main multiclass CE target.
+
+### Evidence Auxiliary Loss
+
+`class_gate.evidence_auxiliary` applies CE directly to `class_evidence_logits`.
+It is available for `class_aware_branch_gated` and is meant to improve the
+class evidence scorer before the residual classifier dominates.
+
+### Gate Regularization
+
+`gate_entropy_regularization` adds an entropy bonus as a negative loss term:
+
+```text
+loss += -weight * mean_entropy
+```
+
+Supported targets include aggregate evidence gates, class-aware gates, true
+class gates, and learned class-aware gates when the model outputs them.
+
+`class_gate_diversity_regularization` encourages class gate distributions to
+be different from each other through pairwise JS divergence. It is a soft
+regularizer, not a hard cap on gate weights.
+
+Both regularizers can be bounded by `start_epoch` and `end_epoch`.
+
+### Margin Losses
+
+`class_evidence_margin` applies margin ranking to `class_evidence_logits`.
+
+`class_gated_branch_logit_margin` applies margin ranking to
+`class_gated_branch_logits`.
+
+`gate_weighted_branch_margin` improves branch logits selected by the true-class
+gate. The gate is detached, so this loss updates branch heads rather than
+directly moving the gate.
+
+`top_branch_margin` asks at least one branch to produce a strong true-vs-hardest
+negative margin for each sample. `margin_by_label` can override the scalar
+`margin` per label; labels not listed use the scalar value.
+
+`gate_branch_regret` penalizes the gate when it gives too much mass to branches
+whose branch margin is worse than the best available branch margin.
+`positive_threshold_by_label` can override the scalar threshold per label.
+
+`auto_margin_by_train_stats` and `auto_positive_threshold_by_train_stats` adjust
+these label-wise values from training-epoch statistics only. Validation
+diagnostics are not used for online tuning. The margin controller tracks the
+train top-branch violation rate, and the regret controller tracks the train
+eligible rate. Both update once per epoch and clamp values within the configured
+per-label bounds.
+
+The margin losses support `reduction="mean"` and
+`reduction="class_balanced_violating_mean"`. The class-balanced violating
+reduction averages only active margin violations per class, then averages over
+classes that actually have violations in the batch.
+
+## Optimizer Layout
+
+The optimizer uses separate learning rates for encoder and head parameters:
+
+- `train.optimizer.encoder_lr`
+- `train.optimizer.head_lr`
+- `train.optimizer.weight_decay`
+
+The scheduler uses linear warmup followed by cosine annealing, controlled by
+`train.scheduler.warmup_ratio`.
 
 ## Initialization
 
-`train.initialization.checkpoint_path` warm-starts training or cross-validation
-from a saved checkpoint. Exact resume-style loads keep
-`skip_mismatched_shapes=false`, so tensor shape mismatches still fail fast even
-when `strict=false`.
+`train.initialization` controls warm-start or resume behavior:
 
-Set `skip_mismatched_shapes=true` only for transfer warm-starts such as a
-4-class checkpoint feeding a 3-class disease-group model. In that mode, matching
-tensors are loaded, mismatched class-dependent tensors are skipped and reported
-in the initialization summary, and optimizer state loading is rejected.
+- `checkpoint_path`: source checkpoint path or `null`.
+- `load_model_state`: whether to load model tensors.
+- `strict`: passed to normal `load_state_dict` when shape filtering is disabled.
+- `load_optimizer_state`: whether to load optimizer state.
+- `skip_mismatched_shapes`: if `true`, loads only matching model-state keys and shapes.
+
+`skip_mismatched_shapes=true` is for warm-start transfer, not exact resume.
+Do not combine it with optimizer-state loading.
 
 ## Diagnostics
 
-Diagnostics are controlled by `analysis.outputs`:
+Training and evaluation diagnostics are saved under the run directory when
+enabled by `analysis.outputs`.
 
-```json
-"analysis": {
-  "outputs": {
-    "save_logits": true,
-    "save_probabilities": true,
-    "save_embeddings": false,
-    "save_clip_metadata": true
-  }
-}
-```
+Important class-aware fields include:
 
-Training saves validation diagnostics under:
+- `class_evidence_gate_weights`: gate actually used for pooling.
+- `class_evidence_learned_gate_weights`: learned gate before uniform mixing, when available.
+- `true_class_gate_weights`: used gate for the true label.
+- `predicted_class_gate_weights`: used gate for the predicted label.
+- `class_evidence_gate_mixing_alpha`: uniform-to-learned mixing coefficient.
+- `class_evidence_logits`: direct evidence logits.
+- `class_gated_branch_logits`: raw class-gated branch logits.
+- `class_gated_branch_logit_features`: branch-logit features fed to the residual classifier.
+- `global_residual_logits`: residual classifier logits.
+- `global_residual_scale`: raw residual scale.
+- `global_residual_schedule_multiplier`: epoch schedule multiplier.
+- `global_residual_effective_scale`: residual scale actually applied.
 
-```text
-<run_dir>/diagnostics/val_epoch_XXX.jsonl
-```
+Use diagnostics to inspect class-specific gate behavior. For class-aware runs,
+prefer per-class gate fields over aggregate gate means.
 
-Evaluation writes:
+## Development Checks
 
-```text
-<checkpoint_dir>/eval_diagnostics.jsonl
-```
-
-When enabled, diagnostics now include:
-
-- `branch_logits` with the saved logit payload
-- `branch_binary_logits`, `branch_binary_probabilities`, and
-  `binary_auxiliary_target` when the branch binary auxiliary mapping is
-  available
-- `selected_evidence_indices` for the selected event-token positions
-- `selected_evidence_scores` from the configured evidence score source
-- `selected_evidence_branch_ids` identifying which branch selected each token
-- `evidence_score_source` identifying the selection score source
-- `evidence_pooling_type` identifying the evidence readout
-- `evidence_gate_weights`, `evidence_gate_entropy`, and
-  `branch_evidence_norms` when branch-aware gated pooling is active
-- `class_evidence_gate_weights`, `class_evidence_gate_entropy`,
-  `true_class_gate_weights`, `predicted_class_gate_weights`,
-  `class_evidence_learned_gate_weights`,
-  `true_class_learned_gate_weights`,
-  `predicted_class_learned_gate_weights`,
-  `class_evidence_gate_mixing_alpha`,
-  `class_evidence_learned_gate_entropy`,
-  `class_evidence_logits`, `class_gated_branch_logits`,
-  `class_gated_branch_logit_features`,
-  `class_gated_branch_logit_feature_mode`, `global_residual_logits`,
-  `global_residual_scale`, `global_residual_schedule_multiplier`, and
-  `global_residual_effective_scale` when class-aware branch-gated pooling is active
-- `selected_evidence_tokens` with the saved embedding payload only when
-  `save_embeddings=true`
-
-Full branch attention maps stay in the model output for training and tests, but
-they are not dumped into JSONL by default because they are large.
-
-## Directory Copy Utility
-
-Use `copy_directory_excluding_suffixes.py` to recursively copy one directory's
-contents into another directory while skipping one or more file suffixes:
+Run targeted config tests after schema or config changes:
 
 ```bash
-python copy_directory_excluding_suffixes.py SOURCE_DIR TARGET_DIR .wav .mp3 .npy
+PYTHONPATH=. /Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m pytest tests/test_ast_config.py
 ```
 
-The source directory must already exist. The target directory is created if
-needed. Suffixes may be passed with or without a leading dot, matching is
-case-insensitive, and copied files overwrite existing target files with the same
-relative path.
+Run static checks after code changes:
 
-## Notes
-
-- `src.cli.plot_mels` remains available as a utility.
-- `src.cli.pretrained_info` exits immediately because pretrained HF AST
-  inspection is no longer part of this branch.
-- `configs/eval_multiscale_rdt.json` remains evaluation-only and reconstructs
-  the model from checkpoint `model_cfg`.
+```bash
+ruff check src tests
+mypy src
+```

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -225,472 +224,31 @@ def _augmentation_payload() -> dict:
     }
 
 
-def test_repo_example_configs_load() -> None:
-    d_e_f_config_paths = [
-        "training_d1_c3_3scale_stage1.json",
-        "training_d1_c3_3scale_stage2.json",
-        "training_d2_stage2_no_rdt_from_stage1.json",
-        "training_d3_direct_b3_low_lr.json",
-        "training_d4_c3_top1_stage2.json",
-        "training_d4_c3_top3_stage2.json",
-        "training_d5_c3_stage1_seed0.json",
-        "training_d5_c3_stage2_seed0.json",
-        "training_d5_c3_stage1_seed1.json",
-        "training_d5_c3_stage2_seed1.json",
-        "training_d5_c3_stage1_seed2.json",
-        "training_d5_c3_stage2_seed2.json",
-        "training_e1_c3_attention_logit_stage2.json",
-        "training_e2_c3_instance_logit_stage2.json",
-        "training_e3_c3_attention_temp05_stage2.json",
-        "training_e4_c3_entropy001_stage2.json",
-        "training_f1_c3_branch_aux_weights_stage2.json",
-        "training_f2_c3_exclude_branch4_evidence_stage2.json",
-    ]
-    d_e_f_configs = [
-        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
-        for config_path in d_e_f_config_paths
-    ]
-    g_config_paths = [
-        "training_g1_d3_seed0.json",
-        "training_g1_d3_seed1.json",
-        "training_g1_d3_seed2.json",
-        "training_g1_d3_seed42.json",
-        "training_g1_d3_seed43.json",
-        "training_g2_direct_low_lr_no_rdt.json",
-        "training_g3_direct_low_lr_3scale.json",
-        "training_g4_direct_low_lr_aux005.json",
-        "training_g5_direct_low_lr_no_aux.json",
-        "training_g6_direct_low_lr_focal_gamma1.json",
-        "training_g7_direct_low_lr_focal_gamma2.json",
-    ]
-    g_configs = [
-        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
-        for config_path in g_config_paths
-    ]
-    h0_gated_config_paths = [
-        "training_h0_branch_gated_seed0.json",
-        "training_h0_branch_gated_seed1.json",
-        "training_h0_branch_gated_seed2.json",
-        "training_h0_branch_gated_seed42.json",
-        "training_h0_branch_gated_seed43.json",
-    ]
-    h0_gated_configs = [
-        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
-        for config_path in h0_gated_config_paths
-    ]
-    h_config_paths = [
-        "training_h1_no_rdt_seed0.json",
-        "training_h1_no_rdt_seed1.json",
-        "training_h1_no_rdt_seed2.json",
-        "training_h1_no_rdt_seed42.json",
-        "training_h1_no_rdt_seed43.json",
-        "training_h2_no_aux_seed0.json",
-        "training_h2_no_aux_seed1.json",
-        "training_h2_no_aux_seed2.json",
-        "training_h2_no_aux_seed42.json",
-        "training_h2_no_aux_seed43.json",
-        "training_h3_3scale_seed0.json",
-        "training_h3_3scale_seed1.json",
-        "training_h3_3scale_seed2.json",
-        "training_h3_3scale_seed42.json",
-        "training_h3_3scale_seed43.json",
-    ]
-    h_configs = [
-        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
-        for config_path in h_config_paths
-    ]
-    aug_config_paths = [
-        "training_aug0_h0_gated_no_aug.json",
-        "training_aug1_h0_gated_waveform_aug.json",
-        "training_aug2_h0_gated_fbank_aug.json",
-        "training_aug3_h0_gated_waveform_fbank_aug.json",
-    ]
-    aug_configs = [
-        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
-        for config_path in aug_config_paths
-    ]
-    oneof_token_config_paths = [
-        "training_aug4_h0_gated_oneof.json",
-        "training_pt1_h0_gated_oneof_branch_event_dropout.json",
-        "training_pt2_h0_gated_oneof_selected_evidence_dropout.json",
-        "training_pt3_h0_gated_oneof_both_token_dropouts.json",
-    ]
-    oneof_token_configs = [
-        JsonConfigLoader.load_training(ROOT / "configs" / config_path)
-        for config_path in oneof_token_config_paths
-    ]
-    c0_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c0_b3_focal_patience8.json"
+def test_retained_repo_configs_load() -> None:
+    current_training_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_CNUH_new_test_CNUH_3classes.json"
     )
-    c1_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c1_b3_bce_aux01_patience8.json"
-    )
-    c2_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c2_b1_bce_aux01_patience8.json"
-    )
-    c3_stage1_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c3_stage1_b1_bce_aux01.json"
-    )
-    c3_stage2_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c3_stage2_b3_from_stage1.json"
-    )
-    c4_3scale_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c4_3scale_bce_aux01_rdt3.json"
-    )
-    c4_4scale_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c4_4scale_bce_aux01_rdt3.json"
-    )
-    c5_top2_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c5_top2_bce_aux01_rdt3.json"
-    )
-    c5_top4_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_c5_top4_bce_aux01_rdt3.json"
-    )
-    b0_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b0.json")
-    b1_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b1.json")
-    b2_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b2.json")
-    b3_cfg = JsonConfigLoader.load_training(ROOT / "configs/training_event_mil_b3.json")
-    training_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_multiscale_rdt.json"
-    )
-    multiclass_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_multiclass.json"
-    )
-    pretrain_4class_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_4class_pretrain_weighted_ce_branch_bin_aux.json"
-    )
-    pretrain_4class_cosine_cfg = JsonConfigLoader.load_training(
-        ROOT
-        / "configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030.json"
-    )
-    pretrain_4class_sqrt_sampler_cfg = JsonConfigLoader.load_training(
-        ROOT
-        / "configs/training_4class_pretrain_branch_bin_cosine_040_010_monitor030_sqrt_sampler.json"
+    baseline_training_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_CNUH.json"
     )
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert b0_cfg.model.encoder.architecture.rdt.enabled is False
-    assert b1_cfg.train.loss.branch_auxiliary.enabled is True
-    assert b2_cfg.model.encoder.architecture.rdt.steps == 2
-    assert b3_cfg.model.encoder.architecture.rdt.steps == 3
-    assert c0_cfg.train.loss.type == "focal"
-    assert c1_cfg.train.loss.type == "bce"
-    assert c2_cfg.model.encoder.architecture.rdt.enabled is False
-    assert c3_stage1_cfg.model.encoder.architecture.rdt.enabled is False
-    assert c3_stage2_cfg.train.initialization.checkpoint_path is None
-    assert c3_stage2_cfg.train.initialization.strict is False
-    assert c3_stage2_cfg.train.initialization.load_optimizer_state is False
-    assert len(c4_3scale_cfg.model.encoder.architecture.patch_branches) == 3
-    assert len(c4_4scale_cfg.model.encoder.architecture.patch_branches) == 4
-    assert c5_top2_cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
-    assert c5_top4_cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 4
-    assert len(d_e_f_configs) == len(d_e_f_config_paths)
-    assert d_e_f_configs[0].model.encoder.architecture.rdt.enabled is False
-    assert len(d_e_f_configs[0].model.encoder.architecture.patch_branches) == 3
-    assert d_e_f_configs[4].model.encoder.architecture.rdt.top_tokens_per_branch == 1
-    assert d_e_f_configs[5].model.encoder.architecture.rdt.top_tokens_per_branch == 3
-    assert d_e_f_configs[6].experiment.seed == 0
-    assert d_e_f_configs[10].experiment.seed == 2
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver11"
+    assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
+    assert current_training_cfg.train.loss.type == "cross_entropy"
     assert (
-        d_e_f_configs[12].model.encoder.architecture.rdt.evidence_score_source
-        == "attention_logit"
+        current_training_cfg.model.encoder.architecture.evidence_pooling.type
+        == "class_aware_branch_gated"
     )
-    assert (
-        d_e_f_configs[13].model.encoder.architecture.rdt.evidence_score_source
-        == "instance_logit"
-    )
-    assert d_e_f_configs[14].model.encoder.architecture.mil.attention_temperature == 0.5
-    assert d_e_f_configs[15].train.loss.attention_entropy.enabled is True
-    assert d_e_f_configs[16].train.loss.branch_auxiliary.weights == (
-        0.1,
-        0.1,
-        0.1,
-        0.03,
-    )
-    assert d_e_f_configs[
-        17
-    ].model.encoder.architecture.rdt.exclude_branches_from_evidence == (3,)
-    assert len(g_configs) == len(g_config_paths)
-    assert [cfg.experiment.seed for cfg in g_configs[:5]] == [0, 1, 2, 42, 43]
-    assert all(cfg.train.initialization.checkpoint_path is None for cfg in g_configs)
-    assert all(cfg.train.initialization.load_model_state is False for cfg in g_configs)
-    assert all(cfg.train.initialization.strict is False for cfg in g_configs)
-    assert all(
-        cfg.train.initialization.load_optimizer_state is False for cfg in g_configs
-    )
-    assert g_configs[5].model.encoder.architecture.rdt.enabled is False
-    assert len(g_configs[6].model.encoder.architecture.patch_branches) == 3
-    assert g_configs[7].train.loss.branch_auxiliary.weight == 0.05
-    assert g_configs[8].train.loss.branch_auxiliary.enabled is False
-    assert g_configs[8].train.loss.branch_auxiliary.weight == 0.1
-    assert g_configs[9].train.loss.type == "focal"
-    assert g_configs[9].train.loss.gamma == 1.0
-    assert g_configs[10].train.loss.type == "focal"
-    assert g_configs[10].train.loss.gamma == 2.0
-    assert len(h0_gated_configs) == len(h0_gated_config_paths)
-    assert [cfg.experiment.seed for cfg in h0_gated_configs] == [0, 1, 2, 42, 43]
-    assert all(
-        cfg.model.encoder.architecture.evidence_pooling.type == "branch_gated"
-        for cfg in h0_gated_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.evidence_pooling.temperature == 1.0
-        for cfg in h0_gated_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.rdt.enabled is True for cfg in h0_gated_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.rdt.steps == 3 for cfg in h0_gated_configs
-    )
-    assert all(
-        cfg.train.loss.branch_auxiliary.enabled is True for cfg in h0_gated_configs
-    )
-    assert all(
-        cfg.train.loss.branch_auxiliary.weight == 0.1 for cfg in h0_gated_configs
-    )
-    assert all(
-        cfg.train.initialization.load_model_state is False for cfg in h0_gated_configs
-    )
-    assert len(h_configs) == len(h_config_paths)
-    assert [cfg.experiment.seed for cfg in h_configs[:5]] == [0, 1, 2, 42, 43]
-    assert [cfg.experiment.seed for cfg in h_configs[5:10]] == [0, 1, 2, 42, 43]
-    assert [cfg.experiment.seed for cfg in h_configs[10:]] == [0, 1, 2, 42, 43]
-    assert all(cfg.train.initialization.checkpoint_path is None for cfg in h_configs)
-    assert all(cfg.train.initialization.load_model_state is False for cfg in h_configs)
-    assert all(cfg.train.initialization.strict is False for cfg in h_configs)
-    assert all(
-        cfg.train.initialization.load_optimizer_state is False for cfg in h_configs
-    )
-    assert all(cfg.train.loss.type == "bce" for cfg in h_configs)
-    assert all(cfg.train.optimizer.encoder_lr == 1e-5 for cfg in h_configs)
-    assert all(cfg.train.optimizer.head_lr == 3e-4 for cfg in h_configs)
-    assert all(cfg.train.early_stopping.patience == 8 for cfg in h_configs)
-    assert all(
-        cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
-        for cfg in h_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.rdt.enabled is False for cfg in h_configs[:5]
-    )
-    assert all(
-        cfg.train.loss.branch_auxiliary.enabled is False for cfg in h_configs[5:10]
-    )
-    assert all(
-        len(cfg.model.encoder.architecture.patch_branches) == 3
-        for cfg in h_configs[10:]
-    )
-    assert len(aug_configs) == len(aug_config_paths)
-    assert [cfg.experiment.name for cfg in aug_configs] == [
-        "respiratory_aug0_h0_gated_no_aug",
-        "respiratory_aug1_h0_gated_waveform_aug",
-        "respiratory_aug2_h0_gated_fbank_aug",
-        "respiratory_aug3_h0_gated_waveform_fbank_aug",
-    ]
-    assert aug_configs[0].data.augmentation.enabled is False
-    assert aug_configs[1].data.augmentation.waveform.enabled is True
-    assert aug_configs[1].data.augmentation.fbank.enabled is False
-    assert aug_configs[2].data.augmentation.waveform.enabled is False
-    assert aug_configs[2].data.augmentation.fbank.enabled is True
-    assert aug_configs[3].data.augmentation.waveform.enabled is True
-    assert aug_configs[3].data.augmentation.fbank.enabled is True
-    assert all(
-        cfg.model.encoder.architecture.evidence_pooling.type == "branch_gated"
-        for cfg in aug_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.rdt.enabled is True for cfg in aug_configs
-    )
-    assert all(cfg.model.encoder.architecture.rdt.steps == 3 for cfg in aug_configs)
-    assert all(
-        cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
-        for cfg in aug_configs
-    )
-    assert all(cfg.train.loss.type == "bce" for cfg in aug_configs)
-    assert all(cfg.train.loss.branch_auxiliary.enabled is True for cfg in aug_configs)
-    assert all(cfg.train.loss.branch_auxiliary.weight == 0.1 for cfg in aug_configs)
-    assert all(cfg.train.optimizer.encoder_lr == 1e-5 for cfg in aug_configs)
-    assert all(cfg.train.optimizer.head_lr == 3e-4 for cfg in aug_configs)
-    assert all(cfg.train.initialization.checkpoint_path is None for cfg in aug_configs)
-    assert all(
-        cfg.train.initialization.load_model_state is False for cfg in aug_configs
-    )
-    assert len(oneof_token_configs) == len(oneof_token_config_paths)
-    assert [cfg.experiment.name for cfg in oneof_token_configs] == [
-        "respiratory_aug4_h0_gated_oneof",
-        "respiratory_pt1_h0_gated_oneof_branch_event_dropout",
-        "respiratory_pt2_h0_gated_oneof_selected_evidence_dropout",
-        "respiratory_pt3_h0_gated_oneof_both_token_dropouts",
-    ]
-    assert all(
-        cfg.data.augmentation.policy.type == "one_of" for cfg in oneof_token_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.evidence_pooling.type == "branch_gated"
-        for cfg in oneof_token_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.rdt.enabled is True
-        for cfg in oneof_token_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.rdt.steps == 3 for cfg in oneof_token_configs
-    )
-    assert all(
-        cfg.model.encoder.architecture.rdt.top_tokens_per_branch == 2
-        for cfg in oneof_token_configs
-    )
-    assert all(cfg.train.loss.type == "bce" for cfg in oneof_token_configs)
-    assert all(
-        cfg.train.loss.branch_auxiliary.enabled is True for cfg in oneof_token_configs
-    )
-    assert (
-        oneof_token_configs[
-            0
-        ].model.encoder.architecture.token_augmentation.branch_event_dropout.enabled
-        is False
-    )
-    assert (
-        oneof_token_configs[
-            0
-        ].model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
-        is False
-    )
-    assert (
-        oneof_token_configs[
-            1
-        ].model.encoder.architecture.token_augmentation.branch_event_dropout.enabled
-        is True
-    )
-    assert (
-        oneof_token_configs[
-            1
-        ].model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
-        is False
-    )
-    assert (
-        oneof_token_configs[
-            2
-        ].model.encoder.architecture.token_augmentation.branch_event_dropout.enabled
-        is False
-    )
-    assert (
-        oneof_token_configs[
-            2
-        ].model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
-        is True
-    )
-    assert (
-        oneof_token_configs[
-            3
-        ].model.encoder.architecture.token_augmentation.branch_event_dropout.enabled
-        is True
-    )
-    assert (
-        oneof_token_configs[
-            3
-        ].model.encoder.architecture.token_augmentation.selected_evidence_dropout.enabled
-        is True
-    )
-    assert training_cfg.model.encoder.type == "multiscale_rdt_ast"
-    assert multiclass_cfg.train.loss.type == "cross_entropy"
-    assert pretrain_4class_cfg.data.label_to_index == {
-        "normal": 0,
-        "crackle": 1,
-        "wheeze": 2,
-        "rhonchi": 3,
-    }
-    assert pretrain_4class_cfg.train.epochs == 120
-    assert pretrain_4class_cfg.train.loss.class_weighting.enabled is True
-    assert pretrain_4class_cfg.train.loss.label_smoothing.enabled is True
-    assert pretrain_4class_cfg.train.loss.label_smoothing.value == 0.05
-    assert pretrain_4class_cfg.train.loss.branch_auxiliary.enabled is False
-    assert pretrain_4class_cfg.train.loss.branch_binary_auxiliary.enabled is True
-    assert pretrain_4class_cfg.train.loss.branch_binary_auxiliary.weight == 0.3
-    assert (
-        pretrain_4class_cfg.train.loss.branch_binary_auxiliary.label_to_index["normal"]
-        == 0
-    )
-    assert (
-        pretrain_4class_cfg.model.encoder.architecture.evidence_pooling.type
-        == "branch_gated"
-    )
-    assert pretrain_4class_cfg.train.early_stopping.enabled is False
-    assert pretrain_4class_cfg.checkpointing is not None
-    assert [monitor.name for monitor in pretrain_4class_cfg.checkpointing.monitors] == [
-        "val_macro_f1",
-        "val_macro_recall",
-        "val_loss",
-        "last",
-    ]
-    assert pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.enabled is True
-    assert pretrain_4class_cosine_cfg.train.loss.label_smoothing.enabled is True
-    assert pretrain_4class_cosine_cfg.train.loss.label_smoothing.value == 0.05
-    assert (
-        pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.schedule.enabled
-        is True
-    )
-    assert (
-        pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.schedule.type
-        == "cosine_floor"
-    )
-    assert (
-        pretrain_4class_cosine_cfg.train.loss.branch_binary_auxiliary.monitor.loss_weight
-        == 0.3
-    )
-    assert pretrain_4class_cosine_cfg.checkpointing is not None
-    assert [
-        (monitor.name, monitor.mode, monitor.top_k, monitor.filename_prefix)
-        for monitor in pretrain_4class_cosine_cfg.checkpointing.monitors
-    ] == [
-        ("val_macro_f1", "max", 3, "best_macro_f1"),
-        ("val_macro_recall", "max", 3, "best_macro_recall"),
-        ("val_loss_total_monitor", "min", 3, "best_loss"),
-        ("last", "last", 3, "last"),
-    ]
-    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.enabled is True
-    assert pretrain_4class_sqrt_sampler_cfg.train.loss.label_smoothing.enabled is True
-    assert pretrain_4class_sqrt_sampler_cfg.train.loss.label_smoothing.value == 0.05
-    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.type == "sqrt_inverse_class"
-    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.replacement is True
-    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.num_samples == "dataset_size"
-    assert pretrain_4class_sqrt_sampler_cfg.train.sampler.source == "train"
-    assert (
-        pretrain_4class_sqrt_sampler_cfg.train.loss.branch_binary_auxiliary.schedule.enabled
-        is True
-    )
-    assert (
-        pretrain_4class_sqrt_sampler_cfg.train.loss.branch_binary_auxiliary.monitor.loss_weight
-        == 0.3
-    )
-    cosine_payload = asdict(pretrain_4class_cosine_cfg)
-    sqrt_sampler_payload = asdict(pretrain_4class_sqrt_sampler_cfg)
-    cosine_payload["experiment"]["name"] = sqrt_sampler_payload["experiment"]["name"]
-    cosine_payload["train"]["sampler"] = sqrt_sampler_payload["train"]["sampler"]
-    assert sqrt_sampler_payload == cosine_payload
+    assert current_training_cfg.train.loss.top_branch_margin.enabled is True
+    assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
+    assert baseline_training_cfg.model.encoder.type == "multiscale_rdt_ast"
+    assert baseline_training_cfg.train.loss.type == "cross_entropy"
     assert cv_cfg.folds[0].name == "fold_0"
+    assert cv_cfg.train.initialization.skip_mismatched_shapes is False
+    assert eval_cfg.checkpoint_path
     assert eval_cfg.threshold_optimization.metric == "f1"
-
-
-def test_g1_configs_differ_from_d3_only_by_name_and_seed() -> None:
-    d3_cfg = JsonConfigLoader.load_training(
-        ROOT / "configs/training_d3_direct_b3_low_lr.json"
-    )
-    expected_seeds = [0, 1, 2, 42, 43]
-
-    for seed in expected_seeds:
-        g1_cfg = JsonConfigLoader.load_training(
-            ROOT / "configs" / f"training_g1_d3_seed{seed}.json"
-        )
-        d3_payload = asdict(d3_cfg)
-        g1_payload = asdict(g1_cfg)
-        d3_payload["experiment"]["name"] = g1_payload["experiment"]["name"]
-        d3_payload["experiment"]["seed"] = g1_payload["experiment"]["seed"]
-
-        assert g1_cfg.experiment.name == f"respiratory_g1_d3_seed{seed}"
-        assert g1_cfg.experiment.seed == seed
-        assert g1_payload == d3_payload
 
 
 def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
@@ -771,10 +329,17 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.loss.top_branch_margin.class_weighted is False
     assert cfg.train.loss.top_branch_margin.reduction == "mean"
     assert cfg.train.loss.top_branch_margin.warmup_epochs == 0
+    assert dict(cfg.train.loss.top_branch_margin.margin_by_label) == {}
+    assert cfg.train.loss.top_branch_margin.auto_margin_by_train_stats.enabled is False
     assert cfg.train.loss.gate_branch_regret.margin_mode == ("true_vs_hardest_negative")
     assert cfg.train.loss.gate_branch_regret.positive_threshold == 0.0
+    assert dict(cfg.train.loss.gate_branch_regret.positive_threshold_by_label) == {}
     assert cfg.train.loss.gate_branch_regret.tolerance == 0.0
     assert cfg.train.loss.gate_branch_regret.warmup_epochs == 0
+    assert (
+        cfg.train.loss.gate_branch_regret.auto_positive_threshold_by_train_stats.enabled
+        is False
+    )
     assert cfg.train.loss.branch_auxiliary.enabled is False
     assert cfg.train.sampler.weighted_random is True
     assert cfg.train.sampler.enabled is False
@@ -1465,12 +1030,40 @@ def test_valid_top_branch_margin_config_loads(tmp_path: Path) -> None:
         "enabled": True,
         "weight": 0.05,
         "margin": 0.3,
+        "margin_by_label": {
+            "normal": 0.3,
+            "crackle": 0.3,
+            "wheeze": 0.5,
+        },
         "target": "branch_logits",
         "mode": "true_vs_hardest_negative",
         "branch_reduction": "max",
         "class_weighted": True,
         "reduction": "class_balanced_violating_mean",
         "warmup_epochs": 0,
+        "auto_margin_by_train_stats": {
+            "enabled": True,
+            "strategy": "ema_violation_controller",
+            "start_epoch": 11,
+            "update_interval_epochs": 1,
+            "ema": 0.9,
+            "step": 0.02,
+            "target_violation_rate_by_label": {
+                "normal": 0.2,
+                "crackle": 0.45,
+                "wheeze": 0.8,
+            },
+            "min_margin_by_label": {
+                "normal": 0.3,
+                "crackle": 0.3,
+                "wheeze": 0.45,
+            },
+            "max_margin_by_label": {
+                "normal": 0.3,
+                "crackle": 0.3,
+                "wheeze": 0.75,
+            },
+        },
     }
     config_path = _write_json(tmp_path / "top_branch_margin.json", payload)
 
@@ -1486,6 +1079,14 @@ def test_valid_top_branch_margin_config_loads(tmp_path: Path) -> None:
     assert margin_cfg.class_weighted is True
     assert margin_cfg.reduction == "class_balanced_violating_mean"
     assert margin_cfg.warmup_epochs == 0
+    assert dict(margin_cfg.margin_by_label) == {
+        "normal": 0.3,
+        "crackle": 0.3,
+        "wheeze": 0.5,
+    }
+    assert margin_cfg.auto_margin_by_train_stats.enabled is True
+    assert margin_cfg.auto_margin_by_train_stats.step == 0.02
+    assert margin_cfg.auto_margin_by_train_stats.min_margin_by_label["wheeze"] == 0.45
 
 
 def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
@@ -1498,8 +1099,36 @@ def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
         "mode": "best_margin_regret",
         "margin_mode": "true_vs_hardest_negative",
         "positive_threshold": 0.3,
+        "positive_threshold_by_label": {
+            "normal": 0.3,
+            "crackle": 0.3,
+            "wheeze": 0.1,
+        },
         "tolerance": 0.05,
         "warmup_epochs": 10,
+        "auto_positive_threshold_by_train_stats": {
+            "enabled": True,
+            "strategy": "ema_eligible_controller",
+            "start_epoch": 31,
+            "update_interval_epochs": 1,
+            "ema": 0.9,
+            "step": 0.02,
+            "target_eligible_rate_by_label": {
+                "normal": 0.7,
+                "crackle": 0.7,
+                "wheeze": 0.5,
+            },
+            "min_threshold_by_label": {
+                "normal": 0.3,
+                "crackle": 0.3,
+                "wheeze": 0.0,
+            },
+            "max_threshold_by_label": {
+                "normal": 0.3,
+                "crackle": 0.3,
+                "wheeze": 0.2,
+            },
+        },
     }
     config_path = _write_json(tmp_path / "gate_branch_regret.json", payload)
 
@@ -1513,8 +1142,15 @@ def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
     assert regret_cfg.mode == "best_margin_regret"
     assert regret_cfg.margin_mode == "true_vs_hardest_negative"
     assert regret_cfg.positive_threshold == 0.3
+    assert dict(regret_cfg.positive_threshold_by_label) == {
+        "normal": 0.3,
+        "crackle": 0.3,
+        "wheeze": 0.1,
+    }
     assert regret_cfg.tolerance == 0.05
     assert regret_cfg.warmup_epochs == 10
+    assert regret_cfg.auto_positive_threshold_by_train_stats.enabled is True
+    assert regret_cfg.auto_positive_threshold_by_train_stats.step == 0.02
 
 
 @pytest.mark.parametrize(
@@ -1753,6 +1389,95 @@ def test_invalid_top_branch_margin_config_is_rejected(
 
 
 @pytest.mark.parametrize(
+    ("nested", "error"),
+    [
+        ({"margin_by_label": {"unknown": 0.4}}, "margin_by_label"),
+        ({"margin_by_label": {"wheeze": 0.0}}, "margin_by_label"),
+        (
+            {
+                "auto_margin_by_train_stats": {
+                    "enabled": True,
+                    "strategy": "bad",
+                    "start_epoch": 11,
+                    "update_interval_epochs": 1,
+                    "ema": 0.9,
+                    "step": 0.02,
+                    "target_violation_rate_by_label": {
+                        "normal": 0.2,
+                        "crackle": 0.45,
+                        "wheeze": 0.8,
+                    },
+                    "min_margin_by_label": {
+                        "normal": 0.3,
+                        "crackle": 0.3,
+                        "wheeze": 0.45,
+                    },
+                    "max_margin_by_label": {
+                        "normal": 0.3,
+                        "crackle": 0.3,
+                        "wheeze": 0.75,
+                    },
+                }
+            },
+            "auto_margin_by_train_stats.strategy",
+        ),
+        (
+            {
+                "auto_margin_by_train_stats": {
+                    "enabled": True,
+                    "strategy": "ema_violation_controller",
+                    "start_epoch": 11,
+                    "update_interval_epochs": 1,
+                    "ema": 0.9,
+                    "step": 0.0,
+                    "target_violation_rate_by_label": {
+                        "normal": 0.2,
+                        "crackle": 0.45,
+                        "wheeze": 0.8,
+                    },
+                    "min_margin_by_label": {
+                        "normal": 0.3,
+                        "crackle": 0.3,
+                        "wheeze": 0.45,
+                    },
+                    "max_margin_by_label": {
+                        "normal": 0.3,
+                        "crackle": 0.3,
+                        "wheeze": 0.75,
+                    },
+                }
+            },
+            "auto_margin_by_train_stats.step",
+        ),
+    ],
+)
+def test_invalid_top_branch_margin_label_adaptive_config_is_rejected(
+    tmp_path: Path,
+    nested: dict[str, object],
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["top_branch_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.3,
+        "target": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "branch_reduction": "max",
+        "class_weighted": False,
+        "warmup_epochs": 0,
+        **nested,
+    }
+    config_path = _write_json(
+        tmp_path / "bad_top_branch_margin_label_adaptive.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
     ("field", "value", "error"),
     [
         ("enabled", "yes", "gate_branch_regret.enabled"),
@@ -1790,6 +1515,103 @@ def test_invalid_gate_branch_regret_config_is_rejected(
     }
     payload["train"]["loss"]["gate_branch_regret"][field] = value
     config_path = _write_json(tmp_path / "bad_gate_branch_regret.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("nested", "error"),
+    [
+        (
+            {"positive_threshold_by_label": {"unknown": 0.1}},
+            "positive_threshold_by_label",
+        ),
+        (
+            {"positive_threshold_by_label": {"wheeze": -0.1}},
+            "positive_threshold_by_label",
+        ),
+        (
+            {
+                "auto_positive_threshold_by_train_stats": {
+                    "enabled": True,
+                    "strategy": "bad",
+                    "start_epoch": 31,
+                    "update_interval_epochs": 1,
+                    "ema": 0.9,
+                    "step": 0.02,
+                    "target_eligible_rate_by_label": {
+                        "normal": 0.7,
+                        "crackle": 0.7,
+                        "wheeze": 0.5,
+                    },
+                    "min_threshold_by_label": {
+                        "normal": 0.3,
+                        "crackle": 0.3,
+                        "wheeze": 0.0,
+                    },
+                    "max_threshold_by_label": {
+                        "normal": 0.3,
+                        "crackle": 0.3,
+                        "wheeze": 0.2,
+                    },
+                }
+            },
+            "auto_positive_threshold_by_train_stats.strategy",
+        ),
+        (
+            {
+                "positive_threshold_by_label": {"wheeze": 0.4},
+                "auto_positive_threshold_by_train_stats": {
+                    "enabled": True,
+                    "strategy": "ema_eligible_controller",
+                    "start_epoch": 31,
+                    "update_interval_epochs": 1,
+                    "ema": 0.9,
+                    "step": 0.02,
+                    "target_eligible_rate_by_label": {
+                        "normal": 0.7,
+                        "crackle": 0.7,
+                        "wheeze": 0.5,
+                    },
+                    "min_threshold_by_label": {
+                        "normal": 0.3,
+                        "crackle": 0.3,
+                        "wheeze": 0.0,
+                    },
+                    "max_threshold_by_label": {
+                        "normal": 0.3,
+                        "crackle": 0.3,
+                        "wheeze": 0.2,
+                    },
+                },
+            },
+            "initial threshold",
+        ),
+    ],
+)
+def test_invalid_gate_branch_regret_label_adaptive_config_is_rejected(
+    tmp_path: Path,
+    nested: dict[str, object],
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_branch_regret"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "best_margin_regret",
+        "margin_mode": "true_vs_hardest_negative",
+        "positive_threshold": 0.3,
+        "tolerance": 0.05,
+        "warmup_epochs": 10,
+        **nested,
+    }
+    config_path = _write_json(
+        tmp_path / "bad_gate_branch_regret_label_adaptive.json",
+        payload,
+    )
 
     with pytest.raises((TypeError, ValueError), match=error):
         JsonConfigLoader.load_training(config_path)

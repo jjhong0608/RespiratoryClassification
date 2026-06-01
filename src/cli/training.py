@@ -20,7 +20,7 @@ from src.training.imbalance import (
 )
 from src.training.initialization import initialize_from_checkpoint
 from src.training.trainer import Trainer, TrainerConfig
-from src.utils.config import JsonConfigLoader
+from src.utils.config import JsonConfigLoader, resolve_label_float_overrides
 from src.utils.fs import Fs
 from src.utils.logging import enable_file_logging, logger
 from src.utils.reproducibility import Reproducibility
@@ -245,6 +245,23 @@ def main() -> None:
         )
         else None
     )
+    class_names = tuple(
+        label_name
+        for label_name, _ in sorted(
+            cfg.data.label_to_index.items(),
+            key=lambda item: item[1],
+        )
+    )
+    top_branch_margin_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_branch_margin.margin,
+        overrides=cfg.train.loss.top_branch_margin.margin_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    gate_branch_regret_positive_threshold_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.gate_branch_regret.positive_threshold,
+        overrides=cfg.train.loss.gate_branch_regret.positive_threshold_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
 
     trainer = Trainer(
         TrainerConfig(
@@ -258,6 +275,7 @@ def main() -> None:
             top_k=cfg.train.top_k,
             run_dir=run_dir,
             num_classes=num_classes,
+            class_names=class_names,
             loss_type=cfg.train.loss.type,
             gamma=cfg.train.loss.gamma,
             pos_weight=imbalance.pos_weight,
@@ -284,7 +302,11 @@ def main() -> None:
             ),
             gate_weighted_branch_margin=cfg.train.loss.gate_weighted_branch_margin,
             gate_branch_regret=cfg.train.loss.gate_branch_regret,
+            gate_branch_regret_positive_threshold_by_class=(
+                gate_branch_regret_positive_threshold_by_class
+            ),
             top_branch_margin=cfg.train.loss.top_branch_margin,
+            top_branch_margin_by_class=top_branch_margin_by_class,
             analysis=cfg.analysis,
             early_stopping=cfg.train.early_stopping,
             checkpointing=cfg.checkpointing,

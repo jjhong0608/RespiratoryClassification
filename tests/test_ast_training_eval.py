@@ -31,6 +31,8 @@ from src.utils.config import (
     AstFbankConfig,
     AttentionEntropyLossConfig,
     AudioConfig,
+    AutoMarginByTrainStatsConfig,
+    AutoPositiveThresholdByTrainStatsConfig,
     BandPassConfig,
     BranchAuxiliaryLossConfig,
     BranchBinaryAuxiliaryLossConfig,
@@ -279,17 +281,21 @@ def _trainer_cfg(
     gate_branch_regret_enabled: bool = False,
     gate_branch_regret_weight: float = 0.0,
     gate_branch_regret_positive_threshold: float = 0.0,
+    gate_branch_regret_positive_threshold_by_class: tuple[float, ...] | None = None,
     gate_branch_regret_tolerance: float = 0.0,
     gate_branch_regret_warmup_epochs: int = 0,
+    gate_branch_regret_auto: AutoPositiveThresholdByTrainStatsConfig | None = None,
     top_branch_margin_enabled: bool = False,
     top_branch_margin_weight: float = 0.0,
     top_branch_margin_value: float = 0.0,
+    top_branch_margin_by_class: tuple[float, ...] | None = None,
     top_branch_margin_class_weighted: bool = False,
     top_branch_margin_reduction: Literal[
         "mean",
         "class_balanced_violating_mean",
     ] = "mean",
     top_branch_margin_warmup_epochs: int = 0,
+    top_branch_margin_auto: AutoMarginByTrainStatsConfig | None = None,
 ) -> TrainerConfig:
     return TrainerConfig(
         device="cpu",
@@ -302,6 +308,7 @@ def _trainer_cfg(
         top_k=1,
         run_dir=run_dir,
         num_classes=num_classes,
+        class_names=("normal", "crackle", "wheeze", "rhonchi")[:num_classes],
         loss_type=loss_type,
         gamma=gamma,
         pos_weight=pos_weight,
@@ -403,6 +410,12 @@ def _trainer_cfg(
             positive_threshold=gate_branch_regret_positive_threshold,
             tolerance=gate_branch_regret_tolerance,
             warmup_epochs=gate_branch_regret_warmup_epochs,
+            auto_positive_threshold_by_train_stats=(
+                gate_branch_regret_auto or AutoPositiveThresholdByTrainStatsConfig()
+            ),
+        ),
+        gate_branch_regret_positive_threshold_by_class=(
+            gate_branch_regret_positive_threshold_by_class
         ),
         top_branch_margin=TopBranchMarginConfig(
             enabled=top_branch_margin_enabled,
@@ -414,7 +427,11 @@ def _trainer_cfg(
             class_weighted=top_branch_margin_class_weighted,
             reduction=top_branch_margin_reduction,
             warmup_epochs=top_branch_margin_warmup_epochs,
+            auto_margin_by_train_stats=(
+                top_branch_margin_auto or AutoMarginByTrainStatsConfig()
+            ),
         ),
+        top_branch_margin_by_class=top_branch_margin_by_class,
         analysis=_analysis_cfg(),
         early_stopping=EarlyStoppingConfig(
             enabled=True,
@@ -2224,6 +2241,49 @@ def test_trainer_gate_branch_regret_is_recorded_in_loss_components() -> None:
     )
 
 
+def test_trainer_gate_branch_regret_uses_label_specific_thresholds() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.5,
+            gate_branch_regret_positive_threshold=0.3,
+            gate_branch_regret_positive_threshold_by_class=(0.8, 0.3, 0.0),
+            gate_branch_regret_tolerance=0.0,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor(
+            [
+                [[1.2, 0.2, 0.5], [0.3, 0.1, 0.9]],
+                [[0.4, 0.1, 0.5], [0.2, 0.4, 0.2]],
+            ],
+            dtype=torch.float32,
+        ),
+        class_evidence_gate_weights=torch.tensor(
+            [
+                [[0.2, 0.8], [0.5, 0.5], [0.6, 0.4]],
+                [[0.5, 0.5], [0.4, 0.6], [0.5, 0.5]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 2], dtype=torch.long)
+
+    raw_loss, weighted_loss, eligible_fraction = (
+        trainer._compute_gate_branch_regret_loss(output, labels, epoch=1)
+    )
+
+    expected_raw = torch.tensor(0.15)
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.5 * expected_raw)
+    assert torch.isclose(eligible_fraction, torch.tensor(0.5))
+
+
 def test_trainer_gate_weighted_branch_margin_rejects_unsupported_selection() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -2324,6 +2384,85 @@ def test_trainer_top_branch_margin_uses_best_branch_margin() -> None:
     assert torch.isclose(components.top_branch_margin_loss, weighted_margin)
 
 
+def test_trainer_top_branch_margin_uses_label_specific_margins() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            top_branch_margin_enabled=True,
+            top_branch_margin_weight=0.1,
+            top_branch_margin_value=0.3,
+            top_branch_margin_by_class=(0.3, 0.3, 0.6),
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor(
+            [
+                [[0.8, 0.6, 0.5], [0.4, 0.3, 0.2]],
+                [[0.0, 0.1, 0.4], [0.1, 0.0, 0.5]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 2], dtype=torch.long)
+
+    raw_margin, weighted_margin = trainer._compute_top_branch_margin_loss(
+        output,
+        labels,
+        epoch=1,
+    )
+
+    expected_raw = torch.tensor((0.1 + 0.2) / 2)
+    assert torch.isclose(raw_margin, expected_raw)
+    assert torch.isclose(weighted_margin, 0.1 * expected_raw)
+
+
+def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            top_branch_margin_enabled=True,
+            top_branch_margin_weight=0.1,
+            top_branch_margin_value=0.3,
+            top_branch_margin_by_class=(0.3, 0.4, 0.6),
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.1,
+            gate_branch_regret_positive_threshold=0.3,
+            gate_branch_regret_positive_threshold_by_class=(0.3, 0.2, 0.1),
+            gate_branch_regret_tolerance=0.05,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=torch.tensor(
+            [[[0.8, 0.6, 0.5], [0.4, 0.7, 0.2]]],
+            dtype=torch.float32,
+        ),
+        class_evidence_gate_weights=torch.tensor(
+            [[[0.5, 0.5], [0.25, 0.75], [0.5, 0.5]]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([1], dtype=torch.long)
+
+    rows = trainer._branch_objective_diagnostic_rows(output, labels)
+
+    row = rows[0]
+    assert row["top_branch_margin_target"] == pytest.approx(0.4)
+    assert row["top_branch_margin_value"] == pytest.approx(0.3)
+    assert row["top_branch_margin_violation"] is True
+    assert row["gate_branch_regret_positive_threshold"] == pytest.approx(0.2)
+    assert row["gate_branch_regret_best_margin"] == pytest.approx(0.3)
+    assert row["gate_branch_regret_gate_expected_margin"] == pytest.approx(0.175)
+    assert row["gate_branch_regret_eligible"] is True
+
+
 def test_trainer_top_branch_margin_class_balanced_and_warmup() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -2369,6 +2508,110 @@ def test_trainer_top_branch_margin_class_balanced_and_warmup() -> None:
     assert torch.isclose(warmup_weighted, torch.tensor(0.0))
     assert torch.isclose(raw_margin, expected_raw)
     assert torch.isclose(weighted_margin, 0.05 * expected_raw)
+
+
+def test_trainer_adaptive_branch_objectives_update_train_state_only() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            top_branch_margin_enabled=True,
+            top_branch_margin_weight=0.1,
+            top_branch_margin_value=0.3,
+            top_branch_margin_by_class=(0.3, 0.3, 0.5),
+            top_branch_margin_auto=AutoMarginByTrainStatsConfig(
+                enabled=True,
+                strategy="ema_violation_controller",
+                start_epoch=1,
+                update_interval_epochs=1,
+                ema=0.9,
+                step=0.02,
+                target_violation_rate_by_label={
+                    "normal": 0.2,
+                    "crackle": 0.45,
+                    "wheeze": 0.8,
+                },
+                min_margin_by_label={
+                    "normal": 0.3,
+                    "crackle": 0.3,
+                    "wheeze": 0.45,
+                },
+                max_margin_by_label={
+                    "normal": 0.3,
+                    "crackle": 0.3,
+                    "wheeze": 0.75,
+                },
+            ),
+            gate_branch_regret_enabled=True,
+            gate_branch_regret_weight=0.1,
+            gate_branch_regret_positive_threshold=0.3,
+            gate_branch_regret_positive_threshold_by_class=(0.3, 0.3, 0.1),
+            gate_branch_regret_tolerance=0.05,
+            gate_branch_regret_auto=AutoPositiveThresholdByTrainStatsConfig(
+                enabled=True,
+                strategy="ema_eligible_controller",
+                start_epoch=1,
+                update_interval_epochs=1,
+                ema=0.9,
+                step=0.02,
+                target_eligible_rate_by_label={
+                    "normal": 0.7,
+                    "crackle": 0.7,
+                    "wheeze": 0.5,
+                },
+                min_threshold_by_label={
+                    "normal": 0.3,
+                    "crackle": 0.3,
+                    "wheeze": 0.0,
+                },
+                max_threshold_by_label={
+                    "normal": 0.3,
+                    "crackle": 0.3,
+                    "wheeze": 0.2,
+                },
+            ),
+        )
+    )
+    stats = trainer._new_branch_objective_epoch_stats()
+    output = AstModelOutput(
+        logits=torch.zeros(3, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(3, 32),
+        branch_logits=torch.tensor(
+            [
+                [[0.8, 0.6, 0.5], [0.4, 0.3, 0.2]],
+                [[0.7, 0.6, 0.2], [0.4, 0.5, 0.3]],
+                [[0.0, 0.1, 0.4], [0.1, 0.0, 0.5]],
+            ],
+            dtype=torch.float32,
+        ),
+        class_evidence_gate_weights=torch.tensor(
+            [
+                [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]],
+                [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]],
+                [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1, 2], dtype=torch.long)
+
+    trainer._observe_branch_objective_stats(output, labels, stats)
+    trainer._update_adaptive_branch_objective_state(epoch=1, stats=stats)
+
+    state = trainer._branch_objective_state_dict()
+    assert state["top_branch_margin_by_label"]["normal"] == pytest.approx(0.3)
+    assert state["top_branch_margin_by_label"]["crackle"] == pytest.approx(0.3)
+    assert state["top_branch_margin_by_label"]["wheeze"] == pytest.approx(0.48)
+    assert state["gate_branch_regret_positive_threshold_by_label"][
+        "normal"
+    ] == pytest.approx(0.3)
+    assert state["gate_branch_regret_positive_threshold_by_label"][
+        "crackle"
+    ] == pytest.approx(0.3)
+    assert state["gate_branch_regret_positive_threshold_by_label"][
+        "wheeze"
+    ] == pytest.approx(0.12)
 
 
 def test_trainer_raises_when_top_branch_margin_enabled_without_logits() -> None:
