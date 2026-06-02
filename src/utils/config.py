@@ -299,6 +299,19 @@ class AutoPositiveThresholdByTrainStatsConfig:
 
 
 @dataclass(frozen=True)
+class AutoBadBranchThresholdByTrainStatsConfig:
+    enabled: bool = False
+    strategy: Literal["ema_bad_gate_mass_controller"] = "ema_bad_gate_mass_controller"
+    start_epoch: int = 1
+    update_interval_epochs: int = 1
+    ema: float = 0.9
+    step: float = 0.0
+    target_bad_gate_mass_by_label: Mapping[str, float] = field(default_factory=dict)
+    min_threshold_by_label: Mapping[str, float] = field(default_factory=dict)
+    max_threshold_by_label: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GateBranchRegretWeightScheduleConfig:
     enabled: bool = False
     start_epoch: int = 1
@@ -324,6 +337,25 @@ class GateBranchRegretConfig:
     )
     auto_positive_threshold_by_train_stats: AutoPositiveThresholdByTrainStatsConfig = (
         field(default_factory=AutoPositiveThresholdByTrainStatsConfig)
+    )
+
+
+@dataclass(frozen=True)
+class GateBadBranchSuppressionConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["true_class_gate"] = "true_class_gate"
+    source: Literal["branch_logits"] = "branch_logits"
+    mode: Literal["margin_below_threshold"] = "margin_below_threshold"
+    margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    bad_margin_threshold: float = 0.0
+    bad_margin_threshold_by_label: Mapping[str, float] = field(default_factory=dict)
+    warmup_epochs: int = 0
+    weight_schedule: GateBranchRegretWeightScheduleConfig = field(
+        default_factory=GateBranchRegretWeightScheduleConfig
+    )
+    auto_bad_margin_threshold_by_train_stats: AutoBadBranchThresholdByTrainStatsConfig = field(
+        default_factory=AutoBadBranchThresholdByTrainStatsConfig
     )
 
 
@@ -430,6 +462,9 @@ class LossConfig:
     )
     gate_branch_regret: GateBranchRegretConfig = field(
         default_factory=GateBranchRegretConfig
+    )
+    gate_bad_branch_suppression: GateBadBranchSuppressionConfig = field(
+        default_factory=GateBadBranchSuppressionConfig
     )
     top_branch_margin: TopBranchMarginConfig = field(
         default_factory=TopBranchMarginConfig
@@ -616,11 +651,16 @@ class JsonConfigLoader:
     _GATE_BRANCH_REGRET_SOURCES = {"branch_logits"}
     _GATE_BRANCH_REGRET_MODES = {"best_margin_regret"}
     _GATE_BRANCH_REGRET_MARGIN_MODES = {"true_vs_hardest_negative"}
+    _GATE_BAD_BRANCH_SUPPRESSION_TARGETS = {"true_class_gate"}
+    _GATE_BAD_BRANCH_SUPPRESSION_SOURCES = {"branch_logits"}
+    _GATE_BAD_BRANCH_SUPPRESSION_MODES = {"margin_below_threshold"}
+    _GATE_BAD_BRANCH_SUPPRESSION_MARGIN_MODES = {"true_vs_hardest_negative"}
     _TOP_BRANCH_MARGIN_TARGETS = {"branch_logits"}
     _TOP_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
     _TOP_BRANCH_MARGIN_BRANCH_REDUCTIONS = {"max"}
     _AUTO_MARGIN_STRATEGIES = {"ema_violation_controller"}
     _AUTO_POSITIVE_THRESHOLD_STRATEGIES = {"ema_eligible_controller"}
+    _AUTO_BAD_BRANCH_THRESHOLD_STRATEGIES = {"ema_bad_gate_mass_controller"}
     _TIME_SHIFT_MODES = {"zero_pad", "roll"}
     _AUGMENTATION_POLICY_TYPES = {"independent", "one_of"}
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
@@ -717,6 +757,31 @@ class JsonConfigLoader:
         for label_name, value in values.items():
             if value > 1.0:
                 raise ValueError(f"{field_name}.{label_name} must be within [0, 1]")
+
+    @staticmethod
+    def _validate_threshold_label_mapping(
+        values: Mapping[str, float],
+        *,
+        field_name: str,
+        label_to_index: Mapping[str, int],
+        require_all_labels: bool = False,
+    ) -> None:
+        if not isinstance(values, Mapping):
+            raise TypeError(f"{field_name} must be an object")
+        if require_all_labels and set(values) != set(label_to_index):
+            missing = sorted(set(label_to_index) - set(values))
+            extra = sorted(set(values) - set(label_to_index))
+            raise ValueError(
+                f"{field_name} must contain exactly data.label_to_index keys; "
+                f"missing={missing}, extra={extra}"
+            )
+        for label_name, value in values.items():
+            if not isinstance(label_name, str):
+                raise TypeError(f"{field_name} keys must be label names")
+            if label_name not in label_to_index:
+                raise ValueError(f"{field_name} contains unknown label {label_name!r}")
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{label_name} must be numeric")
 
     @staticmethod
     def _validate_auto_margin_by_train_stats(
@@ -857,10 +922,79 @@ class JsonConfigLoader:
                 )
 
     @staticmethod
+    def _validate_auto_bad_branch_threshold_by_train_stats(
+        cfg: AutoBadBranchThresholdByTrainStatsConfig,
+        *,
+        label_to_index: Mapping[str, int],
+    ) -> None:
+        field_name = (
+            "train.loss.gate_bad_branch_suppression."
+            "auto_bad_margin_threshold_by_train_stats"
+        )
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if cfg.strategy not in JsonConfigLoader._AUTO_BAD_BRANCH_THRESHOLD_STRATEGIES:
+            raise ValueError(
+                f"{field_name}.strategy must be 'ema_bad_gate_mass_controller'"
+            )
+        if not isinstance(cfg.start_epoch, int):
+            raise TypeError(f"{field_name}.start_epoch must be an integer")
+        if cfg.start_epoch <= 0:
+            raise ValueError(f"{field_name}.start_epoch must be greater than zero")
+        if not isinstance(cfg.update_interval_epochs, int):
+            raise TypeError(f"{field_name}.update_interval_epochs must be an integer")
+        if cfg.update_interval_epochs <= 0:
+            raise ValueError(
+                f"{field_name}.update_interval_epochs must be greater than zero"
+            )
+        if not isinstance(cfg.ema, int | float) or isinstance(cfg.ema, bool):
+            raise TypeError(f"{field_name}.ema must be numeric")
+        if not (0.0 < float(cfg.ema) < 1.0):
+            raise ValueError(f"{field_name}.ema must be within (0, 1)")
+        if not isinstance(cfg.step, int | float) or isinstance(cfg.step, bool):
+            raise TypeError(f"{field_name}.step must be numeric")
+        if cfg.enabled and cfg.step <= 0:
+            raise ValueError(f"{field_name}.step must be greater than zero")
+        has_label_settings = any(
+            (
+                cfg.target_bad_gate_mass_by_label,
+                cfg.min_threshold_by_label,
+                cfg.max_threshold_by_label,
+            )
+        )
+        if not cfg.enabled and not has_label_settings:
+            return
+        JsonConfigLoader._validate_rate_label_mapping(
+            cfg.target_bad_gate_mass_by_label,
+            field_name=f"{field_name}.target_bad_gate_mass_by_label",
+            label_to_index=label_to_index,
+        )
+        JsonConfigLoader._validate_threshold_label_mapping(
+            cfg.min_threshold_by_label,
+            field_name=f"{field_name}.min_threshold_by_label",
+            label_to_index=label_to_index,
+            require_all_labels=True,
+        )
+        JsonConfigLoader._validate_threshold_label_mapping(
+            cfg.max_threshold_by_label,
+            field_name=f"{field_name}.max_threshold_by_label",
+            label_to_index=label_to_index,
+            require_all_labels=True,
+        )
+        for label_name, min_value in cfg.min_threshold_by_label.items():
+            max_value = cfg.max_threshold_by_label[label_name]
+            if min_value > max_value:
+                raise ValueError(
+                    f"{field_name}.min_threshold_by_label.{label_name} must be "
+                    "less than or equal to max_threshold_by_label"
+                )
+
+    @staticmethod
     def _validate_gate_branch_regret_weight_schedule(
         cfg: GateBranchRegretWeightScheduleConfig,
+        *,
+        field_name: str = "train.loss.gate_branch_regret.weight_schedule",
     ) -> None:
-        field_name = "train.loss.gate_branch_regret.weight_schedule"
         if not isinstance(cfg.enabled, bool):
             raise TypeError(f"{field_name}.enabled must be a boolean")
         if not isinstance(cfg.start_epoch, int):
@@ -1940,6 +2074,124 @@ class JsonConfigLoader:
                     "model.encoder.architecture.evidence_pooling.type="
                     "'class_aware_branch_gated'"
                 )
+        if not isinstance(cfg.loss.gate_bad_branch_suppression.enabled, bool):
+            raise ValueError(
+                "train.loss.gate_bad_branch_suppression.enabled must be a boolean"
+            )
+        if (
+            cfg.loss.gate_bad_branch_suppression.target
+            not in JsonConfigLoader._GATE_BAD_BRANCH_SUPPRESSION_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.gate_bad_branch_suppression.target must be "
+                "'true_class_gate'"
+            )
+        if (
+            cfg.loss.gate_bad_branch_suppression.source
+            not in JsonConfigLoader._GATE_BAD_BRANCH_SUPPRESSION_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.gate_bad_branch_suppression.source must be 'branch_logits'"
+            )
+        if (
+            cfg.loss.gate_bad_branch_suppression.mode
+            not in JsonConfigLoader._GATE_BAD_BRANCH_SUPPRESSION_MODES
+        ):
+            raise ValueError(
+                "train.loss.gate_bad_branch_suppression.mode must be "
+                "'margin_below_threshold'"
+            )
+        if (
+            cfg.loss.gate_bad_branch_suppression.margin_mode
+            not in JsonConfigLoader._GATE_BAD_BRANCH_SUPPRESSION_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.gate_bad_branch_suppression.margin_mode must be "
+                "'true_vs_hardest_negative'"
+            )
+        if not isinstance(
+            cfg.loss.gate_bad_branch_suppression.bad_margin_threshold,
+            int | float,
+        ) or isinstance(
+            cfg.loss.gate_bad_branch_suppression.bad_margin_threshold,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.gate_bad_branch_suppression.bad_margin_threshold "
+                "must be numeric"
+            )
+        JsonConfigLoader._validate_threshold_label_mapping(
+            cfg.loss.gate_bad_branch_suppression.bad_margin_threshold_by_label,
+            field_name=(
+                "train.loss.gate_bad_branch_suppression.bad_margin_threshold_by_label"
+            ),
+            label_to_index=label_to_index,
+        )
+        if not isinstance(cfg.loss.gate_bad_branch_suppression.warmup_epochs, int):
+            raise TypeError(
+                "train.loss.gate_bad_branch_suppression.warmup_epochs "
+                "must be an integer"
+            )
+        if cfg.loss.gate_bad_branch_suppression.warmup_epochs < 0:
+            raise ValueError(
+                "train.loss.gate_bad_branch_suppression.warmup_epochs must be "
+                "greater than or equal to zero"
+            )
+        JsonConfigLoader._validate_gate_branch_regret_weight_schedule(
+            cfg.loss.gate_bad_branch_suppression.weight_schedule,
+            field_name=("train.loss.gate_bad_branch_suppression.weight_schedule"),
+        )
+        if (
+            cfg.loss.gate_bad_branch_suppression.weight_schedule.enabled
+            and not cfg.loss.gate_bad_branch_suppression.enabled
+        ):
+            raise ValueError(
+                "train.loss.gate_bad_branch_suppression.weight_schedule requires "
+                "train.loss.gate_bad_branch_suppression.enabled=true"
+            )
+        JsonConfigLoader._validate_auto_bad_branch_threshold_by_train_stats(
+            cfg.loss.gate_bad_branch_suppression.auto_bad_margin_threshold_by_train_stats,
+            label_to_index=label_to_index,
+        )
+        if (
+            cfg.loss.gate_bad_branch_suppression.auto_bad_margin_threshold_by_train_stats.enabled
+            and not cfg.loss.gate_bad_branch_suppression.enabled
+        ):
+            raise ValueError(
+                "train.loss.gate_bad_branch_suppression."
+                "auto_bad_margin_threshold_by_train_stats requires "
+                "train.loss.gate_bad_branch_suppression.enabled=true"
+            )
+        if cfg.loss.gate_bad_branch_suppression.auto_bad_margin_threshold_by_train_stats.enabled:
+            bad_auto_cfg = cfg.loss.gate_bad_branch_suppression.auto_bad_margin_threshold_by_train_stats
+            for label_name, min_value in bad_auto_cfg.min_threshold_by_label.items():
+                initial_value = cfg.loss.gate_bad_branch_suppression.bad_margin_threshold_by_label.get(
+                    label_name,
+                    cfg.loss.gate_bad_branch_suppression.bad_margin_threshold,
+                )
+                max_value = bad_auto_cfg.max_threshold_by_label[label_name]
+                if initial_value < min_value or initial_value > max_value:
+                    raise ValueError(
+                        "train.loss.gate_bad_branch_suppression initial threshold "
+                        f"for {label_name!r} must be within auto min/max bounds"
+                    )
+        if cfg.loss.gate_bad_branch_suppression.enabled:
+            if cfg.loss.gate_bad_branch_suppression.weight <= 0:
+                raise ValueError(
+                    "train.loss.gate_bad_branch_suppression.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.gate_bad_branch_suppression is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.gate_bad_branch_suppression requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
         if not isinstance(cfg.loss.top_branch_margin.enabled, bool):
             raise ValueError("train.loss.top_branch_margin.enabled must be a boolean")
         if not isinstance(cfg.loss.top_branch_margin.class_weighted, bool):
@@ -2618,6 +2870,28 @@ class JsonConfigLoader:
             )
         )
         loss["gate_branch_regret"] = GateBranchRegretConfig(**gate_branch_regret)
+        gate_bad_branch_suppression = dict(loss.get("gate_bad_branch_suppression", {}))
+        gate_bad_branch_suppression["bad_margin_threshold_by_label"] = dict(
+            gate_bad_branch_suppression.get("bad_margin_threshold_by_label", {})
+        )
+        gate_bad_branch_suppression["weight_schedule"] = (
+            GateBranchRegretWeightScheduleConfig(
+                **dict(gate_bad_branch_suppression.get("weight_schedule", {}))
+            )
+        )
+        gate_bad_branch_suppression["auto_bad_margin_threshold_by_train_stats"] = (
+            AutoBadBranchThresholdByTrainStatsConfig(
+                **dict(
+                    gate_bad_branch_suppression.get(
+                        "auto_bad_margin_threshold_by_train_stats",
+                        {},
+                    )
+                )
+            )
+        )
+        loss["gate_bad_branch_suppression"] = GateBadBranchSuppressionConfig(
+            **gate_bad_branch_suppression
+        )
         top_branch_margin = dict(loss.get("top_branch_margin", {}))
         top_branch_margin["margin_by_label"] = dict(
             top_branch_margin.get("margin_by_label", {})

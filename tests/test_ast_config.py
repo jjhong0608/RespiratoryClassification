@@ -241,8 +241,8 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver12"
-    assert current_training_cfg.experiment.logging.terminal_width is None
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver14"
+    assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.train.loss.type == "cross_entropy"
     assert (
@@ -250,6 +250,7 @@ def test_retained_repo_configs_load() -> None:
         == "class_aware_branch_gated"
     )
     assert current_training_cfg.train.loss.top_branch_margin.enabled is True
+    assert current_training_cfg.train.loss.gate_bad_branch_suppression.enabled is True
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
     assert baseline_training_cfg.experiment.logging.terminal_width is None
     assert baseline_training_cfg.model.encoder.type == "multiscale_rdt_ast"
@@ -332,6 +333,26 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.loss.gate_branch_regret.target == "true_class_gate"
     assert cfg.train.loss.gate_branch_regret.source == "branch_logits"
     assert cfg.train.loss.gate_branch_regret.mode == "best_margin_regret"
+    assert cfg.train.loss.gate_bad_branch_suppression.enabled is False
+    assert cfg.train.loss.gate_bad_branch_suppression.weight == 0.0
+    assert cfg.train.loss.gate_bad_branch_suppression.target == "true_class_gate"
+    assert cfg.train.loss.gate_bad_branch_suppression.source == "branch_logits"
+    assert cfg.train.loss.gate_bad_branch_suppression.mode == "margin_below_threshold"
+    assert (
+        cfg.train.loss.gate_bad_branch_suppression.margin_mode
+        == "true_vs_hardest_negative"
+    )
+    assert cfg.train.loss.gate_bad_branch_suppression.bad_margin_threshold == 0.0
+    assert (
+        dict(cfg.train.loss.gate_bad_branch_suppression.bad_margin_threshold_by_label)
+        == {}
+    )
+    assert cfg.train.loss.gate_bad_branch_suppression.warmup_epochs == 0
+    assert cfg.train.loss.gate_bad_branch_suppression.weight_schedule.enabled is False
+    assert (
+        cfg.train.loss.gate_bad_branch_suppression.auto_bad_margin_threshold_by_train_stats.enabled
+        is False
+    )
     assert cfg.train.loss.top_branch_margin.enabled is False
     assert cfg.train.loss.top_branch_margin.weight == 0.0
     assert cfg.train.loss.top_branch_margin.margin == 0.0
@@ -1224,6 +1245,83 @@ def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
     assert regret_cfg.auto_positive_threshold_by_train_stats.step == 0.02
 
 
+def test_valid_gate_bad_branch_suppression_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_bad_branch_suppression"] = {
+        "enabled": True,
+        "weight": 0.025,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "margin_below_threshold",
+        "margin_mode": "true_vs_hardest_negative",
+        "bad_margin_threshold": 0.0,
+        "bad_margin_threshold_by_label": {
+            "normal": -0.2,
+            "crackle": 0.1,
+            "wheeze": 0.1,
+        },
+        "warmup_epochs": 15,
+        "weight_schedule": {
+            "enabled": True,
+            "start_epoch": 16,
+            "end_epoch": 25,
+            "start_multiplier": 0.3,
+            "end_multiplier": 1.0,
+        },
+        "auto_bad_margin_threshold_by_train_stats": {
+            "enabled": True,
+            "strategy": "ema_bad_gate_mass_controller",
+            "start_epoch": 31,
+            "update_interval_epochs": 1,
+            "ema": 0.9,
+            "step": 0.01,
+            "target_bad_gate_mass_by_label": {
+                "normal": 0.05,
+                "crackle": 0.15,
+                "wheeze": 0.1,
+            },
+            "min_threshold_by_label": {
+                "normal": -0.2,
+                "crackle": 0.0,
+                "wheeze": 0.0,
+            },
+            "max_threshold_by_label": {
+                "normal": -0.2,
+                "crackle": 0.35,
+                "wheeze": 0.3,
+            },
+        },
+    }
+    config_path = _write_json(tmp_path / "gate_bad_branch_suppression.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    bad_cfg = cfg.train.loss.gate_bad_branch_suppression
+    assert bad_cfg.enabled is True
+    assert bad_cfg.weight == 0.025
+    assert bad_cfg.target == "true_class_gate"
+    assert bad_cfg.source == "branch_logits"
+    assert bad_cfg.mode == "margin_below_threshold"
+    assert bad_cfg.margin_mode == "true_vs_hardest_negative"
+    assert bad_cfg.bad_margin_threshold == 0.0
+    assert dict(bad_cfg.bad_margin_threshold_by_label) == {
+        "normal": -0.2,
+        "crackle": 0.1,
+        "wheeze": 0.1,
+    }
+    assert bad_cfg.warmup_epochs == 15
+    assert bad_cfg.weight_schedule.enabled is True
+    assert bad_cfg.weight_schedule.start_epoch == 16
+    assert bad_cfg.weight_schedule.end_epoch == 25
+    assert bad_cfg.weight_schedule.start_multiplier == 0.3
+    assert bad_cfg.weight_schedule.end_multiplier == 1.0
+    auto_cfg = bad_cfg.auto_bad_margin_threshold_by_train_stats
+    assert auto_cfg.enabled is True
+    assert auto_cfg.strategy == "ema_bad_gate_mass_controller"
+    assert auto_cfg.step == 0.01
+    assert dict(auto_cfg.min_threshold_by_label)["normal"] == -0.2
+
+
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
@@ -1714,6 +1812,198 @@ def test_invalid_gate_branch_regret_label_adaptive_config_is_rejected(
         JsonConfigLoader.load_training(config_path)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "gate_bad_branch_suppression.enabled"),
+        ("weight", 0.0, "gate_bad_branch_suppression.weight"),
+        ("weight", -0.001, "gate_bad_branch_suppression.weight"),
+        ("target", "class_evidence_gate", "gate_bad_branch_suppression.target"),
+        ("source", "branch_logit_margin", "gate_bad_branch_suppression.source"),
+        ("mode", "best_margin_regret", "gate_bad_branch_suppression.mode"),
+        (
+            "margin_mode",
+            "minority_vs_major",
+            "gate_bad_branch_suppression.margin_mode",
+        ),
+        (
+            "bad_margin_threshold",
+            "low",
+            "gate_bad_branch_suppression.bad_margin_threshold",
+        ),
+        ("warmup_epochs", -1, "gate_bad_branch_suppression.warmup_epochs"),
+        ("warmup_epochs", "ten", "gate_bad_branch_suppression.warmup_epochs"),
+    ],
+)
+def test_invalid_gate_bad_branch_suppression_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_bad_branch_suppression"] = {
+        "enabled": True,
+        "weight": 0.025,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "margin_below_threshold",
+        "margin_mode": "true_vs_hardest_negative",
+        "bad_margin_threshold": 0.0,
+        "warmup_epochs": 15,
+    }
+    payload["train"]["loss"]["gate_bad_branch_suppression"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_gate_bad_branch_suppression.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("nested", "error"),
+    [
+        (
+            {"bad_margin_threshold_by_label": {"unknown": 0.1}},
+            "bad_margin_threshold_by_label",
+        ),
+        (
+            {"bad_margin_threshold_by_label": {"wheeze": "low"}},
+            "bad_margin_threshold_by_label",
+        ),
+        (
+            {"weight_schedule": {"enabled": "yes"}},
+            "gate_bad_branch_suppression.weight_schedule.enabled",
+        ),
+        (
+            {"weight_schedule": {"enabled": True, "start_epoch": 0}},
+            "gate_bad_branch_suppression.weight_schedule.start_epoch",
+        ),
+        (
+            {
+                "weight_schedule": {
+                    "enabled": True,
+                    "start_epoch": 16,
+                    "end_epoch": 15,
+                }
+            },
+            "gate_bad_branch_suppression.weight_schedule.end_epoch",
+        ),
+        (
+            {
+                "auto_bad_margin_threshold_by_train_stats": {
+                    "enabled": True,
+                    "strategy": "bad",
+                    "start_epoch": 31,
+                    "update_interval_epochs": 1,
+                    "ema": 0.9,
+                    "step": 0.01,
+                    "target_bad_gate_mass_by_label": {
+                        "normal": 0.05,
+                        "crackle": 0.15,
+                        "wheeze": 0.1,
+                    },
+                    "min_threshold_by_label": {
+                        "normal": -0.2,
+                        "crackle": 0.0,
+                        "wheeze": 0.0,
+                    },
+                    "max_threshold_by_label": {
+                        "normal": -0.2,
+                        "crackle": 0.35,
+                        "wheeze": 0.3,
+                    },
+                }
+            },
+            "auto_bad_margin_threshold_by_train_stats.strategy",
+        ),
+        (
+            {
+                "auto_bad_margin_threshold_by_train_stats": {
+                    "enabled": True,
+                    "strategy": "ema_bad_gate_mass_controller",
+                    "start_epoch": 31,
+                    "update_interval_epochs": 1,
+                    "ema": 0.9,
+                    "step": 0.0,
+                    "target_bad_gate_mass_by_label": {
+                        "normal": 0.05,
+                        "crackle": 0.15,
+                        "wheeze": 0.1,
+                    },
+                    "min_threshold_by_label": {
+                        "normal": -0.2,
+                        "crackle": 0.0,
+                        "wheeze": 0.0,
+                    },
+                    "max_threshold_by_label": {
+                        "normal": -0.2,
+                        "crackle": 0.35,
+                        "wheeze": 0.3,
+                    },
+                }
+            },
+            "auto_bad_margin_threshold_by_train_stats.step",
+        ),
+        (
+            {
+                "bad_margin_threshold_by_label": {"wheeze": 0.4},
+                "auto_bad_margin_threshold_by_train_stats": {
+                    "enabled": True,
+                    "strategy": "ema_bad_gate_mass_controller",
+                    "start_epoch": 31,
+                    "update_interval_epochs": 1,
+                    "ema": 0.9,
+                    "step": 0.01,
+                    "target_bad_gate_mass_by_label": {
+                        "normal": 0.05,
+                        "crackle": 0.15,
+                        "wheeze": 0.1,
+                    },
+                    "min_threshold_by_label": {
+                        "normal": -0.2,
+                        "crackle": 0.0,
+                        "wheeze": 0.0,
+                    },
+                    "max_threshold_by_label": {
+                        "normal": -0.2,
+                        "crackle": 0.35,
+                        "wheeze": 0.3,
+                    },
+                },
+            },
+            "initial threshold",
+        ),
+    ],
+)
+def test_invalid_gate_bad_branch_suppression_label_adaptive_config_is_rejected(
+    tmp_path: Path,
+    nested: dict[str, object],
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["gate_bad_branch_suppression"] = {
+        "enabled": True,
+        "weight": 0.025,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "margin_below_threshold",
+        "margin_mode": "true_vs_hardest_negative",
+        "bad_margin_threshold": 0.0,
+        "warmup_epochs": 15,
+        **nested,
+    }
+    config_path = _write_json(
+        tmp_path / "bad_gate_bad_branch_suppression_label_adaptive.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
 def test_gate_branch_alignment_config_is_no_longer_supported(tmp_path: Path) -> None:
     payload = _class_aware_cross_entropy_payload()
     payload["train"]["loss"]["gate_branch_alignment"] = {
@@ -1976,6 +2266,58 @@ def test_gate_weighted_branch_margin_requires_cross_entropy(tmp_path: Path) -> N
     config_path = _write_json(tmp_path / "gate_branch_margin_bce.json", payload)
 
     with pytest.raises(ValueError, match="gate_weighted_branch_margin.*cross_entropy"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_gate_bad_branch_suppression_requires_class_aware_pooling(
+    tmp_path: Path,
+) -> None:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "crackle": 1, "wheeze": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["train"]["loss"]["gate_bad_branch_suppression"] = {
+        "enabled": True,
+        "weight": 0.025,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "margin_below_threshold",
+        "margin_mode": "true_vs_hardest_negative",
+        "bad_margin_threshold": 0.0,
+    }
+    config_path = _write_json(
+        tmp_path / "gate_bad_branch_suppression_mean_pooling.json",
+        payload,
+    )
+
+    with pytest.raises(ValueError, match="gate_bad_branch_suppression requires"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_gate_bad_branch_suppression_requires_cross_entropy(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    payload["train"]["loss"]["gate_bad_branch_suppression"] = {
+        "enabled": True,
+        "weight": 0.025,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "margin_below_threshold",
+        "margin_mode": "true_vs_hardest_negative",
+        "bad_margin_threshold": 0.0,
+    }
+    config_path = _write_json(
+        tmp_path / "gate_bad_branch_suppression_bce.json",
+        payload,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="gate_bad_branch_suppression.*cross_entropy",
+    ):
         JsonConfigLoader.load_training(config_path)
 
 

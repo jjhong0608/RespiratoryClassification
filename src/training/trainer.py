@@ -39,7 +39,9 @@ from src.utils.config import (
     ClassGatedBranchLogitMarginConfig,
     ClassGateDiversityRegularizationConfig,
     EarlyStoppingConfig,
+    GateBadBranchSuppressionConfig,
     GateBranchRegretConfig,
+    GateBranchRegretWeightScheduleConfig,
     GateEntropyRegularizationConfig,
     GateWeightedBranchMarginConfig,
     LabelSmoothingConfig,
@@ -101,6 +103,10 @@ class TrainerConfig:
         default_factory=GateBranchRegretConfig
     )
     gate_branch_regret_positive_threshold_by_class: tuple[float, ...] | None = None
+    gate_bad_branch_suppression: GateBadBranchSuppressionConfig = field(
+        default_factory=GateBadBranchSuppressionConfig
+    )
+    gate_bad_branch_suppression_threshold_by_class: tuple[float, ...] | None = None
     top_branch_margin: TopBranchMarginConfig = field(
         default_factory=TopBranchMarginConfig
     )
@@ -135,6 +141,11 @@ class LossComponents:
     gate_branch_regret_eligible_fraction: Tensor | None = None
     gate_branch_regret_weight_multiplier: Tensor | None = None
     gate_branch_regret_effective_weight: Tensor | None = None
+    gate_bad_branch_suppression: Tensor | None = None
+    gate_bad_branch_suppression_loss: Tensor | None = None
+    gate_bad_branch_suppression_bad_gate_mass: Tensor | None = None
+    gate_bad_branch_suppression_weight_multiplier: Tensor | None = None
+    gate_bad_branch_suppression_effective_weight: Tensor | None = None
     top_branch_margin: Tensor | None = None
     top_branch_margin_loss: Tensor | None = None
     branch_binary_aux_weight: float = 0.0
@@ -163,8 +174,10 @@ class MonitorRecord:
 class AdaptiveBranchObjectiveState:
     top_branch_margin_by_class: list[float] | None
     gate_branch_regret_positive_threshold_by_class: list[float] | None
+    gate_bad_branch_suppression_threshold_by_class: list[float] | None
     top_branch_violation_rate_ema_by_class: list[float | None]
     gate_branch_regret_eligible_rate_ema_by_class: list[float | None]
+    gate_bad_branch_suppression_bad_gate_mass_ema_by_class: list[float | None]
     last_update_epoch: int = 0
 
 
@@ -174,6 +187,8 @@ class BranchObjectiveEpochStats:
     top_violation_counts: list[int]
     regret_counts: list[int]
     regret_eligible_counts: list[int]
+    bad_suppression_counts: list[int]
+    bad_suppression_gate_mass_sums: list[float]
 
 
 def resolve_branch_binary_aux_weight(
@@ -437,11 +452,25 @@ class Trainer(LoggingMixin):
                     "gate_branch_regret_positive_threshold_by_class length must "
                     "match num_classes"
                 )
+        bad_threshold_by_class: list[float] | None = None
+        if self.cfg.gate_bad_branch_suppression.enabled:
+            bad_threshold_by_class = list(
+                self.cfg.gate_bad_branch_suppression_threshold_by_class
+                or (float(self.cfg.gate_bad_branch_suppression.bad_margin_threshold),)
+                * num_classes
+            )
+            if len(bad_threshold_by_class) != num_classes:
+                raise ValueError(
+                    "gate_bad_branch_suppression_threshold_by_class length must "
+                    "match num_classes"
+                )
         return AdaptiveBranchObjectiveState(
             top_branch_margin_by_class=top_margin_by_class,
             gate_branch_regret_positive_threshold_by_class=regret_threshold_by_class,
+            gate_bad_branch_suppression_threshold_by_class=bad_threshold_by_class,
             top_branch_violation_rate_ema_by_class=[None] * num_classes,
             gate_branch_regret_eligible_rate_ema_by_class=[None] * num_classes,
+            gate_bad_branch_suppression_bad_gate_mass_ema_by_class=[None] * num_classes,
         )
 
     @staticmethod
@@ -492,6 +521,14 @@ class Trainer(LoggingMixin):
             "gate_branch_regret_positive_threshold_by_label": self._label_value_dict(
                 state.gate_branch_regret_positive_threshold_by_class
             ),
+            "gate_bad_branch_suppression_threshold_by_class": (
+                list(state.gate_bad_branch_suppression_threshold_by_class)
+                if state.gate_bad_branch_suppression_threshold_by_class is not None
+                else None
+            ),
+            "gate_bad_branch_suppression_threshold_by_label": self._label_value_dict(
+                state.gate_bad_branch_suppression_threshold_by_class
+            ),
             "top_branch_violation_rate_ema_by_class": list(
                 state.top_branch_violation_rate_ema_by_class
             ),
@@ -503,6 +540,14 @@ class Trainer(LoggingMixin):
             ),
             "gate_branch_regret_eligible_rate_ema_by_label": self._label_value_dict(
                 state.gate_branch_regret_eligible_rate_ema_by_class
+            ),
+            "gate_bad_branch_suppression_bad_gate_mass_ema_by_class": list(
+                state.gate_bad_branch_suppression_bad_gate_mass_ema_by_class
+            ),
+            "gate_bad_branch_suppression_bad_gate_mass_ema_by_label": (
+                self._label_value_dict(
+                    state.gate_bad_branch_suppression_bad_gate_mass_ema_by_class
+                )
             ),
             "last_update_epoch": state.last_update_epoch,
         }
@@ -563,9 +608,27 @@ class Trainer(LoggingMixin):
             fallback=float(self.cfg.gate_branch_regret.positive_threshold),
         )
 
-    def _gate_branch_regret_weight_multiplier(self, epoch: int) -> float:
-        schedule = self.cfg.gate_branch_regret.weight_schedule
-        if int(epoch) <= int(self.cfg.gate_branch_regret.warmup_epochs):
+    def _gate_bad_branch_suppression_thresholds(
+        self,
+        label_indices: Tensor,
+        reference: Tensor,
+    ) -> Tensor:
+        return self._class_values_tensor(
+            self._adaptive_branch_objective_state.gate_bad_branch_suppression_threshold_by_class,
+            label_indices,
+            device=reference.device,
+            dtype=reference.dtype,
+            fallback=float(self.cfg.gate_bad_branch_suppression.bad_margin_threshold),
+        )
+
+    @staticmethod
+    def _scheduled_weight_multiplier(
+        *,
+        epoch: int,
+        warmup_epochs: int,
+        schedule: GateBranchRegretWeightScheduleConfig,
+    ) -> float:
+        if int(epoch) <= int(warmup_epochs):
             return 0.0
         if not schedule.enabled:
             return 1.0
@@ -583,6 +646,20 @@ class Trainer(LoggingMixin):
             * (float(schedule.end_multiplier) - float(schedule.start_multiplier))
         )
 
+    def _gate_branch_regret_weight_multiplier(self, epoch: int) -> float:
+        return self._scheduled_weight_multiplier(
+            epoch=epoch,
+            warmup_epochs=self.cfg.gate_branch_regret.warmup_epochs,
+            schedule=self.cfg.gate_branch_regret.weight_schedule,
+        )
+
+    def _gate_bad_branch_suppression_weight_multiplier(self, epoch: int) -> float:
+        return self._scheduled_weight_multiplier(
+            epoch=epoch,
+            warmup_epochs=self.cfg.gate_bad_branch_suppression.warmup_epochs,
+            schedule=self.cfg.gate_bad_branch_suppression.weight_schedule,
+        )
+
     def _new_branch_objective_epoch_stats(self) -> BranchObjectiveEpochStats:
         num_classes = int(self.cfg.num_classes)
         return BranchObjectiveEpochStats(
@@ -590,6 +667,8 @@ class Trainer(LoggingMixin):
             top_violation_counts=[0] * num_classes,
             regret_counts=[0] * num_classes,
             regret_eligible_counts=[0] * num_classes,
+            bad_suppression_counts=[0] * num_classes,
+            bad_suppression_gate_mass_sums=[0.0] * num_classes,
         )
 
     def _criterion_on(self, device: torch.device) -> nn.Module:
@@ -1425,6 +1504,83 @@ class Trainer(LoggingMixin):
             effective_weight,
         )
 
+    def _compute_gate_bad_branch_suppression_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        cfg = self.cfg.gate_bad_branch_suppression
+        weight_multiplier_value = self._gate_bad_branch_suppression_weight_multiplier(
+            epoch
+        )
+        weight_multiplier = output.logits.new_tensor(weight_multiplier_value)
+        effective_weight = output.logits.new_tensor(
+            float(cfg.weight) * weight_multiplier_value
+        )
+        if cfg.target != "true_class_gate":
+            raise ValueError(
+                "gate bad branch suppression supports only target='true_class_gate'"
+            )
+        if cfg.source != "branch_logits":
+            raise ValueError(
+                "gate bad branch suppression supports only source='branch_logits'"
+            )
+        if cfg.mode != "margin_below_threshold":
+            raise ValueError(
+                "gate bad branch suppression supports only "
+                "mode='margin_below_threshold'"
+            )
+        if cfg.margin_mode != "true_vs_hardest_negative":
+            raise ValueError(
+                "gate bad branch suppression supports only "
+                "margin_mode='true_vs_hardest_negative'"
+            )
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = output.logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss, weight_multiplier, effective_weight
+        branch_logits, gate_weights, label_indices = (
+            self._class_aware_branch_margin_inputs(
+                output,
+                labels,
+                loss_name="gate bad branch suppression",
+            )
+        )
+        if label_indices.numel() == 0:
+            raw_loss = branch_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss, weight_multiplier, effective_weight
+
+        branch_margin = self._true_class_branch_margins(
+            branch_logits,
+            label_indices,
+        ).detach()
+        true_class_gate = self._true_class_gate_weights(
+            gate_weights,
+            label_indices,
+            dtype=branch_logits.dtype,
+        )
+        thresholds = self._gate_bad_branch_suppression_thresholds(
+            label_indices,
+            branch_margin[:, 0],
+        )
+        bad_penalty = torch.relu(thresholds.unsqueeze(1) - branch_margin)
+        sample_penalty = (true_class_gate * bad_penalty).sum(dim=1)
+        raw_loss = sample_penalty.mean()
+        bad_gate_mass = (
+            true_class_gate
+            * (branch_margin < thresholds.unsqueeze(1)).to(dtype=branch_logits.dtype)
+        ).sum(dim=1)
+        bad_gate_mass_mean = bad_gate_mass.mean()
+        weighted_loss = effective_weight * raw_loss
+        return (
+            raw_loss,
+            weighted_loss,
+            bad_gate_mass_mean,
+            weight_multiplier,
+            effective_weight,
+        )
+
     def _branch_binary_targets(
         self,
         labels: Tensor,
@@ -1640,6 +1796,25 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + gate_branch_regret_loss
             monitor_total = monitor_total + gate_branch_regret_loss
+        gate_bad_branch_suppression: Tensor | None = None
+        gate_bad_branch_suppression_loss: Tensor | None = None
+        gate_bad_branch_suppression_bad_gate_mass: Tensor | None = None
+        gate_bad_branch_suppression_weight_multiplier: Tensor | None = None
+        gate_bad_branch_suppression_effective_weight: Tensor | None = None
+        if self.cfg.gate_bad_branch_suppression.enabled:
+            (
+                gate_bad_branch_suppression,
+                gate_bad_branch_suppression_loss,
+                gate_bad_branch_suppression_bad_gate_mass,
+                gate_bad_branch_suppression_weight_multiplier,
+                gate_bad_branch_suppression_effective_weight,
+            ) = self._compute_gate_bad_branch_suppression_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + gate_bad_branch_suppression_loss
+            monitor_total = monitor_total + gate_bad_branch_suppression_loss
         return LossComponents(
             total=monitor_total if use_monitor_total else scheduled_total,
             total_scheduled=scheduled_total,
@@ -1664,6 +1839,17 @@ class Trainer(LoggingMixin):
             gate_branch_regret_eligible_fraction=(gate_branch_regret_eligible_fraction),
             gate_branch_regret_weight_multiplier=(gate_branch_regret_weight_multiplier),
             gate_branch_regret_effective_weight=gate_branch_regret_effective_weight,
+            gate_bad_branch_suppression=gate_bad_branch_suppression,
+            gate_bad_branch_suppression_loss=gate_bad_branch_suppression_loss,
+            gate_bad_branch_suppression_bad_gate_mass=(
+                gate_bad_branch_suppression_bad_gate_mass
+            ),
+            gate_bad_branch_suppression_weight_multiplier=(
+                gate_bad_branch_suppression_weight_multiplier
+            ),
+            gate_bad_branch_suppression_effective_weight=(
+                gate_bad_branch_suppression_effective_weight
+            ),
             top_branch_margin=top_branch_margin,
             top_branch_margin_loss=top_branch_margin_loss,
             branch_binary_aux_weight=branch_binary_weight,
@@ -1687,6 +1873,24 @@ class Trainer(LoggingMixin):
                 continue
             counts[class_index] += count
             flag_counts[class_index] += int(flags_cpu[class_mask].sum().item())
+
+    def _add_sums_by_label(
+        self,
+        label_indices: Tensor,
+        values: Tensor,
+        *,
+        counts: list[int],
+        value_sums: list[float],
+    ) -> None:
+        labels_cpu = label_indices.detach().cpu()
+        values_cpu = values.detach().cpu()
+        for class_index in range(int(self.cfg.num_classes)):
+            class_mask = labels_cpu == class_index
+            count = int(class_mask.sum().item())
+            if count == 0:
+                continue
+            counts[class_index] += count
+            value_sums[class_index] += float(values_cpu[class_mask].sum().item())
 
     def _observe_branch_objective_stats(
         self,
@@ -1739,6 +1943,41 @@ class Trainer(LoggingMixin):
                     eligible,
                     counts=stats.regret_counts,
                     flag_counts=stats.regret_eligible_counts,
+                )
+        bad_cfg = self.cfg.gate_bad_branch_suppression.auto_bad_margin_threshold_by_train_stats
+        if bad_cfg.enabled:
+            branch_logits, gate_weights, label_indices = (
+                self._class_aware_branch_margin_inputs(
+                    output,
+                    labels,
+                    loss_name="gate bad branch suppression adaptive stats",
+                )
+            )
+            if label_indices.numel() > 0:
+                branch_margin = self._true_class_branch_margins(
+                    branch_logits,
+                    label_indices,
+                ).detach()
+                true_class_gate = self._true_class_gate_weights(
+                    gate_weights,
+                    label_indices,
+                    dtype=branch_logits.dtype,
+                ).detach()
+                thresholds = self._gate_bad_branch_suppression_thresholds(
+                    label_indices,
+                    branch_margin[:, 0],
+                )
+                bad_gate_mass = (
+                    true_class_gate
+                    * (branch_margin < thresholds.unsqueeze(1)).to(
+                        dtype=branch_logits.dtype
+                    )
+                ).sum(dim=1)
+                self._add_sums_by_label(
+                    label_indices,
+                    bad_gate_mass,
+                    counts=stats.bad_suppression_counts,
+                    value_sums=stats.bad_suppression_gate_mass_sums,
                 )
 
     def _update_adaptive_rate(
@@ -1832,6 +2071,50 @@ class Trainer(LoggingMixin):
                 state.gate_branch_regret_positive_threshold_by_class[class_index] = (
                     current
                 )
+        bad_cfg = self.cfg.gate_bad_branch_suppression.auto_bad_margin_threshold_by_train_stats
+        if (
+            bad_cfg.enabled
+            and state.gate_bad_branch_suppression_threshold_by_class is not None
+            and epoch >= int(bad_cfg.start_epoch)
+            and (epoch - int(bad_cfg.start_epoch)) % int(bad_cfg.update_interval_epochs)
+            == 0
+        ):
+            for class_index, count in enumerate(stats.bad_suppression_counts):
+                if count == 0:
+                    continue
+                observed = stats.bad_suppression_gate_mass_sums[class_index] / float(
+                    count
+                )
+                previous = state.gate_bad_branch_suppression_bad_gate_mass_ema_by_class[
+                    class_index
+                ]
+                ema_rate = self._update_adaptive_rate(
+                    previous,
+                    observed,
+                    ema=float(bad_cfg.ema),
+                )
+                state.gate_bad_branch_suppression_bad_gate_mass_ema_by_class[
+                    class_index
+                ] = ema_rate
+                label_name = self._class_names()[class_index]
+                target_mass = float(bad_cfg.target_bad_gate_mass_by_label[label_name])
+                current = state.gate_bad_branch_suppression_threshold_by_class[
+                    class_index
+                ]
+                if ema_rate < target_mass:
+                    current += float(bad_cfg.step)
+                else:
+                    current -= float(bad_cfg.step)
+                current = min(
+                    max(
+                        current,
+                        float(bad_cfg.min_threshold_by_label[label_name]),
+                    ),
+                    float(bad_cfg.max_threshold_by_label[label_name]),
+                )
+                state.gate_bad_branch_suppression_threshold_by_class[class_index] = (
+                    current
+                )
         state.last_update_epoch = int(epoch)
 
     def _branch_objective_stats_summary(
@@ -1859,6 +2142,15 @@ class Trainer(LoggingMixin):
                 stats.regret_counts,
                 stats.regret_eligible_counts,
             ),
+            "gate_bad_branch_suppression_bad_gate_mass_by_label": {
+                label_name: (
+                    stats.bad_suppression_gate_mass_sums[index]
+                    / float(stats.bad_suppression_counts[index])
+                    if stats.bad_suppression_counts[index] > 0
+                    else None
+                )
+                for index, label_name in enumerate(labels)
+            },
         }
 
     def _branch_objective_diagnostic_rows(
@@ -1940,6 +2232,53 @@ class Trainer(LoggingMixin):
                         weight_multiplier
                     )
                     row["gate_branch_regret_effective_weight"] = float(effective_weight)
+        if (
+            self.cfg.gate_bad_branch_suppression.enabled
+            and output.class_evidence_gate_weights is not None
+        ):
+            gate_weights = output.class_evidence_gate_weights.detach()
+            if tuple(gate_weights.shape) == (
+                int(branch_logits.shape[0]),
+                int(branch_logits.shape[2]),
+                int(branch_logits.shape[1]),
+            ):
+                true_class_gate = self._true_class_gate_weights(
+                    gate_weights,
+                    label_indices,
+                    dtype=branch_logits.dtype,
+                )
+                thresholds = self._gate_bad_branch_suppression_thresholds(
+                    label_indices,
+                    branch_margin[:, 0],
+                )
+                bad_mask = branch_margin < thresholds.unsqueeze(1)
+                bad_penalty = torch.relu(thresholds.unsqueeze(1) - branch_margin)
+                sample_penalty = (true_class_gate * bad_penalty).sum(dim=1)
+                bad_gate_mass = (
+                    true_class_gate * bad_mask.to(dtype=branch_logits.dtype)
+                ).sum(dim=1)
+                weight_multiplier = self._gate_bad_branch_suppression_weight_multiplier(
+                    epoch
+                )
+                effective_weight = float(
+                    self.cfg.gate_bad_branch_suppression.weight
+                ) * float(weight_multiplier)
+                for index, row in enumerate(rows):
+                    row["gate_bad_branch_suppression_threshold"] = float(
+                        thresholds[index].detach().cpu().item()
+                    )
+                    row["gate_bad_branch_suppression_bad_gate_mass"] = float(
+                        bad_gate_mass[index].detach().cpu().item()
+                    )
+                    row["gate_bad_branch_suppression_penalty"] = float(
+                        sample_penalty[index].detach().cpu().item()
+                    )
+                    row["gate_bad_branch_suppression_weight_multiplier"] = float(
+                        weight_multiplier
+                    )
+                    row["gate_bad_branch_suppression_effective_weight"] = float(
+                        effective_weight
+                    )
         return rows
 
     def _epoch(
@@ -1980,6 +2319,11 @@ class Trainer(LoggingMixin):
             "gate_branch_regret_eligible_fraction": 0.0,
             "gate_branch_regret_weight_multiplier": 0.0,
             "gate_branch_regret_effective_weight": 0.0,
+            "gate_bad_branch_suppression": 0.0,
+            "gate_bad_branch_suppression_loss": 0.0,
+            "gate_bad_branch_suppression_bad_gate_mass": 0.0,
+            "gate_bad_branch_suppression_weight_multiplier": 0.0,
+            "gate_bad_branch_suppression_effective_weight": 0.0,
             "top_branch_margin": 0.0,
             "top_branch_margin_loss": 0.0,
             "branch_binary_aux_weight": 0.0,
@@ -1998,6 +2342,7 @@ class Trainer(LoggingMixin):
             and (
                 self.cfg.top_branch_margin.auto_margin_by_train_stats.enabled
                 or self.cfg.gate_branch_regret.auto_positive_threshold_by_train_stats.enabled
+                or self.cfg.gate_bad_branch_suppression.auto_bad_margin_threshold_by_train_stats.enabled
             )
             else None
         )
@@ -2087,6 +2432,21 @@ class Trainer(LoggingMixin):
                 ),
                 "gate_branch_regret_effective_weight": (
                     loss_components.gate_branch_regret_effective_weight
+                ),
+                "gate_bad_branch_suppression": (
+                    loss_components.gate_bad_branch_suppression
+                ),
+                "gate_bad_branch_suppression_loss": (
+                    loss_components.gate_bad_branch_suppression_loss
+                ),
+                "gate_bad_branch_suppression_bad_gate_mass": (
+                    loss_components.gate_bad_branch_suppression_bad_gate_mass
+                ),
+                "gate_bad_branch_suppression_weight_multiplier": (
+                    loss_components.gate_bad_branch_suppression_weight_multiplier
+                ),
+                "gate_bad_branch_suppression_effective_weight": (
+                    loss_components.gate_bad_branch_suppression_effective_weight
                 ),
                 "top_branch_margin": loss_components.top_branch_margin,
                 "top_branch_margin_loss": loss_components.top_branch_margin_loss,
@@ -2189,11 +2549,19 @@ class Trainer(LoggingMixin):
                 "adaptive_gate_branch_regret_positive_threshold_by_label": (
                     adaptive_state["gate_branch_regret_positive_threshold_by_label"]
                 ),
+                "adaptive_gate_bad_branch_suppression_threshold_by_label": (
+                    adaptive_state["gate_bad_branch_suppression_threshold_by_label"]
+                ),
                 "adaptive_top_branch_violation_rate_ema_by_label": adaptive_state[
                     "top_branch_violation_rate_ema_by_label"
                 ],
                 "adaptive_gate_branch_regret_eligible_rate_ema_by_label": (
                     adaptive_state["gate_branch_regret_eligible_rate_ema_by_label"]
+                ),
+                "adaptive_gate_bad_branch_suppression_bad_gate_mass_ema_by_label": (
+                    adaptive_state[
+                        "gate_bad_branch_suppression_bad_gate_mass_ema_by_label"
+                    ]
                 ),
             }
         )
@@ -2370,6 +2738,32 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "train_gate_bad_branch_suppression": train_components.get(
+                        "gate_bad_branch_suppression",
+                        0.0,
+                    ),
+                    "train_loss_gate_bad_branch_suppression": train_components.get(
+                        "gate_bad_branch_suppression_loss",
+                        0.0,
+                    ),
+                    "train_gate_bad_branch_suppression_bad_gate_mass": (
+                        train_components.get(
+                            "gate_bad_branch_suppression_bad_gate_mass",
+                            0.0,
+                        )
+                    ),
+                    "train_gate_bad_branch_suppression_weight_multiplier": (
+                        train_components.get(
+                            "gate_bad_branch_suppression_weight_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "train_gate_bad_branch_suppression_effective_weight": (
+                        train_components.get(
+                            "gate_bad_branch_suppression_effective_weight",
+                            0.0,
+                        )
+                    ),
                     "train_top_branch_margin": train_components.get(
                         "top_branch_margin",
                         0.0,
@@ -2469,6 +2863,32 @@ class Trainer(LoggingMixin):
                     "val_gate_branch_regret_effective_weight": val_components.get(
                         "gate_branch_regret_effective_weight",
                         0.0,
+                    ),
+                    "val_gate_bad_branch_suppression": val_components.get(
+                        "gate_bad_branch_suppression",
+                        0.0,
+                    ),
+                    "val_loss_gate_bad_branch_suppression": val_components.get(
+                        "gate_bad_branch_suppression_loss",
+                        0.0,
+                    ),
+                    "val_gate_bad_branch_suppression_bad_gate_mass": (
+                        val_components.get(
+                            "gate_bad_branch_suppression_bad_gate_mass",
+                            0.0,
+                        )
+                    ),
+                    "val_gate_bad_branch_suppression_weight_multiplier": (
+                        val_components.get(
+                            "gate_bad_branch_suppression_weight_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "val_gate_bad_branch_suppression_effective_weight": (
+                        val_components.get(
+                            "gate_bad_branch_suppression_effective_weight",
+                            0.0,
+                        )
                     ),
                     "val_top_branch_margin": val_components.get(
                         "top_branch_margin",

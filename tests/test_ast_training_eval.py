@@ -38,6 +38,7 @@ from src.utils.config import (
     AstFbankConfig,
     AttentionEntropyLossConfig,
     AudioConfig,
+    AutoBadBranchThresholdByTrainStatsConfig,
     AutoMarginByTrainStatsConfig,
     AutoPositiveThresholdByTrainStatsConfig,
     BandPassConfig,
@@ -58,6 +59,7 @@ from src.utils.config import (
     EvalConfig,
     EvidencePoolingConfig,
     ExperimentConfig,
+    GateBadBranchSuppressionConfig,
     GateBranchRegretConfig,
     GateBranchRegretWeightScheduleConfig,
     GateEntropyRegularizationConfig,
@@ -296,6 +298,17 @@ def _trainer_cfg(
         GateBranchRegretWeightScheduleConfig | None
     ) = None,
     gate_branch_regret_auto: AutoPositiveThresholdByTrainStatsConfig | None = None,
+    gate_bad_branch_suppression_enabled: bool = False,
+    gate_bad_branch_suppression_weight: float = 0.0,
+    gate_bad_branch_suppression_bad_margin_threshold: float = 0.0,
+    gate_bad_branch_suppression_threshold_by_class: tuple[float, ...] | None = None,
+    gate_bad_branch_suppression_warmup_epochs: int = 0,
+    gate_bad_branch_suppression_weight_schedule: (
+        GateBranchRegretWeightScheduleConfig | None
+    ) = None,
+    gate_bad_branch_suppression_auto: (
+        AutoBadBranchThresholdByTrainStatsConfig | None
+    ) = None,
     top_branch_margin_enabled: bool = False,
     top_branch_margin_weight: float = 0.0,
     top_branch_margin_value: float = 0.0,
@@ -431,6 +444,27 @@ def _trainer_cfg(
         ),
         gate_branch_regret_positive_threshold_by_class=(
             gate_branch_regret_positive_threshold_by_class
+        ),
+        gate_bad_branch_suppression=GateBadBranchSuppressionConfig(
+            enabled=gate_bad_branch_suppression_enabled,
+            weight=gate_bad_branch_suppression_weight,
+            target="true_class_gate",
+            source="branch_logits",
+            mode="margin_below_threshold",
+            margin_mode="true_vs_hardest_negative",
+            bad_margin_threshold=(gate_bad_branch_suppression_bad_margin_threshold),
+            warmup_epochs=gate_bad_branch_suppression_warmup_epochs,
+            weight_schedule=(
+                gate_bad_branch_suppression_weight_schedule
+                or GateBranchRegretWeightScheduleConfig()
+            ),
+            auto_bad_margin_threshold_by_train_stats=(
+                gate_bad_branch_suppression_auto
+                or AutoBadBranchThresholdByTrainStatsConfig()
+            ),
+        ),
+        gate_bad_branch_suppression_threshold_by_class=(
+            gate_bad_branch_suppression_threshold_by_class
         ),
         top_branch_margin=TopBranchMarginConfig(
             enabled=top_branch_margin_enabled,
@@ -2401,6 +2435,208 @@ def test_trainer_gate_branch_regret_uses_label_specific_thresholds() -> None:
     assert torch.isclose(effective_weight, torch.tensor(0.5))
 
 
+def test_trainer_gate_bad_branch_suppression_is_zero_during_warmup() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_bad_branch_suppression_enabled=True,
+            gate_bad_branch_suppression_weight=0.025,
+            gate_bad_branch_suppression_warmup_epochs=15,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    (
+        raw_loss,
+        weighted_loss,
+        bad_gate_mass,
+        weight_multiplier,
+        effective_weight,
+    ) = trainer._compute_gate_bad_branch_suppression_loss(
+        output,
+        labels,
+        epoch=15,
+    )
+
+    assert torch.isclose(raw_loss, torch.tensor(0.0))
+    assert torch.isclose(weighted_loss, torch.tensor(0.0))
+    assert torch.isclose(bad_gate_mass, torch.tensor(0.0))
+    assert torch.isclose(weight_multiplier, torch.tensor(0.0))
+    assert torch.isclose(effective_weight, torch.tensor(0.0))
+
+
+def test_trainer_gate_bad_branch_suppression_updates_gate_not_branch_logits() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_bad_branch_suppression_enabled=True,
+            gate_bad_branch_suppression_weight=0.5,
+            gate_bad_branch_suppression_bad_margin_threshold=0.0,
+        )
+    )
+    branch_logits = torch.tensor(
+        [[[1.2, 0.2, 0.5], [0.3, 0.1, 0.9]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    gate_weights = torch.tensor(
+        [[[0.2, 0.8], [0.5, 0.5], [0.6, 0.4]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=branch_logits,
+        class_evidence_gate_weights=gate_weights,
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    (
+        raw_loss,
+        weighted_loss,
+        bad_gate_mass,
+        weight_multiplier,
+        effective_weight,
+    ) = trainer._compute_gate_bad_branch_suppression_loss(
+        output,
+        labels,
+        epoch=1,
+    )
+
+    branch_margin = torch.tensor([[0.7, -0.6]])
+    expected_raw = (
+        torch.tensor([[0.2, 0.8]]) * torch.relu(torch.tensor(0.0) - branch_margin)
+    ).sum()
+
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.5 * expected_raw)
+    assert torch.isclose(bad_gate_mass, torch.tensor(0.8))
+    assert torch.isclose(weight_multiplier, torch.tensor(1.0))
+    assert torch.isclose(effective_weight, torch.tensor(0.5))
+
+    weighted_loss.backward()
+    assert branch_logits.grad is None
+    assert gate_weights.grad is not None
+
+
+def test_trainer_gate_bad_branch_suppression_weight_schedule() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_bad_branch_suppression_enabled=True,
+            gate_bad_branch_suppression_weight=0.025,
+            gate_bad_branch_suppression_bad_margin_threshold=0.0,
+            gate_bad_branch_suppression_warmup_epochs=15,
+            gate_bad_branch_suppression_weight_schedule=(
+                GateBranchRegretWeightScheduleConfig(
+                    enabled=True,
+                    start_epoch=16,
+                    end_epoch=25,
+                    start_multiplier=0.3,
+                    end_multiplier=1.0,
+                )
+            ),
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=torch.tensor(
+            [[[1.2, 0.2, 0.5], [0.3, 0.1, 0.9]]],
+            dtype=torch.float32,
+        ),
+        class_evidence_gate_weights=torch.tensor(
+            [[[0.2, 0.8], [0.5, 0.5], [0.6, 0.4]]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    expected = {
+        15: 0.0,
+        16: 0.3,
+        25: 1.0,
+        26: 1.0,
+    }
+    for epoch, expected_multiplier in expected.items():
+        (
+            _raw_loss,
+            _weighted_loss,
+            _bad_gate_mass,
+            weight_multiplier,
+            effective_weight,
+        ) = trainer._compute_gate_bad_branch_suppression_loss(
+            output,
+            labels,
+            epoch=epoch,
+        )
+        assert torch.isclose(weight_multiplier, torch.tensor(expected_multiplier))
+        assert torch.isclose(
+            effective_weight,
+            torch.tensor(0.025 * expected_multiplier),
+        )
+
+
+def test_trainer_gate_bad_branch_suppression_uses_label_specific_thresholds() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            gate_bad_branch_suppression_enabled=True,
+            gate_bad_branch_suppression_weight=0.5,
+            gate_bad_branch_suppression_bad_margin_threshold=0.0,
+            gate_bad_branch_suppression_threshold_by_class=(-0.2, 0.1, 0.1),
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor(
+            [
+                [[1.2, 0.2, 0.5], [0.3, 0.1, 0.9]],
+                [[0.2, 0.6, 0.1], [0.1, 0.5, 0.0]],
+            ],
+            dtype=torch.float32,
+        ),
+        class_evidence_gate_weights=torch.tensor(
+            [
+                [[0.2, 0.8], [0.5, 0.5], [0.6, 0.4]],
+                [[0.4, 0.6], [0.75, 0.25], [0.5, 0.5]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_loss, weighted_loss, bad_gate_mass, _, _ = (
+        trainer._compute_gate_bad_branch_suppression_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+
+    expected_sample0 = 0.8 * max(0.0, -0.2 - (-0.6))
+    expected_sample1 = 0.25 * max(0.0, 0.1 - 0.4)
+    expected_raw = torch.tensor((expected_sample0 + expected_sample1) / 2)
+
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.5 * expected_raw)
+    assert torch.isclose(bad_gate_mass, torch.tensor((0.8 + 0.0) / 2))
+
+
 def test_trainer_gate_weighted_branch_margin_rejects_unsupported_selection() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -2552,6 +2788,10 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
             gate_branch_regret_positive_threshold=0.3,
             gate_branch_regret_positive_threshold_by_class=(0.3, 0.2, 0.1),
             gate_branch_regret_tolerance=0.05,
+            gate_bad_branch_suppression_enabled=True,
+            gate_bad_branch_suppression_weight=0.025,
+            gate_bad_branch_suppression_bad_margin_threshold=0.0,
+            gate_bad_branch_suppression_threshold_by_class=(-0.2, 0.1, 0.1),
         )
     )
     output = AstModelOutput(
@@ -2580,6 +2820,11 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
     assert row["gate_branch_regret_eligible"] is True
     assert row["gate_branch_regret_weight_multiplier"] == pytest.approx(1.0)
     assert row["gate_branch_regret_effective_weight"] == pytest.approx(0.1)
+    assert row["gate_bad_branch_suppression_threshold"] == pytest.approx(0.1)
+    assert row["gate_bad_branch_suppression_bad_gate_mass"] == pytest.approx(0.25)
+    assert row["gate_bad_branch_suppression_penalty"] == pytest.approx(0.075)
+    assert row["gate_bad_branch_suppression_weight_multiplier"] == pytest.approx(1.0)
+    assert row["gate_bad_branch_suppression_effective_weight"] == pytest.approx(0.025)
 
 
 def test_trainer_top_branch_margin_class_balanced_and_warmup() -> None:
@@ -2690,6 +2935,35 @@ def test_trainer_adaptive_branch_objectives_update_train_state_only() -> None:
                     "wheeze": 0.2,
                 },
             ),
+            gate_bad_branch_suppression_enabled=True,
+            gate_bad_branch_suppression_weight=0.025,
+            gate_bad_branch_suppression_bad_margin_threshold=0.0,
+            gate_bad_branch_suppression_threshold_by_class=(-0.2, 0.1, 0.1),
+            gate_bad_branch_suppression_auto=(
+                AutoBadBranchThresholdByTrainStatsConfig(
+                    enabled=True,
+                    strategy="ema_bad_gate_mass_controller",
+                    start_epoch=1,
+                    update_interval_epochs=1,
+                    ema=0.9,
+                    step=0.01,
+                    target_bad_gate_mass_by_label={
+                        "normal": 0.05,
+                        "crackle": 0.15,
+                        "wheeze": 0.1,
+                    },
+                    min_threshold_by_label={
+                        "normal": -0.2,
+                        "crackle": 0.0,
+                        "wheeze": 0.0,
+                    },
+                    max_threshold_by_label={
+                        "normal": -0.2,
+                        "crackle": 0.35,
+                        "wheeze": 0.3,
+                    },
+                )
+            ),
         )
     )
     stats = trainer._new_branch_objective_epoch_stats()
@@ -2731,6 +3005,18 @@ def test_trainer_adaptive_branch_objectives_update_train_state_only() -> None:
     assert state["gate_branch_regret_positive_threshold_by_label"][
         "wheeze"
     ] == pytest.approx(0.12)
+    assert state["gate_bad_branch_suppression_threshold_by_label"][
+        "normal"
+    ] == pytest.approx(-0.2)
+    assert state["gate_bad_branch_suppression_threshold_by_label"][
+        "crackle"
+    ] == pytest.approx(0.09)
+    assert state["gate_bad_branch_suppression_threshold_by_label"][
+        "wheeze"
+    ] == pytest.approx(0.11)
+    assert state["gate_bad_branch_suppression_bad_gate_mass_ema_by_label"][
+        "crackle"
+    ] == pytest.approx(1.0)
 
 
 def test_trainer_raises_when_top_branch_margin_enabled_without_logits() -> None:
@@ -2944,6 +3230,9 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
             gate_branch_regret_weight=0.01,
             gate_branch_regret_positive_threshold=0.1,
             gate_branch_regret_tolerance=0.05,
+            gate_bad_branch_suppression_enabled=True,
+            gate_bad_branch_suppression_weight=0.025,
+            gate_bad_branch_suppression_bad_margin_threshold=0.0,
             top_branch_margin_enabled=True,
             top_branch_margin_weight=0.05,
             top_branch_margin_value=0.3,
@@ -2977,6 +3266,9 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
     assert "gate_branch_regret" in result.loss_components
     assert "gate_branch_regret_loss" in result.loss_components
     assert "gate_branch_regret_eligible_fraction" in result.loss_components
+    assert "gate_bad_branch_suppression" in result.loss_components
+    assert "gate_bad_branch_suppression_loss" in result.loss_components
+    assert "gate_bad_branch_suppression_bad_gate_mass" in result.loss_components
     assert "top_branch_margin" in result.loss_components
     assert "top_branch_margin_loss" in result.loss_components
 
@@ -3039,6 +3331,11 @@ def _sample_epoch_log_context(
         "gate_branch_regret_eligible_fraction": 0.43,
         "gate_branch_regret_weight_multiplier": 0.5,
         "gate_branch_regret_effective_weight": 0.005,
+        "gate_bad_branch_suppression": 0.18,
+        "gate_bad_branch_suppression_loss": 0.0045,
+        "gate_bad_branch_suppression_bad_gate_mass": 0.22,
+        "gate_bad_branch_suppression_weight_multiplier": 0.3,
+        "gate_bad_branch_suppression_effective_weight": 0.0075,
         "top_branch_violation_rate_by_label": {
             "normal": 0.20,
             "crackle": 0.50,
@@ -3048,6 +3345,11 @@ def _sample_epoch_log_context(
             "normal": 0.70,
             "crackle": 0.62,
             "wheeze": 0.48,
+        },
+        "gate_bad_branch_suppression_bad_gate_mass_by_label": {
+            "normal": 0.05,
+            "crackle": 0.18,
+            "wheeze": 0.11,
         },
     }
     val_components = {
@@ -3068,6 +3370,11 @@ def _sample_epoch_log_context(
         "gate_branch_regret_eligible_fraction": 0.50,
         "gate_branch_regret_weight_multiplier": 0.5,
         "gate_branch_regret_effective_weight": 0.005,
+        "gate_bad_branch_suppression": 0.21,
+        "gate_bad_branch_suppression_loss": 0.00525,
+        "gate_bad_branch_suppression_bad_gate_mass": 0.25,
+        "gate_bad_branch_suppression_weight_multiplier": 0.3,
+        "gate_bad_branch_suppression_effective_weight": 0.0075,
     }
     adaptive_state = {
         "top_branch_margin_by_label": {
@@ -3078,6 +3385,11 @@ def _sample_epoch_log_context(
         "gate_branch_regret_positive_threshold_by_label": {
             "normal": 0.30,
             "crackle": 0.25,
+            "wheeze": 0.10,
+        },
+        "gate_bad_branch_suppression_threshold_by_label": {
+            "normal": -0.20,
+            "crackle": 0.10,
             "wheeze": 0.10,
         },
     }
@@ -3119,9 +3431,15 @@ def test_epoch_log_formatter_builds_readable_multiclass_block() -> None:
     assert "branch_logit_margin raw=0.3100 loss=0.0465" in block
     assert "top_branch raw=0.5000 loss=0.1000" in block
     assert "regret raw=0.2200/0.3000" in block
+    assert "bad_suppress raw=0.1800/0.2100" in block
+    assert "bad_eff_w=0.0075" in block
+    assert "bad_multiplier=0.3000" in block
+    assert "bad_mass=0.2200/0.2500" in block
     assert "eff_w=0.0050" in block
     assert "multiplier=0.5000" in block
     assert "top_margin={normal=0.3000, crackle=0.3600, wheeze=0.5200}" in block
+    assert "bad_threshold={normal=-0.2000, crackle=0.1000, wheeze=0.1000}" in block
+    assert "bad_gate_mass={normal=0.0500, crackle=0.1800, wheeze=0.1100}" in block
     assert "diagnostics=diagnostics/val_epoch_016.jsonl" in block
     assert "entropy=" not in block
     assert "diversity=" not in block
@@ -3149,6 +3467,9 @@ def test_epoch_jsonl_logs_append_metric_loss_and_adaptive_payloads(
     assert adaptive_payload["train_top_branch_violation_rate_by_label"][
         "wheeze"
     ] == pytest.approx(0.75)
+    assert adaptive_payload["train_gate_bad_branch_suppression_bad_gate_mass_by_label"][
+        "crackle"
+    ] == pytest.approx(0.18)
 
 
 def test_configured_checkpoint_monitors_keep_top_three(tmp_path: Path) -> None:

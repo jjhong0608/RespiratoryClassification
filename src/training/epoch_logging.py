@@ -135,6 +135,12 @@ def build_adaptive_state_epoch_payload(context: EpochLogContext) -> dict[str, An
                     {},
                 )
             ),
+            "train_gate_bad_branch_suppression_bad_gate_mass_by_label": (
+                context.train_components.get(
+                    "gate_bad_branch_suppression_bad_gate_mass_by_label",
+                    {},
+                )
+            ),
             "diagnostics_path": (
                 str(context.diagnostics_path) if context.diagnostics_path else None
             ),
@@ -312,6 +318,34 @@ def _format_gate_line(
             f"{_component_float(train_components, 'gate_branch_regret_eligible_fraction', 0.0):.4f}/"
             f"{_component_float(val_components, 'gate_branch_regret_eligible_fraction', 0.0):.4f}"
         )
+    if _has_component(
+        train_components,
+        val_components,
+        "gate_bad_branch_suppression",
+    ):
+        parts.append(
+            "bad_suppress raw="
+            f"{_component_float(train_components, 'gate_bad_branch_suppression', 0.0):.4f}/"
+            f"{_component_float(val_components, 'gate_bad_branch_suppression', 0.0):.4f}"
+        )
+        parts.append(
+            "loss="
+            f"{_component_float(train_components, 'gate_bad_branch_suppression_loss', 0.0):.4f}/"
+            f"{_component_float(val_components, 'gate_bad_branch_suppression_loss', 0.0):.4f}"
+        )
+        parts.append(
+            "bad_eff_w="
+            f"{_component_float(train_components, 'gate_bad_branch_suppression_effective_weight', 0.0):.4f}"
+        )
+        parts.append(
+            "bad_multiplier="
+            f"{_component_float(train_components, 'gate_bad_branch_suppression_weight_multiplier', 0.0):.4f}"
+        )
+        parts.append(
+            "bad_mass="
+            f"{_component_float(train_components, 'gate_bad_branch_suppression_bad_gate_mass', 0.0):.4f}/"
+            f"{_component_float(val_components, 'gate_bad_branch_suppression_bad_gate_mass', 0.0):.4f}"
+        )
     if not parts:
         return ""
     return "Gate  | " + " | ".join(parts)
@@ -330,12 +364,20 @@ def _format_auto_line(
     )
     if isinstance(regret_threshold, Mapping) and regret_threshold:
         parts.append(f"regret_threshold={_format_label_values(regret_threshold)}")
+    bad_threshold = adaptive_state.get("gate_bad_branch_suppression_threshold_by_label")
+    if isinstance(bad_threshold, Mapping) and bad_threshold:
+        parts.append(f"bad_threshold={_format_label_values(bad_threshold)}")
     top_rates = train_components.get("top_branch_violation_rate_by_label")
     if isinstance(top_rates, Mapping) and top_rates:
         parts.append(f"top_violation={_format_label_values(top_rates)}")
     regret_rates = train_components.get("gate_branch_regret_eligible_rate_by_label")
     if isinstance(regret_rates, Mapping) and regret_rates:
         parts.append(f"regret_eligible={_format_label_values(regret_rates)}")
+    bad_rates = train_components.get(
+        "gate_bad_branch_suppression_bad_gate_mass_by_label"
+    )
+    if isinstance(bad_rates, Mapping) and bad_rates:
+        parts.append(f"bad_gate_mass={_format_label_values(bad_rates)}")
     if not parts:
         return ""
     return "Auto  | " + " | ".join(parts)

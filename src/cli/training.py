@@ -263,6 +263,13 @@ def main() -> None:
         overrides=cfg.train.loss.gate_branch_regret.positive_threshold_by_label,
         label_to_index=cfg.data.label_to_index,
     )
+    gate_bad_branch_suppression_threshold_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.gate_bad_branch_suppression.bad_margin_threshold,
+        overrides=(
+            cfg.train.loss.gate_bad_branch_suppression.bad_margin_threshold_by_label
+        ),
+        label_to_index=cfg.data.label_to_index,
+    )
 
     trainer = Trainer(
         TrainerConfig(
@@ -305,6 +312,10 @@ def main() -> None:
             gate_branch_regret=cfg.train.loss.gate_branch_regret,
             gate_branch_regret_positive_threshold_by_class=(
                 gate_branch_regret_positive_threshold_by_class
+            ),
+            gate_bad_branch_suppression=(cfg.train.loss.gate_bad_branch_suppression),
+            gate_bad_branch_suppression_threshold_by_class=(
+                gate_bad_branch_suppression_threshold_by_class
             ),
             top_branch_margin=cfg.train.loss.top_branch_margin,
             top_branch_margin_by_class=top_branch_margin_by_class,

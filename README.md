@@ -286,12 +286,25 @@ when a schedule is configured. With `start_epoch=16`, `end_epoch=30`,
 `start_multiplier=0.2`, and `end_multiplier=1.0`, the regret loss uses 20% of
 its configured weight at epoch 16 and reaches full weight at epoch 30.
 
+`gate_bad_branch_suppression` is the complementary gate-side objective. It
+penalizes true-class gate mass left on branches whose detached true-vs-hardest
+negative branch margin is below a label-specific bad-margin threshold. Because
+the branch margin is detached, this loss updates the gate, not the branch-logit
+head. `bad_margin_threshold_by_label` can override the scalar fallback; negative
+thresholds are allowed, so normal can be fixed at a permissive value such as
+`-0.2`. It uses the same `weight_schedule` shape as `gate_branch_regret`, but
+keeps independent values and adaptive state.
+
 `auto_margin_by_train_stats` and `auto_positive_threshold_by_train_stats` adjust
 these label-wise values from training-epoch statistics only. Validation
 diagnostics are not used for online tuning. The margin controller tracks the
 train top-branch violation rate, and the regret controller tracks the train
 eligible rate. Both update once per epoch and clamp values within the configured
 per-label bounds.
+`auto_bad_margin_threshold_by_train_stats` also uses training-epoch statistics
+only. It tracks label-wise bad gate mass, then raises or lowers the bad-margin
+threshold within per-label bounds to keep suppression pressure near the
+configured target.
 Set `min_*_by_label` equal to `max_*_by_label` to keep a label fixed while other
 labels adapt; for example, normal can stay fixed while crackle and wheeze use
 separate adaptive ranges.
