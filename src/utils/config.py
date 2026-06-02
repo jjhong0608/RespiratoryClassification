@@ -293,6 +293,15 @@ class AutoPositiveThresholdByTrainStatsConfig:
 
 
 @dataclass(frozen=True)
+class GateBranchRegretWeightScheduleConfig:
+    enabled: bool = False
+    start_epoch: int = 1
+    end_epoch: int = 1
+    start_multiplier: float = 1.0
+    end_multiplier: float = 1.0
+
+
+@dataclass(frozen=True)
 class GateBranchRegretConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -304,6 +313,9 @@ class GateBranchRegretConfig:
     positive_threshold_by_label: Mapping[str, float] = field(default_factory=dict)
     tolerance: float = 0.0
     warmup_epochs: int = 0
+    weight_schedule: GateBranchRegretWeightScheduleConfig = field(
+        default_factory=GateBranchRegretWeightScheduleConfig
+    )
     auto_positive_threshold_by_train_stats: AutoPositiveThresholdByTrainStatsConfig = (
         field(default_factory=AutoPositiveThresholdByTrainStatsConfig)
     )
@@ -837,6 +849,42 @@ class JsonConfigLoader:
                     f"{field_name}.min_threshold_by_label.{label_name} must be "
                     "less than or equal to max_threshold_by_label"
                 )
+
+    @staticmethod
+    def _validate_gate_branch_regret_weight_schedule(
+        cfg: GateBranchRegretWeightScheduleConfig,
+    ) -> None:
+        field_name = "train.loss.gate_branch_regret.weight_schedule"
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if not isinstance(cfg.start_epoch, int):
+            raise TypeError(f"{field_name}.start_epoch must be an integer")
+        if cfg.start_epoch <= 0:
+            raise ValueError(f"{field_name}.start_epoch must be greater than zero")
+        if not isinstance(cfg.end_epoch, int):
+            raise TypeError(f"{field_name}.end_epoch must be an integer")
+        if cfg.end_epoch < cfg.start_epoch:
+            raise ValueError(
+                f"{field_name}.end_epoch must be greater than or equal to start_epoch"
+            )
+        if not isinstance(cfg.start_multiplier, int | float) or isinstance(
+            cfg.start_multiplier,
+            bool,
+        ):
+            raise TypeError(f"{field_name}.start_multiplier must be numeric")
+        if cfg.start_multiplier < 0:
+            raise ValueError(
+                f"{field_name}.start_multiplier must be greater than or equal to zero"
+            )
+        if not isinstance(cfg.end_multiplier, int | float) or isinstance(
+            cfg.end_multiplier,
+            bool,
+        ):
+            raise TypeError(f"{field_name}.end_multiplier must be numeric")
+        if cfg.end_multiplier < 0:
+            raise ValueError(
+                f"{field_name}.end_multiplier must be greater than or equal to zero"
+            )
 
     @staticmethod
     def _validate_hold_decay_schedule(
@@ -1786,6 +1834,17 @@ class JsonConfigLoader:
                 "train.loss.gate_branch_regret.warmup_epochs must be greater "
                 "than or equal to zero"
             )
+        JsonConfigLoader._validate_gate_branch_regret_weight_schedule(
+            cfg.loss.gate_branch_regret.weight_schedule
+        )
+        if (
+            cfg.loss.gate_branch_regret.weight_schedule.enabled
+            and not cfg.loss.gate_branch_regret.enabled
+        ):
+            raise ValueError(
+                "train.loss.gate_branch_regret.weight_schedule requires "
+                "train.loss.gate_branch_regret.enabled=true"
+            )
         if not isinstance(
             cfg.loss.gate_branch_regret.positive_threshold,
             int | float,
@@ -2520,6 +2579,9 @@ class JsonConfigLoader:
         gate_branch_regret = dict(loss.get("gate_branch_regret", {}))
         gate_branch_regret["positive_threshold_by_label"] = dict(
             gate_branch_regret.get("positive_threshold_by_label", {})
+        )
+        gate_branch_regret["weight_schedule"] = GateBranchRegretWeightScheduleConfig(
+            **dict(gate_branch_regret.get("weight_schedule", {}))
         )
         gate_branch_regret["auto_positive_threshold_by_train_stats"] = (
             AutoPositiveThresholdByTrainStatsConfig(

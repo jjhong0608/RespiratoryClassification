@@ -234,7 +234,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver11"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver12"
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.train.loss.type == "cross_entropy"
     assert (
@@ -336,6 +336,11 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert dict(cfg.train.loss.gate_branch_regret.positive_threshold_by_label) == {}
     assert cfg.train.loss.gate_branch_regret.tolerance == 0.0
     assert cfg.train.loss.gate_branch_regret.warmup_epochs == 0
+    assert cfg.train.loss.gate_branch_regret.weight_schedule.enabled is False
+    assert cfg.train.loss.gate_branch_regret.weight_schedule.start_epoch == 1
+    assert cfg.train.loss.gate_branch_regret.weight_schedule.end_epoch == 1
+    assert cfg.train.loss.gate_branch_regret.weight_schedule.start_multiplier == 1.0
+    assert cfg.train.loss.gate_branch_regret.weight_schedule.end_multiplier == 1.0
     assert (
         cfg.train.loss.gate_branch_regret.auto_positive_threshold_by_train_stats.enabled
         is False
@@ -1106,6 +1111,13 @@ def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
         },
         "tolerance": 0.05,
         "warmup_epochs": 10,
+        "weight_schedule": {
+            "enabled": True,
+            "start_epoch": 16,
+            "end_epoch": 30,
+            "start_multiplier": 0.2,
+            "end_multiplier": 1.0,
+        },
         "auto_positive_threshold_by_train_stats": {
             "enabled": True,
             "strategy": "ema_eligible_controller",
@@ -1149,6 +1161,11 @@ def test_valid_gate_branch_regret_config_loads(tmp_path: Path) -> None:
     }
     assert regret_cfg.tolerance == 0.05
     assert regret_cfg.warmup_epochs == 10
+    assert regret_cfg.weight_schedule.enabled is True
+    assert regret_cfg.weight_schedule.start_epoch == 16
+    assert regret_cfg.weight_schedule.end_epoch == 30
+    assert regret_cfg.weight_schedule.start_multiplier == 0.2
+    assert regret_cfg.weight_schedule.end_multiplier == 1.0
     assert regret_cfg.auto_positive_threshold_by_train_stats.enabled is True
     assert regret_cfg.auto_positive_threshold_by_train_stats.step == 0.02
 
@@ -1530,6 +1547,32 @@ def test_invalid_gate_branch_regret_config_is_rejected(
         (
             {"positive_threshold_by_label": {"wheeze": -0.1}},
             "positive_threshold_by_label",
+        ),
+        (
+            {"weight_schedule": {"enabled": "yes"}},
+            "weight_schedule.enabled",
+        ),
+        (
+            {"weight_schedule": {"enabled": True, "start_epoch": 0}},
+            "weight_schedule.start_epoch",
+        ),
+        (
+            {
+                "weight_schedule": {
+                    "enabled": True,
+                    "start_epoch": 16,
+                    "end_epoch": 15,
+                }
+            },
+            "weight_schedule.end_epoch",
+        ),
+        (
+            {"weight_schedule": {"enabled": True, "start_multiplier": -0.1}},
+            "weight_schedule.start_multiplier",
+        ),
+        (
+            {"weight_schedule": {"enabled": True, "end_multiplier": -0.1}},
+            "weight_schedule.end_multiplier",
         ),
         (
             {

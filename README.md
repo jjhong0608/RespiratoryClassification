@@ -256,6 +256,11 @@ negative margin for each sample. `margin_by_label` can override the scalar
 `gate_branch_regret` penalizes the gate when it gives too much mass to branches
 whose branch margin is worse than the best available branch margin.
 `positive_threshold_by_label` can override the scalar threshold per label.
+`weight_schedule` can ramp the regret contribution after `warmup_epochs`; the
+warmup gate wins, so epochs `<= warmup_epochs` still contribute zero loss even
+when a schedule is configured. With `start_epoch=16`, `end_epoch=30`,
+`start_multiplier=0.2`, and `end_multiplier=1.0`, the regret loss uses 20% of
+its configured weight at epoch 16 and reaches full weight at epoch 30.
 
 `auto_margin_by_train_stats` and `auto_positive_threshold_by_train_stats` adjust
 these label-wise values from training-epoch statistics only. Validation
@@ -263,6 +268,9 @@ diagnostics are not used for online tuning. The margin controller tracks the
 train top-branch violation rate, and the regret controller tracks the train
 eligible rate. Both update once per epoch and clamp values within the configured
 per-label bounds.
+Set `min_*_by_label` equal to `max_*_by_label` to keep a label fixed while other
+labels adapt; for example, normal can stay fixed while crackle and wheeze use
+separate adaptive ranges.
 
 The margin losses support `reduction="mean"` and
 `reduction="class_balanced_violating_mean"`. The class-balanced violating

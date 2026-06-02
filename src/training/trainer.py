@@ -128,6 +128,8 @@ class LossComponents:
     gate_branch_regret: Tensor | None = None
     gate_branch_regret_loss: Tensor | None = None
     gate_branch_regret_eligible_fraction: Tensor | None = None
+    gate_branch_regret_weight_multiplier: Tensor | None = None
+    gate_branch_regret_effective_weight: Tensor | None = None
     top_branch_margin: Tensor | None = None
     top_branch_margin_loss: Tensor | None = None
     branch_binary_aux_weight: float = 0.0
@@ -554,6 +556,26 @@ class Trainer(LoggingMixin):
             device=reference.device,
             dtype=reference.dtype,
             fallback=float(self.cfg.gate_branch_regret.positive_threshold),
+        )
+
+    def _gate_branch_regret_weight_multiplier(self, epoch: int) -> float:
+        schedule = self.cfg.gate_branch_regret.weight_schedule
+        if int(epoch) <= int(self.cfg.gate_branch_regret.warmup_epochs):
+            return 0.0
+        if not schedule.enabled:
+            return 1.0
+        if int(epoch) < int(schedule.start_epoch):
+            return float(schedule.start_multiplier)
+        if int(epoch) > int(schedule.end_epoch):
+            return float(schedule.end_multiplier)
+        if int(schedule.start_epoch) == int(schedule.end_epoch):
+            return float(schedule.end_multiplier)
+        progress = (float(epoch) - float(schedule.start_epoch)) / (
+            float(schedule.end_epoch) - float(schedule.start_epoch)
+        )
+        return float(schedule.start_multiplier) + (
+            progress
+            * (float(schedule.end_multiplier) - float(schedule.start_multiplier))
         )
 
     def _new_branch_objective_epoch_stats(self) -> BranchObjectiveEpochStats:
@@ -1329,8 +1351,13 @@ class Trainer(LoggingMixin):
         labels: Tensor,
         *,
         epoch: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         cfg = self.cfg.gate_branch_regret
+        weight_multiplier_value = self._gate_branch_regret_weight_multiplier(epoch)
+        weight_multiplier = output.logits.new_tensor(weight_multiplier_value)
+        effective_weight = output.logits.new_tensor(
+            float(cfg.weight) * weight_multiplier_value
+        )
         if cfg.target != "true_class_gate":
             raise ValueError(
                 "gate-branch regret supports only target='true_class_gate'"
@@ -1348,7 +1375,7 @@ class Trainer(LoggingMixin):
             )
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = output.logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss
+            return raw_loss, raw_loss, raw_loss, weight_multiplier, effective_weight
         branch_logits, gate_weights, label_indices = (
             self._class_aware_branch_margin_inputs(
                 output,
@@ -1358,7 +1385,7 @@ class Trainer(LoggingMixin):
         )
         if label_indices.numel() == 0:
             raw_loss = branch_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss
+            return raw_loss, raw_loss, raw_loss, weight_multiplier, effective_weight
 
         branch_margin = self._true_class_branch_margins(
             branch_logits,
@@ -1384,8 +1411,14 @@ class Trainer(LoggingMixin):
             raw_loss = regret_penalty[eligible].mean()
         else:
             raw_loss = branch_logits.sum() * 0.0
-        weighted_loss = float(cfg.weight) * raw_loss
-        return raw_loss, weighted_loss, eligible_fraction
+        weighted_loss = effective_weight * raw_loss
+        return (
+            raw_loss,
+            weighted_loss,
+            eligible_fraction,
+            weight_multiplier,
+            effective_weight,
+        )
 
     def _branch_binary_targets(
         self,
@@ -1586,11 +1619,15 @@ class Trainer(LoggingMixin):
         gate_branch_regret: Tensor | None = None
         gate_branch_regret_loss: Tensor | None = None
         gate_branch_regret_eligible_fraction: Tensor | None = None
+        gate_branch_regret_weight_multiplier: Tensor | None = None
+        gate_branch_regret_effective_weight: Tensor | None = None
         if self.cfg.gate_branch_regret.enabled:
             (
                 gate_branch_regret,
                 gate_branch_regret_loss,
                 gate_branch_regret_eligible_fraction,
+                gate_branch_regret_weight_multiplier,
+                gate_branch_regret_effective_weight,
             ) = self._compute_gate_branch_regret_loss(
                 output,
                 labels,
@@ -1620,6 +1657,8 @@ class Trainer(LoggingMixin):
             gate_branch_regret=gate_branch_regret,
             gate_branch_regret_loss=gate_branch_regret_loss,
             gate_branch_regret_eligible_fraction=(gate_branch_regret_eligible_fraction),
+            gate_branch_regret_weight_multiplier=(gate_branch_regret_weight_multiplier),
+            gate_branch_regret_effective_weight=gate_branch_regret_effective_weight,
             top_branch_margin=top_branch_margin,
             top_branch_margin_loss=top_branch_margin_loss,
             branch_binary_aux_weight=branch_binary_weight,
@@ -1821,6 +1860,8 @@ class Trainer(LoggingMixin):
         self,
         output: AstModelOutput,
         labels: Tensor,
+        *,
+        epoch: int,
     ) -> list[dict[str, Any]]:
         if output.branch_logits is None:
             return [{} for _ in range(int(labels.numel()))]
@@ -1873,6 +1914,10 @@ class Trainer(LoggingMixin):
                     best_margin,
                 )
                 eligible = best_margin > thresholds
+                weight_multiplier = self._gate_branch_regret_weight_multiplier(epoch)
+                effective_weight = float(self.cfg.gate_branch_regret.weight) * float(
+                    weight_multiplier
+                )
                 for index, row in enumerate(rows):
                     row["gate_branch_regret_positive_threshold"] = float(
                         thresholds[index].detach().cpu().item()
@@ -1886,6 +1931,10 @@ class Trainer(LoggingMixin):
                     row["gate_branch_regret_eligible"] = bool(
                         eligible[index].detach().cpu().item()
                     )
+                    row["gate_branch_regret_weight_multiplier"] = float(
+                        weight_multiplier
+                    )
+                    row["gate_branch_regret_effective_weight"] = float(effective_weight)
         return rows
 
     def _epoch(
@@ -1924,6 +1973,8 @@ class Trainer(LoggingMixin):
             "gate_branch_regret": 0.0,
             "gate_branch_regret_loss": 0.0,
             "gate_branch_regret_eligible_fraction": 0.0,
+            "gate_branch_regret_weight_multiplier": 0.0,
+            "gate_branch_regret_effective_weight": 0.0,
             "top_branch_margin": 0.0,
             "top_branch_margin_loss": 0.0,
             "branch_binary_aux_weight": 0.0,
@@ -2026,6 +2077,12 @@ class Trainer(LoggingMixin):
                 "gate_branch_regret_eligible_fraction": (
                     loss_components.gate_branch_regret_eligible_fraction
                 ),
+                "gate_branch_regret_weight_multiplier": (
+                    loss_components.gate_branch_regret_weight_multiplier
+                ),
+                "gate_branch_regret_effective_weight": (
+                    loss_components.gate_branch_regret_effective_weight
+                ),
                 "top_branch_margin": loss_components.top_branch_margin,
                 "top_branch_margin_loss": loss_components.top_branch_margin_loss,
                 "branch_binary_aux_weight": (loss_components.branch_binary_aux_weight),
@@ -2075,6 +2132,7 @@ class Trainer(LoggingMixin):
                 objective_rows = self._branch_objective_diagnostic_rows(
                     output,
                     batch.labels,
+                    epoch=epoch,
                 )
                 for row, objective_row in zip(
                     diagnostic_rows,
@@ -2295,6 +2353,18 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "train_gate_branch_regret_weight_multiplier": (
+                        train_components.get(
+                            "gate_branch_regret_weight_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "train_gate_branch_regret_effective_weight": (
+                        train_components.get(
+                            "gate_branch_regret_effective_weight",
+                            0.0,
+                        )
+                    ),
                     "train_top_branch_margin": train_components.get(
                         "top_branch_margin",
                         0.0,
@@ -2387,6 +2457,14 @@ class Trainer(LoggingMixin):
                         "gate_branch_regret_eligible_fraction",
                         0.0,
                     ),
+                    "val_gate_branch_regret_weight_multiplier": val_components.get(
+                        "gate_branch_regret_weight_multiplier",
+                        0.0,
+                    ),
+                    "val_gate_branch_regret_effective_weight": val_components.get(
+                        "gate_branch_regret_effective_weight",
+                        0.0,
+                    ),
                     "val_top_branch_margin": val_components.get(
                         "top_branch_margin",
                         0.0,
@@ -2414,6 +2492,8 @@ class Trainer(LoggingMixin):
                 self.logger.info(
                     "Adaptive branch objectives | Top Branch Margin: %s | "
                     "Gate-Branch Regret Threshold: %s | "
+                    "Gate-Branch Regret Multiplier: %.4f | "
+                    "Gate-Branch Regret Effective Weight: %.4f | "
                     "Train Top Branch Violation Rate: %s | "
                     "Train Gate-Branch Regret Eligible Rate: %s",
                     self._format_label_values(
@@ -2422,6 +2502,8 @@ class Trainer(LoggingMixin):
                     self._format_label_values(
                         adaptive_state["gate_branch_regret_positive_threshold_by_label"]
                     ),
+                    train_components.get("gate_branch_regret_weight_multiplier", 0.0),
+                    train_components.get("gate_branch_regret_effective_weight", 0.0),
                     self._format_label_values(
                         train_components.get(
                             "top_branch_violation_rate_by_label",
