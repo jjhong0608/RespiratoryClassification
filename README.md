@@ -245,6 +245,13 @@ target. This binary auxiliary is independent of the main multiclass CE target.
 It is available for `class_aware_branch_gated` and is meant to improve the
 class evidence scorer before the residual classifier dominates.
 
+`class_gate.scorer` controls how class-aware evidence embeddings are converted
+into `class_evidence_logits`. `diagonal` keeps the original class-wise diagonal
+linear scorer. `normalized_mlp` uses an independent scorer per class:
+`LayerNorm -> Linear -> GELU -> Dropout -> Linear`. `scorer_hidden_size=null`
+uses half of the hidden size, and `scorer_dropout` controls only this evidence
+scorer path.
+
 ### Gate Regularization
 
 `gate_entropy_regularization` adds an entropy bonus as a negative loss term:
@@ -268,6 +275,18 @@ Both regularizers can be bounded by `start_epoch` and `end_epoch`.
 
 `class_gated_branch_logit_margin` applies margin ranking to
 `class_gated_branch_logits`.
+
+`branch_to_evidence_ranking_consistency` compares the true-vs-hardest-negative
+ranking gap from `class_gated_branch_logits` against the same gap from
+`class_evidence_logits`. With `teacher_detach=true`, branch-gated logits act as
+a detached teacher and the loss updates the evidence scorer when evidence
+ranking falls behind branch ranking.
+
+`global_residual_anti_veto` limits label-agnostic residual veto behavior. It
+uses the hardest negative class selected by `class_evidence_logits`, applies
+only when the detached evidence gap is above `evidence_confidence_threshold`,
+and penalizes `global_residual_logits` only when the residual true-vs-negative
+gap falls below `min_residual_gap`.
 
 `gate_weighted_branch_margin` improves branch logits selected by the true-class
 gate. The gate is detached, so this loss updates branch heads rather than

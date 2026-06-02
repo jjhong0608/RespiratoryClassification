@@ -249,6 +249,17 @@ def test_retained_repo_configs_load() -> None:
         current_training_cfg.model.encoder.architecture.evidence_pooling.type
         == "class_aware_branch_gated"
     )
+    current_class_gate = (
+        current_training_cfg.model.encoder.architecture.evidence_pooling.class_gate
+    )
+    assert current_class_gate.scorer == "normalized_mlp"
+    assert current_class_gate.scorer_hidden_size is None
+    assert current_class_gate.scorer_dropout == pytest.approx(0.15)
+    assert (
+        current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.enabled
+        is True
+    )
+    assert current_training_cfg.train.loss.global_residual_anti_veto.enabled is True
     assert current_training_cfg.train.loss.top_branch_margin.enabled is True
     assert current_training_cfg.train.loss.gate_bad_branch_suppression.enabled is True
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
@@ -477,6 +488,8 @@ def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
     )
     assert class_gate.mode == "query"
     assert class_gate.scorer == "diagonal"
+    assert class_gate.scorer_hidden_size is None
+    assert class_gate.scorer_dropout == 0.0
     assert class_gate.global_residual.enabled is True
     assert class_gate.global_residual.init_scale == 0.1
     assert class_gate.global_residual.learnable is True
@@ -488,9 +501,27 @@ def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
     assert class_gate.evidence_auxiliary.weight == 0.1
     assert class_gate.branch_logit_feature.mode == "raw"
     assert class_gate.gate_mixing.enabled is False
-    assert class_gate.gate_mixing.mode == "uniform_to_learned"
-    assert class_gate.gate_mixing.start_alpha == 1.0
-    assert class_gate.gate_mixing.end_alpha == 0.0
+
+
+def test_class_aware_normalized_mlp_scorer_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["scorer"] = "normalized_mlp"
+    class_gate["scorer_hidden_size"] = 24
+    class_gate["scorer_dropout"] = 0.2
+    config_path = _write_json(tmp_path / "normalized_mlp_scorer.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    loaded = cfg.model.encoder.architecture.evidence_pooling.class_gate
+    assert loaded.scorer == "normalized_mlp"
+    assert loaded.scorer_hidden_size == 24
+    assert loaded.scorer_dropout == pytest.approx(0.2)
+    assert loaded.gate_mixing.mode == "uniform_to_learned"
+    assert loaded.gate_mixing.start_alpha == 1.0
+    assert loaded.gate_mixing.end_alpha == 0.0
 
 
 def test_class_aware_branch_logit_feature_mode_loads(tmp_path: Path) -> None:
@@ -688,6 +719,10 @@ def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) 
     [
         (("class_gate", "mode"), "mlp", "class_gate.mode"),
         (("class_gate", "scorer"), "full", "class_gate.scorer"),
+        (("class_gate", "scorer_hidden_size"), 0, "scorer_hidden_size"),
+        (("class_gate", "scorer_hidden_size"), "32", "scorer_hidden_size"),
+        (("class_gate", "scorer_dropout"), 1.0, "scorer_dropout"),
+        (("class_gate", "scorer_dropout"), "0.1", "scorer_dropout"),
         (
             ("class_gate", "global_residual", "enabled"),
             "yes",
@@ -1059,6 +1094,73 @@ def test_valid_class_gated_branch_logit_margin_config_loads(
     assert margin_cfg.mode == "true_vs_hardest_negative"
     assert margin_cfg.class_weighted is True
     assert margin_cfg.reduction == "class_balanced_violating_mean"
+
+
+def test_valid_branch_to_evidence_consistency_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_evidence_logits",
+        "source": "class_gated_branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "teacher_detach": True,
+        "tolerance": 0.1,
+        "class_weighted": True,
+        "reduction": "class_balanced_violating_mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "branch_to_evidence.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    consistency_cfg = cfg.train.loss.branch_to_evidence_ranking_consistency
+    assert consistency_cfg.enabled is True
+    assert consistency_cfg.weight == pytest.approx(0.05)
+    assert consistency_cfg.teacher_detach is True
+    assert consistency_cfg.tolerance == pytest.approx(0.1)
+    assert consistency_cfg.class_weighted is True
+    assert consistency_cfg.reduction == "class_balanced_violating_mean"
+    assert consistency_cfg.warmup_epochs == 10
+
+
+def test_valid_global_residual_anti_veto_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["train"]["loss"]["global_residual_anti_veto"] = {
+        "enabled": True,
+        "weight": 0.02,
+        "target": "global_residual_logits",
+        "reference": "class_evidence_logits",
+        "mode": "true_vs_hardest_negative",
+        "evidence_confidence_threshold": 0.0,
+        "min_residual_gap": -0.5,
+        "class_weighted": True,
+        "reduction": "class_balanced_violating_mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "global_residual_anti_veto.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    anti_veto_cfg = cfg.train.loss.global_residual_anti_veto
+    assert anti_veto_cfg.enabled is True
+    assert anti_veto_cfg.weight == pytest.approx(0.02)
+    assert anti_veto_cfg.min_residual_gap == pytest.approx(-0.5)
+    assert anti_veto_cfg.class_weighted is True
+    assert anti_veto_cfg.reduction == "class_balanced_violating_mean"
+    assert anti_veto_cfg.warmup_epochs == 10
 
 
 def test_valid_gate_weighted_branch_margin_config_loads(tmp_path: Path) -> None:
@@ -2132,6 +2234,54 @@ def test_class_weighted_branch_logit_margin_requires_class_weighting(
         JsonConfigLoader.load_training(config_path)
 
 
+def test_class_weighted_branch_to_evidence_requires_class_weighting(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_evidence_logits",
+        "source": "class_gated_branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": True,
+    }
+    config_path = _write_json(
+        tmp_path / "class_weighted_b2e_without_weights.json",
+        payload,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="branch_to_evidence_ranking_consistency.class_weighted",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_class_weighted_anti_veto_requires_class_weighting(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["global_residual_anti_veto"] = {
+        "enabled": True,
+        "weight": 0.02,
+        "target": "global_residual_logits",
+        "reference": "class_evidence_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": True,
+    }
+    config_path = _write_json(
+        tmp_path / "class_weighted_anti_veto_without_weights.json",
+        payload,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="global_residual_anti_veto.class_weighted",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
 def test_class_weighted_gate_weighted_branch_margin_requires_class_weighting(
     tmp_path: Path,
 ) -> None:
@@ -2221,6 +2371,48 @@ def test_class_gated_branch_logit_margin_requires_cross_entropy(
         ValueError,
         match="class_gated_branch_logit_margin.*cross_entropy",
     ):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_branch_to_evidence_consistency_requires_class_aware_pooling(
+    tmp_path: Path,
+) -> None:
+    payload = _base_payload()
+    payload["data"]["label_to_index"] = {"normal": 0, "crackle": 1, "wheeze": 2}
+    payload["train"]["loss"]["type"] = "cross_entropy"
+    payload["train"]["loss"]["auto_pos_weight"] = False
+    payload["train"]["loss"]["pos_weight"] = None
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_evidence_logits",
+        "source": "class_gated_branch_logits",
+        "mode": "true_vs_hardest_negative",
+    }
+    config_path = _write_json(tmp_path / "b2e_mean_pooling.json", payload)
+
+    with pytest.raises(
+        ValueError,
+        match="branch_to_evidence_ranking_consistency requires",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_global_residual_anti_veto_requires_cross_entropy(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"] = (
+        _class_aware_evidence_pooling_payload()
+    )
+    payload["train"]["loss"]["global_residual_anti_veto"] = {
+        "enabled": True,
+        "weight": 0.02,
+        "target": "global_residual_logits",
+        "reference": "class_evidence_logits",
+        "mode": "true_vs_hardest_negative",
+    }
+    config_path = _write_json(tmp_path / "anti_veto_bce.json", payload)
+
+    with pytest.raises(ValueError, match="global_residual_anti_veto.*cross_entropy"):
         JsonConfigLoader.load_training(config_path)
 
 

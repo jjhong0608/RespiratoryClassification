@@ -259,6 +259,34 @@ class ClassGatedBranchLogitMarginConfig:
 
 
 @dataclass(frozen=True)
+class BranchToEvidenceRankingConsistencyConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_logits"] = "class_evidence_logits"
+    source: Literal["class_gated_branch_logits"] = "class_gated_branch_logits"
+    mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    teacher_detach: bool = True
+    tolerance: float = 0.0
+    class_weighted: bool = False
+    reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class GlobalResidualAntiVetoConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["global_residual_logits"] = "global_residual_logits"
+    reference: Literal["class_evidence_logits"] = "class_evidence_logits"
+    mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    evidence_confidence_threshold: float = 0.0
+    min_residual_gap: float = -0.5
+    class_weighted: bool = False
+    reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
 class GateWeightedBranchMarginConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -457,6 +485,12 @@ class LossConfig:
     class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
         default_factory=ClassGatedBranchLogitMarginConfig
     )
+    branch_to_evidence_ranking_consistency: BranchToEvidenceRankingConsistencyConfig = (
+        field(default_factory=BranchToEvidenceRankingConsistencyConfig)
+    )
+    global_residual_anti_veto: GlobalResidualAntiVetoConfig = field(
+        default_factory=GlobalResidualAntiVetoConfig
+    )
     gate_weighted_branch_margin: GateWeightedBranchMarginConfig = field(
         default_factory=GateWeightedBranchMarginConfig
     )
@@ -620,7 +654,7 @@ class JsonConfigLoader:
     }
     _EVIDENCE_POOLING_TYPES = {"mean", "branch_gated", "class_aware_branch_gated"}
     _CLASS_GATE_MODES = {"query"}
-    _CLASS_GATE_SCORERS = {"diagonal"}
+    _CLASS_GATE_SCORERS = {"diagonal", "normalized_mlp"}
     _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
     _CLASS_GATE_MIXING_MODES = {"uniform_to_learned"}
     _GLOBAL_RESIDUAL_WARMUP_MODES = {"zero_to_learned"}
@@ -643,6 +677,12 @@ class JsonConfigLoader:
     _MARGIN_REDUCTIONS = {"mean", "class_balanced_violating_mean"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_TARGETS = {"class_gated_branch_logits"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_MODES = {"true_vs_hardest_negative"}
+    _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_TARGETS = {"class_evidence_logits"}
+    _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_SOURCES = {"class_gated_branch_logits"}
+    _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_MODES = {"true_vs_hardest_negative"}
+    _GLOBAL_RESIDUAL_ANTI_VETO_TARGETS = {"global_residual_logits"}
+    _GLOBAL_RESIDUAL_ANTI_VETO_REFERENCES = {"class_evidence_logits"}
+    _GLOBAL_RESIDUAL_ANTI_VETO_MODES = {"true_vs_hardest_negative"}
     _GATE_WEIGHTED_BRANCH_MARGIN_TARGETS = {"true_class_gate"}
     _GATE_WEIGHTED_BRANCH_MARGIN_SOURCES = {"branch_logits"}
     _GATE_WEIGHTED_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
@@ -1371,7 +1411,35 @@ class JsonConfigLoader:
         if class_gate.scorer not in JsonConfigLoader._CLASS_GATE_SCORERS:
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate.scorer "
-                "must be 'diagonal'"
+                "must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_SCORERS)}"
+            )
+        if class_gate.scorer_hidden_size is not None:
+            if isinstance(class_gate.scorer_hidden_size, bool) or not isinstance(
+                class_gate.scorer_hidden_size,
+                int,
+            ):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "scorer_hidden_size must be an integer or null"
+                )
+            if class_gate.scorer_hidden_size <= 0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "scorer_hidden_size must be greater than zero"
+                )
+        if isinstance(class_gate.scorer_dropout, bool) or not isinstance(
+            class_gate.scorer_dropout,
+            int | float,
+        ):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "scorer_dropout must be numeric"
+            )
+        if not (0.0 <= float(class_gate.scorer_dropout) < 1.0):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "scorer_dropout must be within [0, 1)"
             )
         if (
             class_gate.branch_logit_feature.mode
@@ -1864,6 +1932,163 @@ class JsonConfigLoader:
                     "model.encoder.architecture.evidence_pooling.type="
                     "'class_aware_branch_gated'"
                 )
+        b2e_cfg = cfg.loss.branch_to_evidence_ranking_consistency
+        if not isinstance(b2e_cfg.enabled, bool):
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.enabled "
+                "must be a boolean"
+            )
+        if not isinstance(b2e_cfg.teacher_detach, bool):
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.teacher_detach "
+                "must be a boolean"
+            )
+        if not isinstance(b2e_cfg.class_weighted, bool):
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            b2e_cfg.target
+            not in JsonConfigLoader._BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.target must be "
+                "'class_evidence_logits'"
+            )
+        if (
+            b2e_cfg.source
+            not in JsonConfigLoader._BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.source must be "
+                "'class_gated_branch_logits'"
+            )
+        if (
+            b2e_cfg.mode
+            not in JsonConfigLoader._BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_MODES
+        ):
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.mode must be "
+                "'true_vs_hardest_negative'"
+            )
+        if b2e_cfg.reduction not in JsonConfigLoader._MARGIN_REDUCTIONS:
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.reduction "
+                f"must be one of {sorted(JsonConfigLoader._MARGIN_REDUCTIONS)}"
+            )
+        if not isinstance(b2e_cfg.warmup_epochs, int):
+            raise TypeError(
+                "train.loss.branch_to_evidence_ranking_consistency.warmup_epochs "
+                "must be an integer"
+            )
+        if b2e_cfg.warmup_epochs < 0:
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.warmup_epochs "
+                "must be greater than or equal to zero"
+            )
+        if not isinstance(b2e_cfg.tolerance, int | float) or isinstance(
+            b2e_cfg.tolerance,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.branch_to_evidence_ranking_consistency.tolerance "
+                "must be numeric"
+            )
+        if b2e_cfg.tolerance < 0:
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.tolerance "
+                "must be greater than or equal to zero"
+            )
+        if b2e_cfg.enabled:
+            if b2e_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency.weight "
+                    "must be greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency is "
+                    "supported only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+        anti_veto_cfg = cfg.loss.global_residual_anti_veto
+        if not isinstance(anti_veto_cfg.enabled, bool):
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.enabled must be a boolean"
+            )
+        if not isinstance(anti_veto_cfg.class_weighted, bool):
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.class_weighted must be a boolean"
+            )
+        if (
+            anti_veto_cfg.target
+            not in JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.target must be "
+                "'global_residual_logits'"
+            )
+        if (
+            anti_veto_cfg.reference
+            not in JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_REFERENCES
+        ):
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.reference must be "
+                "'class_evidence_logits'"
+            )
+        if anti_veto_cfg.mode not in JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_MODES:
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.mode must be "
+                "'true_vs_hardest_negative'"
+            )
+        if anti_veto_cfg.reduction not in JsonConfigLoader._MARGIN_REDUCTIONS:
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.reduction must be one of "
+                f"{sorted(JsonConfigLoader._MARGIN_REDUCTIONS)}"
+            )
+        if not isinstance(anti_veto_cfg.warmup_epochs, int):
+            raise TypeError(
+                "train.loss.global_residual_anti_veto.warmup_epochs must be an integer"
+            )
+        if anti_veto_cfg.warmup_epochs < 0:
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.warmup_epochs must be "
+                "greater than or equal to zero"
+            )
+        for value, field_name in (
+            (
+                anti_veto_cfg.evidence_confidence_threshold,
+                "evidence_confidence_threshold",
+            ),
+            (anti_veto_cfg.min_residual_gap, "min_residual_gap"),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(
+                    f"train.loss.global_residual_anti_veto.{field_name} must be numeric"
+                )
+        if anti_veto_cfg.enabled:
+            if anti_veto_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.global_residual_anti_veto.weight must be greater "
+                    "than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.global_residual_anti_veto is supported only for "
+                    "cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.global_residual_anti_veto requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
         if not isinstance(cfg.loss.gate_weighted_branch_margin.enabled, bool):
             raise ValueError(
                 "train.loss.gate_weighted_branch_margin.enabled must be a boolean"
@@ -2324,6 +2549,24 @@ class JsonConfigLoader:
             raise ValueError(
                 "train.loss.class_gated_branch_logit_margin.class_weighted "
                 "requires train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.branch_to_evidence_ranking_consistency.enabled
+            and cfg.loss.branch_to_evidence_ranking_consistency.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.class_weighted "
+                "requires train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.global_residual_anti_veto.enabled
+            and cfg.loss.global_residual_anti_veto.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.class_weighted requires "
+                "train.loss.class_weighting.enabled=true"
             )
         if (
             cfg.loss.gate_weighted_branch_margin.enabled
@@ -2837,6 +3080,14 @@ class JsonConfigLoader:
         )
         loss["class_gated_branch_logit_margin"] = ClassGatedBranchLogitMarginConfig(
             **dict(loss.get("class_gated_branch_logit_margin", {}))
+        )
+        loss["branch_to_evidence_ranking_consistency"] = (
+            BranchToEvidenceRankingConsistencyConfig(
+                **dict(loss.get("branch_to_evidence_ranking_consistency", {}))
+            )
+        )
+        loss["global_residual_anti_veto"] = GlobalResidualAntiVetoConfig(
+            **dict(loss.get("global_residual_anti_veto", {}))
         )
         if "gate_branch_alignment" in loss:
             raise ValueError(

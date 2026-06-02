@@ -127,7 +127,9 @@ class ClassGateMixingConfig:
 @dataclass(frozen=True)
 class ClassGateConfig:
     mode: Literal["query"] = "query"
-    scorer: Literal["diagonal"] = "diagonal"
+    scorer: Literal["diagonal", "normalized_mlp"] = "diagonal"
+    scorer_hidden_size: int | None = None
+    scorer_dropout: float = 0.0
     gate_mixing: ClassGateMixingConfig = field(default_factory=ClassGateMixingConfig)
     global_residual: ClassGateGlobalResidualConfig = field(
         default_factory=ClassGateGlobalResidualConfig
@@ -491,6 +493,7 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             )
         self.temperature = cfg.temperature
         self.num_classes = num_classes
+        self.class_gate_scorer = cfg.class_gate.scorer
         self.gate_mixing = cfg.class_gate.gate_mixing
         self._runtime_epoch: int | None = None
         gate_hidden_size = cfg.gate_hidden_size or max(hidden_size // 2, 1)
@@ -502,10 +505,42 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             nn.Linear(gate_hidden_size, hidden_size),
         )
         self.class_queries = nn.Parameter(torch.empty(num_classes, hidden_size))
-        self.class_scorer_weight = nn.Parameter(torch.empty(num_classes, hidden_size))
-        self.class_scorer_bias = nn.Parameter(torch.zeros(num_classes))
+        self.class_scorer_weight: nn.Parameter | None
+        self.class_scorer_bias: nn.Parameter | None
+        self.class_scorers: nn.ModuleList | None
+        if self.class_gate_scorer == "diagonal":
+            self.class_scorer_weight = nn.Parameter(
+                torch.empty(num_classes, hidden_size)
+            )
+            self.class_scorer_bias = nn.Parameter(torch.zeros(num_classes))
+            self.class_scorers = None
+        elif self.class_gate_scorer == "normalized_mlp":
+            scorer_hidden_size = cfg.class_gate.scorer_hidden_size or max(
+                hidden_size // 2,
+                1,
+            )
+            self.class_scorer_weight = None
+            self.class_scorer_bias = None
+            self.class_scorers = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.LayerNorm(hidden_size),
+                        nn.Linear(hidden_size, scorer_hidden_size),
+                        nn.GELU(),
+                        nn.Dropout(cfg.class_gate.scorer_dropout),
+                        nn.Linear(scorer_hidden_size, 1),
+                    )
+                    for _ in range(num_classes)
+                ]
+            )
+        else:
+            raise ValueError(
+                "class_aware_branch_gated class_gate.scorer must be 'diagonal' "
+                "or 'normalized_mlp'"
+            )
         nn.init.normal_(self.class_queries, std=PATCH_INIT_STD)
-        nn.init.normal_(self.class_scorer_weight, std=PATCH_INIT_STD)
+        if self.class_scorer_weight is not None:
+            nn.init.normal_(self.class_scorer_weight, std=PATCH_INIT_STD)
 
     def set_runtime_epoch(self, epoch: int | None) -> None:
         self._runtime_epoch = None if epoch is None else int(epoch)
@@ -518,6 +553,27 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             hold_epochs=int(self.gate_mixing.hold_epochs),
             decay_epochs=int(self.gate_mixing.decay_epochs),
             epoch=self._runtime_epoch,
+        )
+
+    def _score_class_evidence(self, class_evidence_embeddings: Tensor) -> Tensor:
+        if self.class_gate_scorer == "diagonal":
+            if self.class_scorer_weight is None or self.class_scorer_bias is None:
+                raise RuntimeError(
+                    "diagonal class scorer parameters are not initialized"
+                )
+            return (
+                class_evidence_embeddings * self.class_scorer_weight.unsqueeze(0)
+            ).sum(dim=-1) + self.class_scorer_bias.unsqueeze(0)
+        if self.class_gate_scorer == "normalized_mlp":
+            if self.class_scorers is None:
+                raise RuntimeError("normalized_mlp class scorers are not initialized")
+            logits = [
+                scorer(class_evidence_embeddings[:, class_index, :]).squeeze(-1)
+                for class_index, scorer in enumerate(self.class_scorers)
+            ]
+            return torch.stack(logits, dim=1)
+        raise RuntimeError(
+            f"Unsupported class evidence scorer {self.class_gate_scorer}"
         )
 
     def forward(
@@ -598,9 +654,7 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             class_gate_weights,
             branch_evidence_summary,
         )
-        class_evidence_logits = (
-            class_evidence_embeddings * self.class_scorer_weight.unsqueeze(0)
-        ).sum(dim=-1) + self.class_scorer_bias.unsqueeze(0)
+        class_evidence_logits = self._score_class_evidence(class_evidence_embeddings)
         pooled_embedding = class_evidence_embeddings.mean(dim=1)
         aggregate_gate_weights = class_gate_weights.mean(dim=1)
         aggregate_gate_entropy = -(

@@ -34,6 +34,7 @@ from src.utils.config import (
     AttentionEntropyLossConfig,
     BranchAuxiliaryLossConfig,
     BranchBinaryAuxiliaryLossConfig,
+    BranchToEvidenceRankingConsistencyConfig,
     CheckpointingConfig,
     ClassEvidenceMarginConfig,
     ClassGatedBranchLogitMarginConfig,
@@ -44,6 +45,7 @@ from src.utils.config import (
     GateBranchRegretWeightScheduleConfig,
     GateEntropyRegularizationConfig,
     GateWeightedBranchMarginConfig,
+    GlobalResidualAntiVetoConfig,
     LabelSmoothingConfig,
     TopBranchMarginConfig,
 )
@@ -96,6 +98,12 @@ class TrainerConfig:
     class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
         default_factory=ClassGatedBranchLogitMarginConfig
     )
+    branch_to_evidence_ranking_consistency: BranchToEvidenceRankingConsistencyConfig = (
+        field(default_factory=BranchToEvidenceRankingConsistencyConfig)
+    )
+    global_residual_anti_veto: GlobalResidualAntiVetoConfig = field(
+        default_factory=GlobalResidualAntiVetoConfig
+    )
     gate_weighted_branch_margin: GateWeightedBranchMarginConfig = field(
         default_factory=GateWeightedBranchMarginConfig
     )
@@ -134,6 +142,11 @@ class LossComponents:
     class_evidence_margin_loss: Tensor | None = None
     class_gated_branch_logit_margin: Tensor | None = None
     class_gated_branch_logit_margin_loss: Tensor | None = None
+    branch_to_evidence_ranking_consistency: Tensor | None = None
+    branch_to_evidence_ranking_consistency_loss: Tensor | None = None
+    global_residual_anti_veto: Tensor | None = None
+    global_residual_anti_veto_loss: Tensor | None = None
+    global_residual_anti_veto_eligible_fraction: Tensor | None = None
     gate_weighted_branch_margin: Tensor | None = None
     gate_weighted_branch_margin_loss: Tensor | None = None
     gate_branch_regret: Tensor | None = None
@@ -1025,6 +1038,14 @@ class Trainer(LoggingMixin):
         *,
         margin: float,
     ) -> Tensor:
+        margin_gap, _ = self._true_vs_hardest_negative_gap(logits, label_indices)
+        return torch.relu(margin - margin_gap)
+
+    def _true_vs_hardest_negative_gap(
+        self,
+        logits: Tensor,
+        label_indices: Tensor,
+    ) -> tuple[Tensor, Tensor]:
         true_logits = logits.gather(1, label_indices.unsqueeze(1)).squeeze(1)
         negative_logits = logits.masked_fill(
             F.one_hot(
@@ -1033,9 +1054,8 @@ class Trainer(LoggingMixin):
             ).to(dtype=torch.bool, device=logits.device),
             -torch.inf,
         )
-        hardest_negative = negative_logits.max(dim=1).values
-        margin_gap = true_logits - hardest_negative
-        return torch.relu(margin - margin_gap)
+        hardest_negative_values, hardest_negative_indices = negative_logits.max(dim=1)
+        return true_logits - hardest_negative_values, hardest_negative_indices
 
     def _reduce_class_margin_penalties(
         self,
@@ -1189,6 +1209,181 @@ class Trainer(LoggingMixin):
         )
         weighted_loss = float(cfg.weight) * raw_loss
         return raw_loss, weighted_loss
+
+    def _compute_branch_to_evidence_ranking_consistency_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor]:
+        cfg = self.cfg.branch_to_evidence_ranking_consistency
+        if cfg.target != "class_evidence_logits":
+            raise ValueError(
+                "branch-to-evidence ranking consistency supports only "
+                "target='class_evidence_logits'"
+            )
+        if cfg.source != "class_gated_branch_logits":
+            raise ValueError(
+                "branch-to-evidence ranking consistency supports only "
+                "source='class_gated_branch_logits'"
+            )
+        if cfg.mode != "true_vs_hardest_negative":
+            raise ValueError(
+                "branch-to-evidence ranking consistency supports only "
+                "mode='true_vs_hardest_negative'"
+            )
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = output.logits.sum() * 0.0
+            return raw_loss, raw_loss
+        if output.class_evidence_logits is None:
+            raise ValueError(
+                "branch-to-evidence ranking consistency enabled but model did "
+                "not return class_evidence_logits"
+            )
+        if output.class_gated_branch_logits is None:
+            raise ValueError(
+                "branch-to-evidence ranking consistency enabled but model did "
+                "not return class_gated_branch_logits"
+            )
+        evidence_logits = output.class_evidence_logits
+        source_logits = output.class_gated_branch_logits
+        label_indices = self._validate_class_margin_inputs(
+            evidence_logits,
+            labels,
+            logits_name="class_evidence_logits",
+            loss_name="branch-to-evidence ranking consistency",
+        )
+        if tuple(source_logits.shape) != tuple(evidence_logits.shape):
+            raise ValueError(
+                "class_gated_branch_logits must match class_evidence_logits shape "
+                "for branch-to-evidence ranking consistency"
+            )
+        self._validate_class_margin_inputs(
+            source_logits,
+            labels,
+            logits_name="class_gated_branch_logits",
+            loss_name="branch-to-evidence ranking consistency",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = evidence_logits.sum() * 0.0
+            return raw_loss, raw_loss
+
+        branch_gap, _ = self._true_vs_hardest_negative_gap(
+            source_logits,
+            label_indices,
+        )
+        if cfg.teacher_detach:
+            branch_gap = branch_gap.detach()
+        evidence_gap, _ = self._true_vs_hardest_negative_gap(
+            evidence_logits,
+            label_indices,
+        )
+        penalties = torch.relu(branch_gap - evidence_gap + float(cfg.tolerance))
+        class_weights = self._class_margin_weights(
+            label_indices,
+            evidence_logits,
+            enabled=cfg.class_weighted,
+            loss_name="branch_to_evidence_ranking_consistency",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss
+
+    def _compute_global_residual_anti_veto_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        cfg = self.cfg.global_residual_anti_veto
+        if cfg.target != "global_residual_logits":
+            raise ValueError(
+                "global residual anti-veto supports only "
+                "target='global_residual_logits'"
+            )
+        if cfg.reference != "class_evidence_logits":
+            raise ValueError(
+                "global residual anti-veto supports only "
+                "reference='class_evidence_logits'"
+            )
+        if cfg.mode != "true_vs_hardest_negative":
+            raise ValueError(
+                "global residual anti-veto supports only "
+                "mode='true_vs_hardest_negative'"
+            )
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = output.logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        if output.global_residual_logits is None:
+            raise ValueError(
+                "global residual anti-veto enabled but model did not return "
+                "global_residual_logits"
+            )
+        if output.class_evidence_logits is None:
+            raise ValueError(
+                "global residual anti-veto enabled but model did not return "
+                "class_evidence_logits"
+            )
+        residual_logits = output.global_residual_logits
+        evidence_logits = output.class_evidence_logits
+        label_indices = self._validate_class_margin_inputs(
+            residual_logits,
+            labels,
+            logits_name="global_residual_logits",
+            loss_name="global residual anti-veto",
+        )
+        if tuple(evidence_logits.shape) != tuple(residual_logits.shape):
+            raise ValueError(
+                "class_evidence_logits must match global_residual_logits shape "
+                "for global residual anti-veto"
+            )
+        self._validate_class_margin_inputs(
+            evidence_logits,
+            labels,
+            logits_name="class_evidence_logits",
+            loss_name="global residual anti-veto",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = residual_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+
+        evidence_gap, negative_indices = self._true_vs_hardest_negative_gap(
+            evidence_logits,
+            label_indices,
+        )
+        eligible = evidence_gap.detach() > float(cfg.evidence_confidence_threshold)
+        eligible_fraction = eligible.to(dtype=residual_logits.dtype).mean()
+        residual_true = residual_logits.gather(1, label_indices.unsqueeze(1)).squeeze(1)
+        residual_negative = residual_logits.gather(
+            1,
+            negative_indices.unsqueeze(1),
+        ).squeeze(1)
+        residual_gap = residual_true - residual_negative
+        penalties = torch.relu(float(cfg.min_residual_gap) - residual_gap)
+        if not bool(eligible.any().item()):
+            raw_loss = residual_logits.sum() * 0.0
+        else:
+            class_weights = self._class_margin_weights(
+                label_indices,
+                residual_logits,
+                enabled=cfg.class_weighted,
+                loss_name="global_residual_anti_veto",
+            )
+            raw_loss = self._reduce_class_margin_penalties(
+                penalties[eligible],
+                label_indices[eligible],
+                class_weights[eligible],
+                reduction=cfg.reduction,
+            )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss, eligible_fraction
 
     def _class_aware_branch_margin_inputs(
         self,
@@ -1753,6 +1948,36 @@ class Trainer(LoggingMixin):
             ) = self._compute_class_gated_branch_logit_margin_loss(output, labels)
             scheduled_total = scheduled_total + class_gated_branch_logit_margin_loss
             monitor_total = monitor_total + class_gated_branch_logit_margin_loss
+        branch_to_evidence_ranking_consistency: Tensor | None = None
+        branch_to_evidence_ranking_consistency_loss: Tensor | None = None
+        if self.cfg.branch_to_evidence_ranking_consistency.enabled:
+            (
+                branch_to_evidence_ranking_consistency,
+                branch_to_evidence_ranking_consistency_loss,
+            ) = self._compute_branch_to_evidence_ranking_consistency_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = (
+                scheduled_total + branch_to_evidence_ranking_consistency_loss
+            )
+            monitor_total = monitor_total + branch_to_evidence_ranking_consistency_loss
+        global_residual_anti_veto: Tensor | None = None
+        global_residual_anti_veto_loss: Tensor | None = None
+        global_residual_anti_veto_eligible_fraction: Tensor | None = None
+        if self.cfg.global_residual_anti_veto.enabled:
+            (
+                global_residual_anti_veto,
+                global_residual_anti_veto_loss,
+                global_residual_anti_veto_eligible_fraction,
+            ) = self._compute_global_residual_anti_veto_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + global_residual_anti_veto_loss
+            monitor_total = monitor_total + global_residual_anti_veto_loss
         gate_weighted_branch_margin: Tensor | None = None
         gate_weighted_branch_margin_loss: Tensor | None = None
         if self.cfg.gate_weighted_branch_margin.enabled:
@@ -1832,6 +2057,17 @@ class Trainer(LoggingMixin):
             class_evidence_margin_loss=class_evidence_margin_loss,
             class_gated_branch_logit_margin=class_gated_branch_logit_margin,
             class_gated_branch_logit_margin_loss=(class_gated_branch_logit_margin_loss),
+            branch_to_evidence_ranking_consistency=(
+                branch_to_evidence_ranking_consistency
+            ),
+            branch_to_evidence_ranking_consistency_loss=(
+                branch_to_evidence_ranking_consistency_loss
+            ),
+            global_residual_anti_veto=global_residual_anti_veto,
+            global_residual_anti_veto_loss=global_residual_anti_veto_loss,
+            global_residual_anti_veto_eligible_fraction=(
+                global_residual_anti_veto_eligible_fraction
+            ),
             gate_weighted_branch_margin=gate_weighted_branch_margin,
             gate_weighted_branch_margin_loss=gate_weighted_branch_margin_loss,
             gate_branch_regret=gate_branch_regret,
@@ -2279,6 +2515,91 @@ class Trainer(LoggingMixin):
                     row["gate_bad_branch_suppression_effective_weight"] = float(
                         effective_weight
                     )
+        if (
+            self.cfg.branch_to_evidence_ranking_consistency.enabled
+            and output.class_evidence_logits is not None
+            and output.class_gated_branch_logits is not None
+        ):
+            evidence_logits = output.class_evidence_logits.detach()
+            source_logits = output.class_gated_branch_logits.detach()
+            if tuple(evidence_logits.shape) == tuple(source_logits.shape) and tuple(
+                evidence_logits.shape
+            ) == (int(labels.numel()), int(branch_logits.shape[2])):
+                branch_gap, branch_negative = self._true_vs_hardest_negative_gap(
+                    source_logits,
+                    label_indices,
+                )
+                evidence_gap, evidence_negative = self._true_vs_hardest_negative_gap(
+                    evidence_logits,
+                    label_indices,
+                )
+                penalties = torch.relu(
+                    branch_gap
+                    - evidence_gap
+                    + float(self.cfg.branch_to_evidence_ranking_consistency.tolerance)
+                )
+                for index, row in enumerate(rows):
+                    row["branch_to_evidence_branch_gap"] = float(
+                        branch_gap[index].detach().cpu().item()
+                    )
+                    row["branch_to_evidence_evidence_gap"] = float(
+                        evidence_gap[index].detach().cpu().item()
+                    )
+                    row["branch_to_evidence_branch_negative_class"] = int(
+                        branch_negative[index].detach().cpu().item()
+                    )
+                    row["branch_to_evidence_evidence_negative_class"] = int(
+                        evidence_negative[index].detach().cpu().item()
+                    )
+                    row["branch_to_evidence_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
+        if (
+            self.cfg.global_residual_anti_veto.enabled
+            and output.class_evidence_logits is not None
+            and output.global_residual_logits is not None
+        ):
+            evidence_logits = output.class_evidence_logits.detach()
+            residual_logits = output.global_residual_logits.detach()
+            if tuple(evidence_logits.shape) == tuple(residual_logits.shape) and tuple(
+                residual_logits.shape
+            ) == (int(labels.numel()), int(branch_logits.shape[2])):
+                evidence_gap, negative_indices = self._true_vs_hardest_negative_gap(
+                    evidence_logits,
+                    label_indices,
+                )
+                residual_true = residual_logits.gather(
+                    1,
+                    label_indices.unsqueeze(1),
+                ).squeeze(1)
+                residual_negative = residual_logits.gather(
+                    1,
+                    negative_indices.unsqueeze(1),
+                ).squeeze(1)
+                residual_gap = residual_true - residual_negative
+                eligible = evidence_gap > float(
+                    self.cfg.global_residual_anti_veto.evidence_confidence_threshold
+                )
+                penalties = torch.relu(
+                    float(self.cfg.global_residual_anti_veto.min_residual_gap)
+                    - residual_gap
+                )
+                for index, row in enumerate(rows):
+                    row["global_residual_anti_veto_evidence_gap"] = float(
+                        evidence_gap[index].detach().cpu().item()
+                    )
+                    row["global_residual_anti_veto_residual_gap"] = float(
+                        residual_gap[index].detach().cpu().item()
+                    )
+                    row["global_residual_anti_veto_negative_class"] = int(
+                        negative_indices[index].detach().cpu().item()
+                    )
+                    row["global_residual_anti_veto_eligible"] = bool(
+                        eligible[index].detach().cpu().item()
+                    )
+                    row["global_residual_anti_veto_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
         return rows
 
     def _epoch(
@@ -2312,6 +2633,11 @@ class Trainer(LoggingMixin):
             "class_evidence_margin_loss": 0.0,
             "class_gated_branch_logit_margin": 0.0,
             "class_gated_branch_logit_margin_loss": 0.0,
+            "branch_to_evidence_ranking_consistency": 0.0,
+            "branch_to_evidence_ranking_consistency_loss": 0.0,
+            "global_residual_anti_veto": 0.0,
+            "global_residual_anti_veto_loss": 0.0,
+            "global_residual_anti_veto_eligible_fraction": 0.0,
             "gate_weighted_branch_margin": 0.0,
             "gate_weighted_branch_margin_loss": 0.0,
             "gate_branch_regret": 0.0,
@@ -2415,6 +2741,21 @@ class Trainer(LoggingMixin):
                 ),
                 "class_gated_branch_logit_margin_loss": (
                     loss_components.class_gated_branch_logit_margin_loss
+                ),
+                "branch_to_evidence_ranking_consistency": (
+                    loss_components.branch_to_evidence_ranking_consistency
+                ),
+                "branch_to_evidence_ranking_consistency_loss": (
+                    loss_components.branch_to_evidence_ranking_consistency_loss
+                ),
+                "global_residual_anti_veto": (
+                    loss_components.global_residual_anti_veto
+                ),
+                "global_residual_anti_veto_loss": (
+                    loss_components.global_residual_anti_veto_loss
+                ),
+                "global_residual_anti_veto_eligible_fraction": (
+                    loss_components.global_residual_anti_veto_eligible_fraction
                 ),
                 "gate_weighted_branch_margin": (
                     loss_components.gate_weighted_branch_margin
@@ -2704,6 +3045,32 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "train_branch_to_evidence_ranking_consistency": (
+                        train_components.get(
+                            "branch_to_evidence_ranking_consistency",
+                            0.0,
+                        )
+                    ),
+                    "train_loss_branch_to_evidence_ranking_consistency": (
+                        train_components.get(
+                            "branch_to_evidence_ranking_consistency_loss",
+                            0.0,
+                        )
+                    ),
+                    "train_global_residual_anti_veto": train_components.get(
+                        "global_residual_anti_veto",
+                        0.0,
+                    ),
+                    "train_loss_global_residual_anti_veto": train_components.get(
+                        "global_residual_anti_veto_loss",
+                        0.0,
+                    ),
+                    "train_global_residual_anti_veto_eligible_fraction": (
+                        train_components.get(
+                            "global_residual_anti_veto_eligible_fraction",
+                            0.0,
+                        )
+                    ),
                     "train_gate_weighted_branch_margin": train_components.get(
                         "gate_weighted_branch_margin",
                         0.0,
@@ -2835,6 +3202,32 @@ class Trainer(LoggingMixin):
                     "val_loss_class_gated_branch_logit_margin": val_components.get(
                         "class_gated_branch_logit_margin_loss",
                         0.0,
+                    ),
+                    "val_branch_to_evidence_ranking_consistency": (
+                        val_components.get(
+                            "branch_to_evidence_ranking_consistency",
+                            0.0,
+                        )
+                    ),
+                    "val_loss_branch_to_evidence_ranking_consistency": (
+                        val_components.get(
+                            "branch_to_evidence_ranking_consistency_loss",
+                            0.0,
+                        )
+                    ),
+                    "val_global_residual_anti_veto": val_components.get(
+                        "global_residual_anti_veto",
+                        0.0,
+                    ),
+                    "val_loss_global_residual_anti_veto": val_components.get(
+                        "global_residual_anti_veto_loss",
+                        0.0,
+                    ),
+                    "val_global_residual_anti_veto_eligible_fraction": (
+                        val_components.get(
+                            "global_residual_anti_veto_eligible_fraction",
+                            0.0,
+                        )
                     ),
                     "val_gate_weighted_branch_margin": val_components.get(
                         "gate_weighted_branch_margin",

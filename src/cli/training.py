@@ -308,6 +308,10 @@ def main() -> None:
             class_gated_branch_logit_margin=(
                 cfg.train.loss.class_gated_branch_logit_margin
             ),
+            branch_to_evidence_ranking_consistency=(
+                cfg.train.loss.branch_to_evidence_ranking_consistency
+            ),
+            global_residual_anti_veto=cfg.train.loss.global_residual_anti_veto,
             gate_weighted_branch_margin=cfg.train.loss.gate_weighted_branch_margin,
             gate_branch_regret=cfg.train.loss.gate_branch_regret,
             gate_branch_regret_positive_threshold_by_class=(

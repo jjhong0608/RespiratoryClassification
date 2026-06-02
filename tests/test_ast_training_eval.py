@@ -47,6 +47,7 @@ from src.utils.config import (
     BranchBinaryAuxiliaryMonitorConfig,
     BranchBinaryAuxiliaryScheduleConfig,
     BranchBinaryPosWeightConfig,
+    BranchToEvidenceRankingConsistencyConfig,
     CheckpointingConfig,
     CheckpointMonitorConfig,
     ClassEvidenceMarginConfig,
@@ -64,6 +65,7 @@ from src.utils.config import (
     GateBranchRegretWeightScheduleConfig,
     GateEntropyRegularizationConfig,
     GateWeightedBranchMarginConfig,
+    GlobalResidualAntiVetoConfig,
     LabelSmoothingConfig,
     ModelConfig,
     ModelEncoderConfig,
@@ -276,6 +278,26 @@ def _trainer_cfg(
         "mean",
         "class_balanced_violating_mean",
     ] = "mean",
+    branch_to_evidence_enabled: bool = False,
+    branch_to_evidence_weight: float = 0.0,
+    branch_to_evidence_teacher_detach: bool = True,
+    branch_to_evidence_tolerance: float = 0.0,
+    branch_to_evidence_class_weighted: bool = False,
+    branch_to_evidence_reduction: Literal[
+        "mean",
+        "class_balanced_violating_mean",
+    ] = "mean",
+    branch_to_evidence_warmup_epochs: int = 0,
+    global_residual_anti_veto_enabled: bool = False,
+    global_residual_anti_veto_weight: float = 0.0,
+    global_residual_anti_veto_evidence_confidence_threshold: float = 0.0,
+    global_residual_anti_veto_min_residual_gap: float = -0.5,
+    global_residual_anti_veto_class_weighted: bool = False,
+    global_residual_anti_veto_reduction: Literal[
+        "mean",
+        "class_balanced_violating_mean",
+    ] = "mean",
+    global_residual_anti_veto_warmup_epochs: int = 0,
     gate_weighted_branch_margin_enabled: bool = False,
     gate_weighted_branch_margin_weight: float = 0.0,
     gate_weighted_branch_margin_value: float = 0.0,
@@ -411,6 +433,34 @@ def _trainer_cfg(
             mode="true_vs_hardest_negative",
             class_weighted=class_gated_branch_logit_margin_class_weighted,
             reduction=class_gated_branch_logit_margin_reduction,
+        ),
+        branch_to_evidence_ranking_consistency=(
+            BranchToEvidenceRankingConsistencyConfig(
+                enabled=branch_to_evidence_enabled,
+                weight=branch_to_evidence_weight,
+                target="class_evidence_logits",
+                source="class_gated_branch_logits",
+                mode="true_vs_hardest_negative",
+                teacher_detach=branch_to_evidence_teacher_detach,
+                tolerance=branch_to_evidence_tolerance,
+                class_weighted=branch_to_evidence_class_weighted,
+                reduction=branch_to_evidence_reduction,
+                warmup_epochs=branch_to_evidence_warmup_epochs,
+            )
+        ),
+        global_residual_anti_veto=GlobalResidualAntiVetoConfig(
+            enabled=global_residual_anti_veto_enabled,
+            weight=global_residual_anti_veto_weight,
+            target="global_residual_logits",
+            reference="class_evidence_logits",
+            mode="true_vs_hardest_negative",
+            evidence_confidence_threshold=(
+                global_residual_anti_veto_evidence_confidence_threshold
+            ),
+            min_residual_gap=global_residual_anti_veto_min_residual_gap,
+            class_weighted=global_residual_anti_veto_class_weighted,
+            reduction=global_residual_anti_veto_reduction,
+            warmup_epochs=global_residual_anti_veto_warmup_epochs,
         ),
         gate_weighted_branch_margin=GateWeightedBranchMarginConfig(
             enabled=gate_weighted_branch_margin_enabled,
@@ -1978,6 +2028,170 @@ def test_trainer_raises_when_branch_logit_margin_enabled_without_logits() -> Non
         trainer._compute_total_loss(criterion, output, labels)
 
 
+def test_trainer_branch_to_evidence_consistency_uses_detached_branch_teacher() -> None:
+    source_logits = torch.tensor(
+        [[1.0, 0.2, 0.5], [0.3, 1.0, 0.4]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    evidence_logits = torch.tensor(
+        [[0.7, 0.1, 0.6], [0.1, 0.8, 0.6]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.05,
+            branch_to_evidence_teacher_detach=True,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=evidence_logits,
+        class_gated_branch_logits=source_logits,
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    raw_loss, weighted_loss = (
+        trainer._compute_branch_to_evidence_ranking_consistency_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+    weighted_loss.backward()
+
+    assert torch.isclose(raw_loss, torch.tensor(0.4))
+    assert torch.isclose(weighted_loss, torch.tensor(0.02))
+    assert torch.isclose(
+        components.branch_to_evidence_ranking_consistency,
+        raw_loss,
+    )
+    assert torch.isclose(
+        components.branch_to_evidence_ranking_consistency_loss,
+        weighted_loss.detach(),
+    )
+    assert source_logits.grad is None
+    assert evidence_logits.grad is not None
+
+
+def test_trainer_branch_to_evidence_consistency_warmup_returns_zero() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.05,
+            branch_to_evidence_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        class_evidence_logits=torch.tensor([[0.1, 0.0, 0.2]], dtype=torch.float32),
+        class_gated_branch_logits=torch.tensor([[1.0, 0.0, 0.2]], dtype=torch.float32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    raw_loss, weighted_loss = (
+        trainer._compute_branch_to_evidence_ranking_consistency_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+
+    assert torch.isclose(raw_loss, torch.tensor(0.0))
+    assert torch.isclose(weighted_loss, torch.tensor(0.0))
+
+
+def test_trainer_global_residual_anti_veto_filters_by_evidence_confidence() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            global_residual_anti_veto_enabled=True,
+            global_residual_anti_veto_weight=0.02,
+            global_residual_anti_veto_evidence_confidence_threshold=0.2,
+            global_residual_anti_veto_min_residual_gap=-0.5,
+        )
+    )
+    criterion = trainer._criterion_on(torch.device("cpu"))
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.tensor(
+            [[1.0, 0.2, 0.4], [0.5, 0.6, 0.2]],
+            dtype=torch.float32,
+        ),
+        global_residual_logits=torch.tensor(
+            [[0.0, 0.1, 0.7], [0.1, 0.2, 0.0]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    components = trainer._compute_total_loss(criterion, output, labels)
+    raw_loss, weighted_loss, eligible_fraction = (
+        trainer._compute_global_residual_anti_veto_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+
+    assert torch.isclose(raw_loss, torch.tensor(0.2))
+    assert torch.isclose(weighted_loss, torch.tensor(0.004))
+    assert torch.isclose(eligible_fraction, torch.tensor(0.5))
+    assert torch.isclose(components.global_residual_anti_veto, raw_loss)
+    assert torch.isclose(components.global_residual_anti_veto_loss, weighted_loss)
+    assert torch.isclose(
+        components.global_residual_anti_veto_eligible_fraction,
+        eligible_fraction,
+    )
+
+
+def test_trainer_global_residual_anti_veto_warmup_returns_zero() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            global_residual_anti_veto_enabled=True,
+            global_residual_anti_veto_weight=0.02,
+            global_residual_anti_veto_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        class_evidence_logits=torch.tensor([[1.0, 0.2, 0.4]], dtype=torch.float32),
+        global_residual_logits=torch.tensor([[0.0, 0.1, 0.7]], dtype=torch.float32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    raw_loss, weighted_loss, eligible_fraction = (
+        trainer._compute_global_residual_anti_veto_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+
+    assert torch.isclose(raw_loss, torch.tensor(0.0))
+    assert torch.isclose(weighted_loss, torch.tensor(0.0))
+    assert torch.isclose(eligible_fraction, torch.tensor(0.0))
+
+
 def test_trainer_gate_weighted_branch_margin_is_zero_during_warmup() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -2792,6 +3006,12 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
             gate_bad_branch_suppression_weight=0.025,
             gate_bad_branch_suppression_bad_margin_threshold=0.0,
             gate_bad_branch_suppression_threshold_by_class=(-0.2, 0.1, 0.1),
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.05,
+            global_residual_anti_veto_enabled=True,
+            global_residual_anti_veto_weight=0.02,
+            global_residual_anti_veto_evidence_confidence_threshold=0.0,
+            global_residual_anti_veto_min_residual_gap=-0.5,
         )
     )
     output = AstModelOutput(
@@ -2803,6 +3023,18 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
         ),
         class_evidence_gate_weights=torch.tensor(
             [[[0.5, 0.5], [0.25, 0.75], [0.5, 0.5]]],
+            dtype=torch.float32,
+        ),
+        class_gated_branch_logits=torch.tensor(
+            [[0.4, 0.7, 0.2]],
+            dtype=torch.float32,
+        ),
+        class_evidence_logits=torch.tensor(
+            [[0.4, 0.55, 0.2]],
+            dtype=torch.float32,
+        ),
+        global_residual_logits=torch.tensor(
+            [[0.2, -0.6, 0.3]],
             dtype=torch.float32,
         ),
     )
@@ -2825,6 +3057,13 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
     assert row["gate_bad_branch_suppression_penalty"] == pytest.approx(0.075)
     assert row["gate_bad_branch_suppression_weight_multiplier"] == pytest.approx(1.0)
     assert row["gate_bad_branch_suppression_effective_weight"] == pytest.approx(0.025)
+    assert row["branch_to_evidence_branch_gap"] == pytest.approx(0.3)
+    assert row["branch_to_evidence_evidence_gap"] == pytest.approx(0.15)
+    assert row["branch_to_evidence_penalty"] == pytest.approx(0.15)
+    assert row["global_residual_anti_veto_evidence_gap"] == pytest.approx(0.15)
+    assert row["global_residual_anti_veto_residual_gap"] == pytest.approx(-0.8)
+    assert row["global_residual_anti_veto_eligible"] is True
+    assert row["global_residual_anti_veto_penalty"] == pytest.approx(0.3)
 
 
 def test_trainer_top_branch_margin_class_balanced_and_warmup() -> None:
@@ -3204,6 +3443,10 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
                     [[0.3, 0.5, 0.2], [0.7, 0.3, 0.2]],
                     dtype=torch.float32,
                 ),
+                global_residual_logits=torch.tensor(
+                    [[0.1, -0.8, 0.2], [-0.7, 0.1, 0.2]],
+                    dtype=torch.float32,
+                ),
             )
 
     trainer = Trainer(
@@ -3223,6 +3466,12 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
             class_gated_branch_logit_margin_enabled=True,
             class_gated_branch_logit_margin_weight=0.03,
             class_gated_branch_logit_margin_value=0.3,
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.05,
+            global_residual_anti_veto_enabled=True,
+            global_residual_anti_veto_weight=0.02,
+            global_residual_anti_veto_evidence_confidence_threshold=0.0,
+            global_residual_anti_veto_min_residual_gap=-0.5,
             gate_weighted_branch_margin_enabled=True,
             gate_weighted_branch_margin_weight=0.01,
             gate_weighted_branch_margin_value=0.3,
@@ -3261,6 +3510,11 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
     assert "class_evidence_margin_loss" in result.loss_components
     assert "class_gated_branch_logit_margin" in result.loss_components
     assert "class_gated_branch_logit_margin_loss" in result.loss_components
+    assert "branch_to_evidence_ranking_consistency" in result.loss_components
+    assert "branch_to_evidence_ranking_consistency_loss" in result.loss_components
+    assert "global_residual_anti_veto" in result.loss_components
+    assert "global_residual_anti_veto_loss" in result.loss_components
+    assert "global_residual_anti_veto_eligible_fraction" in result.loss_components
     assert "gate_weighted_branch_margin" in result.loss_components
     assert "gate_weighted_branch_margin_loss" in result.loss_components
     assert "gate_branch_regret" in result.loss_components
@@ -3322,6 +3576,11 @@ def _sample_epoch_log_context(
         "class_evidence_margin_loss": 0.08,
         "class_gated_branch_logit_margin": 0.31,
         "class_gated_branch_logit_margin_loss": 0.0465,
+        "branch_to_evidence_ranking_consistency": 0.27,
+        "branch_to_evidence_ranking_consistency_loss": 0.0135,
+        "global_residual_anti_veto": 0.19,
+        "global_residual_anti_veto_loss": 0.0038,
+        "global_residual_anti_veto_eligible_fraction": 0.40,
         "gate_weighted_branch_margin": 0.25,
         "gate_weighted_branch_margin_loss": 0.025,
         "top_branch_margin": 0.50,
@@ -3361,6 +3620,11 @@ def _sample_epoch_log_context(
         "class_evidence_margin_loss": 0.09,
         "class_gated_branch_logit_margin": 0.38,
         "class_gated_branch_logit_margin_loss": 0.057,
+        "branch_to_evidence_ranking_consistency": 0.33,
+        "branch_to_evidence_ranking_consistency_loss": 0.0165,
+        "global_residual_anti_veto": 0.22,
+        "global_residual_anti_veto_loss": 0.0044,
+        "global_residual_anti_veto_eligible_fraction": 0.45,
         "gate_weighted_branch_margin": 0.35,
         "gate_weighted_branch_margin_loss": 0.035,
         "top_branch_margin": 0.60,
@@ -3429,6 +3693,8 @@ def test_epoch_log_formatter_builds_readable_multiclass_block() -> None:
     assert "normal->wheeze=3" in block
     assert "class_margin raw=0.4000 loss=0.0800" in block
     assert "branch_logit_margin raw=0.3100 loss=0.0465" in block
+    assert "b2e raw=0.2700 loss=0.0135" in block
+    assert "anti_veto raw=0.1900 loss=0.0038" in block
     assert "top_branch raw=0.5000 loss=0.1000" in block
     assert "regret raw=0.2200/0.3000" in block
     assert "bad_suppress raw=0.1800/0.2100" in block
@@ -3461,6 +3727,12 @@ def test_epoch_jsonl_logs_append_metric_loss_and_adaptive_payloads(
     assert metrics_payload["epoch"] == 16
     assert metrics_payload["val"]["confusion_summary"]["wheeze->normal"] == 4
     assert loss_payload["train"]["class_evidence_margin_loss"] == pytest.approx(0.08)
+    assert loss_payload["train"][
+        "branch_to_evidence_ranking_consistency_loss"
+    ] == pytest.approx(0.0135)
+    assert loss_payload["train"]["global_residual_anti_veto_loss"] == pytest.approx(
+        0.0038
+    )
     assert adaptive_payload["adaptive_state"]["top_branch_margin_by_label"][
         "wheeze"
     ] == pytest.approx(0.52)

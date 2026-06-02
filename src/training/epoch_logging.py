@@ -255,6 +255,20 @@ def _format_component_line(
     )
     _append_raw_loss_pair(
         parts,
+        "b2e",
+        components,
+        raw_key="branch_to_evidence_ranking_consistency",
+        loss_key="branch_to_evidence_ranking_consistency_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
+        "anti_veto",
+        components,
+        raw_key="global_residual_anti_veto",
+        loss_key="global_residual_anti_veto_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
         "gate_weighted",
         components,
         raw_key="gate_weighted_branch_margin",

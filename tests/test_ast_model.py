@@ -365,6 +365,33 @@ def test_class_aware_gated_pooling_uniform_gate_mixing_schedule() -> None:
     )
 
 
+def test_class_aware_gated_pooling_normalized_mlp_scorer_outputs_logits() -> None:
+    pooler = ClassAwareBranchGatedEvidencePooling(
+        hidden_size=16,
+        num_classes=3,
+        cfg=EvidencePoolingConfig(
+            type="class_aware_branch_gated",
+            dropout=0.0,
+            class_gate=ClassGateConfig(
+                scorer="normalized_mlp",
+                scorer_hidden_size=8,
+                scorer_dropout=0.0,
+            ),
+        ),
+    )
+    evidence_tokens = torch.randn(2, 6, 16)
+    branch_ids = torch.tensor([[0, 0, 1, 1, 2, 2], [0, 0, 1, 1, 2, 2]])
+
+    output = pooler(evidence_tokens, branch_ids)
+
+    assert output.class_evidence_logits is not None
+    assert output.class_evidence_logits.shape == (2, 3)
+    assert pooler.class_scorers is not None
+    assert len(pooler.class_scorers) == 3
+    assert pooler.class_scorer_weight is None
+    assert pooler.class_scorer_bias is None
+
+
 def test_class_aware_gated_pooling_rejects_invalid_class_count() -> None:
     with pytest.raises(ValueError, match="requires num_classes >= 2"):
         ClassAwareBranchGatedEvidencePooling(
