@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging as py_logging
 from pathlib import Path
 
 import pytest
+from src.utils import logging as logging_utils
 from src.utils.config import JsonConfigLoader
+from src.utils.logging import LoggingMixin
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _LoggingProbe(LoggingMixin):
+    pass
 
 
 def _write_json(path: Path, payload: dict) -> Path:
@@ -235,6 +242,7 @@ def test_retained_repo_configs_load() -> None:
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
     assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver12"
+    assert current_training_cfg.experiment.logging.terminal_width is None
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.train.loss.type == "cross_entropy"
     assert (
@@ -243,11 +251,14 @@ def test_retained_repo_configs_load() -> None:
     )
     assert current_training_cfg.train.loss.top_branch_margin.enabled is True
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
+    assert baseline_training_cfg.experiment.logging.terminal_width is None
     assert baseline_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert baseline_training_cfg.train.loss.type == "cross_entropy"
     assert cv_cfg.folds[0].name == "fold_0"
+    assert cv_cfg.experiment.logging.terminal_width is None
     assert cv_cfg.train.initialization.skip_mismatched_shapes is False
     assert eval_cfg.checkpoint_path
+    assert eval_cfg.experiment.logging.terminal_width is None
     assert eval_cfg.threshold_optimization.metric == "f1"
 
 
@@ -257,6 +268,7 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     cfg = JsonConfigLoader.load_training(config_path)
 
     assert cfg.experiment.mode == "clip"
+    assert cfg.experiment.logging.terminal_width is None
     assert cfg.data.preprocessing.ast_fbank.max_length == 32
     assert cfg.model.encoder.type == "multiscale_rdt_ast"
     assert cfg.model.classifier.pooling == "latent_mean"
@@ -350,6 +362,48 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.sampler.enabled is False
     assert cfg.train.sampler.type == "none"
     assert cfg.train.initialization.checkpoint_path is None
+
+
+def test_experiment_logging_terminal_width_parses(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["experiment"]["logging"] = {"terminal_width": 120}
+    config_path = _write_json(tmp_path / "train.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.experiment.logging.terminal_width == 120
+
+
+@pytest.mark.parametrize("terminal_width", [0, -1, 120.5, "120", True])
+def test_experiment_logging_terminal_width_rejects_invalid(
+    tmp_path: Path,
+    terminal_width: object,
+) -> None:
+    payload = _base_payload()
+    payload["experiment"]["logging"] = {"terminal_width": terminal_width}
+    config_path = _write_json(tmp_path / "train.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match="terminal_width"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_configure_rich_logging_fixed_width_and_preserves_file_handler(
+    tmp_path: Path,
+) -> None:
+    logging_utils.configure_rich_logging(None)
+    logging_utils.enable_file_logging(tmp_path / "run.log", mode="w")
+    file_handlers = [
+        handler
+        for handler in logging_utils.logger.handlers
+        if isinstance(handler, py_logging.FileHandler)
+    ]
+
+    logging_utils.configure_rich_logging(120)
+
+    assert logging_utils.handler.console.width == 120
+    assert all(handler in logging_utils.logger.handlers for handler in file_handlers)
+    assert logging_utils.handler in _LoggingProbe().logger.handlers
+    logging_utils.configure_rich_logging(None)
 
 
 def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:

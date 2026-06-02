@@ -70,6 +70,26 @@ PYTHONPATH=. /Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python sr
 Outputs are written under `experiment.output_dir/experiment.name/` unless the
 CLI config specifies a fold-specific subdirectory.
 
+## Training Logs
+
+Each training run keeps three log levels under the run directory:
+
+- `run.log`: human-readable epoch summaries. Each epoch is written as a
+  multi-line block with train/validation metrics, active loss components, gate
+  state, adaptive branch-objective state, and the validation diagnostics path.
+- `logs/metrics_epoch.jsonl`: epoch-level metrics, class-wise recall/F1,
+  confusion summaries such as `wheeze->normal`, threshold optimization state,
+  and the diagnostics path.
+- `logs/loss_components_epoch.jsonl`: raw loss measurements and weighted loss
+  contributions for train and validation.
+- `logs/adaptive_state_epoch.jsonl`: current label-wise branch margins,
+  regret thresholds, train violation rates, train eligible rates, and EMA state.
+
+Inactive components, for example gate entropy outside its configured epoch
+window, are hidden from `run.log` to keep the block readable. JSONL payloads,
+checkpoint histories, and validation diagnostics keep the numeric state needed
+for later analysis.
+
 ## Model Architecture
 
 `model.encoder.type` must be `multiscale_rdt_ast`.
@@ -148,6 +168,10 @@ Defines run identity and execution target.
 - `seed`: random seed.
 - `device`: `cpu`, `mps`, or CUDA device string.
 - `output_dir`: checkpoint and log root.
+- `logging.terminal_width`: Rich terminal output width. Use `null` for dynamic
+  terminal detection, or a positive integer such as `120` for fixed-width
+  terminal rendering. This does not affect `run.log`, JSONL logs, diagnostics,
+  checkpoints, or model behavior.
 
 ### `data`
 

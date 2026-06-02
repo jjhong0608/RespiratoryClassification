@@ -3,15 +3,33 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich.console import Console
 from rich.logging import RichHandler
 
 logger = logging.getLogger(__name__)
-handler = RichHandler(
-    rich_tracebacks=True,
-    show_path=True,
-    omit_repeated_times=False,
-)
 formatter = logging.Formatter("%(funcName)s - %(message)s")
+
+
+def _build_rich_handler(terminal_width: int | None = None) -> RichHandler:
+    if terminal_width is not None:
+        rich_handler = RichHandler(
+            rich_tracebacks=True,
+            show_path=True,
+            omit_repeated_times=False,
+            console=Console(width=int(terminal_width)),
+        )
+    else:
+        rich_handler = RichHandler(
+            rich_tracebacks=True,
+            show_path=True,
+            omit_repeated_times=False,
+        )
+    rich_handler.setFormatter(formatter)
+    rich_handler.setLevel(logging.DEBUG)
+    return rich_handler
+
+
+handler = _build_rich_handler()
 handler.setFormatter(formatter)
 handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
@@ -26,6 +44,18 @@ _file_handler: logging.Handler | None = None
 class LoggerConfig:
     name: str = __name__
     level: int = logging.DEBUG
+
+
+def configure_rich_logging(terminal_width: int | None = None) -> None:
+    global handler
+
+    with suppress(Exception):
+        logger.removeHandler(handler)
+    with suppress(Exception):
+        handler.close()
+
+    handler = _build_rich_handler(terminal_width)
+    logger.addHandler(handler)
 
 
 def enable_file_logging(log_path: str | Path, *, mode: str = "a") -> Path:

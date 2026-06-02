@@ -22,6 +22,11 @@ from src.evaluation.thresholds import (
     compute_threshold_optimized_metrics,
 )
 from src.models.model import AstModelOutput, ClassGateEvidenceAuxiliaryConfig
+from src.training.epoch_logging import (
+    EpochLogContext,
+    append_epoch_jsonl_logs,
+    format_epoch_log_block,
+)
 from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
 from src.utils.config import (
@@ -2479,176 +2484,32 @@ class Trainer(LoggingMixin):
             val_loss_component_history.append(val_components)
 
             lrs = [float(group["lr"]) for group in optimizer.param_groups]
-            lr_str = (
-                f"{lrs[0]:.8f}"
-                if len(lrs) == 1
-                else "[" + ", ".join(f"{lr:.8f}" for lr in lrs) + "]"
-            )
             adaptive_state = self._branch_objective_state_dict()
-            if (
-                self.cfg.top_branch_margin.enabled
-                or self.cfg.gate_branch_regret.enabled
-            ):
-                self.logger.info(
-                    "Adaptive branch objectives | Top Branch Margin: %s | "
-                    "Gate-Branch Regret Threshold: %s | "
-                    "Gate-Branch Regret Multiplier: %.4f | "
-                    "Gate-Branch Regret Effective Weight: %.4f | "
-                    "Train Top Branch Violation Rate: %s | "
-                    "Train Gate-Branch Regret Eligible Rate: %s",
-                    self._format_label_values(
-                        adaptive_state["top_branch_margin_by_label"]
-                    ),
-                    self._format_label_values(
-                        adaptive_state["gate_branch_regret_positive_threshold_by_label"]
-                    ),
-                    train_components.get("gate_branch_regret_weight_multiplier", 0.0),
-                    train_components.get("gate_branch_regret_effective_weight", 0.0),
-                    self._format_label_values(
-                        train_components.get(
-                            "top_branch_violation_rate_by_label",
-                            {},
-                        )
-                    ),
-                    self._format_label_values(
-                        train_components.get(
-                            "gate_branch_regret_eligible_rate_by_label",
-                            {},
-                        )
-                    ),
+            diagnostics_path = None
+            if val_result.diagnostics:
+                diagnostics_path = write_diagnostics_jsonl(
+                    val_result.diagnostics,
+                    self.cfg.run_dir / "diagnostics" / f"val_epoch_{epoch:03d}.jsonl",
                 )
-            if val_result.probabilities.ndim == 1:
-                self.logger.info(
-                    "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
-                    "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
-                    "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
-                    "Val Precision: %.4f | Val F1@0.5: %.4f | Val Balanced Acc@0.5: %.4f | "
-                    "Val F1@opt: %.4f | Val Balanced Acc@opt: %.4f | Val Opt Threshold: %.4f | "
-                    "Train Main Loss: %.4f | Val Main Loss: %.4f | "
-                    "Train Branch Binary Loss: %.4f | Val Branch Binary Loss: %.4f | "
-                    "Branch Binary Weight: %.4f | Train Gate Entropy: %.4f | "
-                    "Val Gate Entropy: %.4f | Train Evidence Aux Loss: %.4f | "
-                    "Val Evidence Aux Loss: %.4f | Train Class Gate Diversity: %.4f | "
-                    "Val Class Gate Diversity: %.4f | "
-                    "Train Class Evidence Margin: %.4f | "
-                    "Val Class Evidence Margin: %.4f | "
-                    "Train Class-Gated Branch Logit Margin: %.4f | "
-                    "Val Class-Gated Branch Logit Margin: %.4f | "
-                    "Train Gate-Weighted Branch Margin: %.4f | "
-                    "Val Gate-Weighted Branch Margin: %.4f | "
-                    "Train Gate-Branch Regret: %.4f | "
-                    "Val Gate-Branch Regret: %.4f | "
-                    "Train Gate-Branch Regret Eligible: %.4f | "
-                    "Val Gate-Branch Regret Eligible: %.4f | "
-                    "Train Top Branch Margin: %.4f | "
-                    "Val Top Branch Margin: %.4f | "
-                    "Val Scheduled Loss: %.4f",
-                    epoch,
-                    self.cfg.epochs,
-                    lr_str,
-                    train_result.loss,
-                    train_result.metrics.accuracy,
-                    train_result.metrics.recall,
-                    train_result.metrics.precision,
-                    train_result.metrics.f1_score,
-                    val_result.loss,
-                    val_result.metrics.accuracy,
-                    val_result.metrics.recall,
-                    val_result.metrics.precision,
-                    val_result.metrics.f1_score,
-                    val_result.metrics.balanced_accuracy,
-                    val_metrics_optimized.f1_score,
-                    val_metrics_optimized.balanced_accuracy,
-                    val_threshold_optimization.selected_threshold,
-                    train_components.get("main", train_result.loss),
-                    val_components.get("main", val_result.loss),
-                    train_components.get("branch_binary_auxiliary", 0.0),
-                    val_components.get("branch_binary_auxiliary", 0.0),
-                    train_components.get("branch_binary_aux_weight", 0.0),
-                    train_components.get("gate_entropy", 0.0),
-                    val_components.get("gate_entropy", 0.0),
-                    train_components.get("evidence_auxiliary_loss", 0.0),
-                    val_components.get("evidence_auxiliary_loss", 0.0),
-                    train_components.get("class_gate_diversity", 0.0),
-                    val_components.get("class_gate_diversity", 0.0),
-                    train_components.get("class_evidence_margin", 0.0),
-                    val_components.get("class_evidence_margin", 0.0),
-                    train_components.get("class_gated_branch_logit_margin", 0.0),
-                    val_components.get("class_gated_branch_logit_margin", 0.0),
-                    train_components.get("gate_weighted_branch_margin", 0.0),
-                    val_components.get("gate_weighted_branch_margin", 0.0),
-                    train_components.get("gate_branch_regret", 0.0),
-                    val_components.get("gate_branch_regret", 0.0),
-                    train_components.get("gate_branch_regret_eligible_fraction", 0.0),
-                    val_components.get("gate_branch_regret_eligible_fraction", 0.0),
-                    train_components.get("top_branch_margin", 0.0),
-                    val_components.get("top_branch_margin", 0.0),
-                    val_components.get("total_scheduled", val_result.loss),
-                )
-            else:
-                self.logger.info(
-                    "Epoch %d/%d | LR: %s | Train Loss: %.4f | Train Acc: %.4f | "
-                    "Train Recall: %.4f | Train Precision: %.4f | Train F1: %.4f | "
-                    "Val Loss: %.4f | Val Acc: %.4f | Val Recall: %.4f | "
-                    "Val Precision: %.4f | Val F1: %.4f | Val Balanced Acc: %.4f | "
-                    "Train Main Loss: %.4f | Val Main Loss: %.4f | "
-                    "Train Branch Binary Loss: %.4f | Val Branch Binary Loss: %.4f | "
-                    "Branch Binary Weight: %.4f | Train Gate Entropy: %.4f | "
-                    "Val Gate Entropy: %.4f | Train Evidence Aux Loss: %.4f | "
-                    "Val Evidence Aux Loss: %.4f | Train Class Gate Diversity: %.4f | "
-                    "Val Class Gate Diversity: %.4f | "
-                    "Train Class Evidence Margin: %.4f | "
-                    "Val Class Evidence Margin: %.4f | "
-                    "Train Class-Gated Branch Logit Margin: %.4f | "
-                    "Val Class-Gated Branch Logit Margin: %.4f | "
-                    "Train Gate-Weighted Branch Margin: %.4f | "
-                    "Val Gate-Weighted Branch Margin: %.4f | "
-                    "Train Gate-Branch Regret: %.4f | "
-                    "Val Gate-Branch Regret: %.4f | "
-                    "Train Gate-Branch Regret Eligible: %.4f | "
-                    "Val Gate-Branch Regret Eligible: %.4f | "
-                    "Train Top Branch Margin: %.4f | "
-                    "Val Top Branch Margin: %.4f | "
-                    "Val Scheduled Loss: %.4f",
-                    epoch,
-                    self.cfg.epochs,
-                    lr_str,
-                    train_result.loss,
-                    train_result.metrics.accuracy,
-                    train_result.metrics.recall,
-                    train_result.metrics.precision,
-                    train_result.metrics.f1_score,
-                    val_result.loss,
-                    val_result.metrics.accuracy,
-                    val_result.metrics.recall,
-                    val_result.metrics.precision,
-                    val_result.metrics.f1_score,
-                    val_result.metrics.balanced_accuracy,
-                    train_components.get("main", train_result.loss),
-                    val_components.get("main", val_result.loss),
-                    train_components.get("branch_binary_auxiliary", 0.0),
-                    val_components.get("branch_binary_auxiliary", 0.0),
-                    train_components.get("branch_binary_aux_weight", 0.0),
-                    train_components.get("gate_entropy", 0.0),
-                    val_components.get("gate_entropy", 0.0),
-                    train_components.get("evidence_auxiliary_loss", 0.0),
-                    val_components.get("evidence_auxiliary_loss", 0.0),
-                    train_components.get("class_gate_diversity", 0.0),
-                    val_components.get("class_gate_diversity", 0.0),
-                    train_components.get("class_evidence_margin", 0.0),
-                    val_components.get("class_evidence_margin", 0.0),
-                    train_components.get("class_gated_branch_logit_margin", 0.0),
-                    val_components.get("class_gated_branch_logit_margin", 0.0),
-                    train_components.get("gate_weighted_branch_margin", 0.0),
-                    val_components.get("gate_weighted_branch_margin", 0.0),
-                    train_components.get("gate_branch_regret", 0.0),
-                    val_components.get("gate_branch_regret", 0.0),
-                    train_components.get("gate_branch_regret_eligible_fraction", 0.0),
-                    val_components.get("gate_branch_regret_eligible_fraction", 0.0),
-                    train_components.get("top_branch_margin", 0.0),
-                    val_components.get("top_branch_margin", 0.0),
-                    val_components.get("total_scheduled", val_result.loss),
-                )
+            epoch_log_context = EpochLogContext(
+                epoch=epoch,
+                total_epochs=self.cfg.epochs,
+                learning_rates=lrs,
+                class_names=self._class_names(),
+                train_loss=train_result.loss,
+                val_loss=val_result.loss,
+                train_metrics=train_result.metrics,
+                val_metrics=val_result.metrics,
+                val_metrics_optimized=val_metrics_optimized,
+                val_threshold_optimization=val_threshold_optimization,
+                train_components=train_components,
+                val_components=val_components,
+                adaptive_state=adaptive_state,
+                diagnostics_path=diagnostics_path,
+            )
+            for log_line in format_epoch_log_block(epoch_log_context):
+                self.logger.info("%s", log_line)
+            append_epoch_jsonl_logs(self.cfg.run_dir, epoch_log_context)
 
             current_monitor_value = val_components.get(
                 "val_loss_total_monitor",
@@ -2671,14 +2532,6 @@ class Trainer(LoggingMixin):
                             "Early stopping triggered on val_loss after "
                             f"{epochs_without_improvement} epochs without improvement"
                         )
-
-            diagnostics_path = None
-            if val_result.diagnostics:
-                diagnostics_path = write_diagnostics_jsonl(
-                    val_result.diagnostics,
-                    self.cfg.run_dir / "diagnostics" / f"val_epoch_{epoch:03d}.jsonl",
-                )
-                self.logger.info("Saved validation diagnostics: %s", diagnostics_path)
 
             model_cfg = getattr(model, "cfg", None)
             dims = None

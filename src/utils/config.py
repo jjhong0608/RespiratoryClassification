@@ -31,6 +31,11 @@ from src.models.model import (
 
 
 @dataclass(frozen=True)
+class ExperimentLoggingConfig:
+    terminal_width: int | None = None
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     name: str
     task: str
@@ -38,6 +43,7 @@ class ExperimentConfig:
     seed: int
     device: str
     output_dir: str
+    logging: ExperimentLoggingConfig = field(default_factory=ExperimentLoggingConfig)
 
 
 @dataclass(frozen=True)
@@ -939,6 +945,17 @@ class JsonConfigLoader:
             raise ValueError("experiment.name must not be empty")
         if not cfg.task:
             raise ValueError("experiment.task must not be empty")
+        terminal_width = cfg.logging.terminal_width
+        if terminal_width is None:
+            return
+        if isinstance(terminal_width, bool) or not isinstance(terminal_width, int):
+            raise TypeError(
+                "experiment.logging.terminal_width must be an integer or null"
+            )
+        if terminal_width <= 0:
+            raise ValueError(
+                "experiment.logging.terminal_width must be greater than zero"
+            )
 
     @staticmethod
     def _validate_bandpass(cfg: BandPassConfig, sample_rate: int) -> None:
@@ -2322,7 +2339,14 @@ class JsonConfigLoader:
 
     @staticmethod
     def _parse_experiment(raw: Mapping[str, Any]) -> ExperimentConfig:
-        cfg = ExperimentConfig(**dict(raw))
+        kwargs = dict(raw)
+        logging_raw = kwargs.get("logging", {})
+        if logging_raw is None:
+            logging_raw = {}
+        if not isinstance(logging_raw, Mapping):
+            raise TypeError("experiment.logging must be an object")
+        kwargs["logging"] = ExperimentLoggingConfig(**dict(logging_raw))
+        cfg = ExperimentConfig(**kwargs)
         JsonConfigLoader._validate_experiment(cfg)
         return cfg
 

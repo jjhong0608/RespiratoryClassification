@@ -12,11 +12,18 @@ import torch
 from src.cli.cv import main as cv_main
 from src.cli.evaluate import evaluate_checkpoint
 from src.data.loaders import ClipBatch, build_clip_loader, build_dataset
+from src.evaluation.metrics import EvalMetrics
+from src.evaluation.thresholds import ThresholdOptimizationResult
 from src.models.model import AstModelOutput, ClassGateEvidenceAuxiliaryConfig
 from src.training.ast_setup import (
     apply_encoder_adaptation,
     build_ast_model,
     build_grouped_optimizer,
+)
+from src.training.epoch_logging import (
+    EpochLogContext,
+    append_epoch_jsonl_logs,
+    format_epoch_log_block,
 )
 from src.training.trainer import (
     CheckpointManager,
@@ -2972,6 +2979,176 @@ def test_epoch_loss_components_include_class_gate_terms() -> None:
     assert "gate_branch_regret_eligible_fraction" in result.loss_components
     assert "top_branch_margin" in result.loss_components
     assert "top_branch_margin_loss" in result.loss_components
+
+
+def _sample_epoch_log_context(
+    *,
+    diagnostics_path: Path | None = None,
+) -> EpochLogContext:
+    class_names = ("normal", "crackle", "wheeze")
+    train_metrics = EvalMetrics(
+        accuracy=0.65,
+        precision=0.61,
+        recall=0.62,
+        specificity=0.70,
+        balanced_accuracy=0.66,
+        f1_score=0.60,
+        roc_auc=None,
+        pr_auc=None,
+        brier_score=None,
+        confusion_matrix=[[7, 1, 3], [2, 5, 1], [4, 1, 3]],
+        macro_f1=0.60,
+        macro_recall=0.62,
+        weighted_f1=0.63,
+        per_class_precision=[0.54, 0.71, 0.43],
+        per_class_recall=[0.70, 0.50, 0.30],
+        per_class_f1=[0.61, 0.59, 0.35],
+    )
+    val_metrics = EvalMetrics(
+        accuracy=0.55,
+        precision=0.52,
+        recall=0.50,
+        specificity=0.64,
+        balanced_accuracy=0.57,
+        f1_score=0.49,
+        roc_auc=None,
+        pr_auc=None,
+        brier_score=None,
+        confusion_matrix=[[6, 0, 3], [1, 4, 2], [4, 0, 2]],
+        macro_f1=0.49,
+        macro_recall=0.50,
+        weighted_f1=0.52,
+        per_class_precision=[0.55, 1.00, 0.29],
+        per_class_recall=[0.67, 0.57, 0.33],
+        per_class_f1=[0.60, 0.73, 0.31],
+    )
+    train_components = {
+        "main": 1.1,
+        "total_scheduled": 1.62,
+        "evidence_auxiliary_loss": 0.12,
+        "class_evidence_margin": 0.40,
+        "class_evidence_margin_loss": 0.08,
+        "class_gated_branch_logit_margin": 0.31,
+        "class_gated_branch_logit_margin_loss": 0.0465,
+        "gate_weighted_branch_margin": 0.25,
+        "gate_weighted_branch_margin_loss": 0.025,
+        "top_branch_margin": 0.50,
+        "top_branch_margin_loss": 0.10,
+        "gate_branch_regret": 0.22,
+        "gate_branch_regret_loss": 0.0011,
+        "gate_branch_regret_eligible_fraction": 0.43,
+        "gate_branch_regret_weight_multiplier": 0.5,
+        "gate_branch_regret_effective_weight": 0.005,
+        "top_branch_violation_rate_by_label": {
+            "normal": 0.20,
+            "crackle": 0.50,
+            "wheeze": 0.75,
+        },
+        "gate_branch_regret_eligible_rate_by_label": {
+            "normal": 0.70,
+            "crackle": 0.62,
+            "wheeze": 0.48,
+        },
+    }
+    val_components = {
+        "main": 1.3,
+        "total_scheduled": 1.76,
+        "total_monitor": 1.70,
+        "evidence_auxiliary_loss": 0.20,
+        "class_evidence_margin": 0.45,
+        "class_evidence_margin_loss": 0.09,
+        "class_gated_branch_logit_margin": 0.38,
+        "class_gated_branch_logit_margin_loss": 0.057,
+        "gate_weighted_branch_margin": 0.35,
+        "gate_weighted_branch_margin_loss": 0.035,
+        "top_branch_margin": 0.60,
+        "top_branch_margin_loss": 0.12,
+        "gate_branch_regret": 0.30,
+        "gate_branch_regret_loss": 0.0015,
+        "gate_branch_regret_eligible_fraction": 0.50,
+        "gate_branch_regret_weight_multiplier": 0.5,
+        "gate_branch_regret_effective_weight": 0.005,
+    }
+    adaptive_state = {
+        "top_branch_margin_by_label": {
+            "normal": 0.30,
+            "crackle": 0.36,
+            "wheeze": 0.52,
+        },
+        "gate_branch_regret_positive_threshold_by_label": {
+            "normal": 0.30,
+            "crackle": 0.25,
+            "wheeze": 0.10,
+        },
+    }
+    return EpochLogContext(
+        epoch=16,
+        total_epochs=120,
+        learning_rates=[0.001, 0.0001],
+        class_names=class_names,
+        train_loss=1.62,
+        val_loss=1.76,
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        val_metrics_optimized=val_metrics,
+        val_threshold_optimization=ThresholdOptimizationResult.disabled(
+            "f1",
+            reason="threshold optimization is only supported for one-logit outputs",
+        ),
+        train_components=train_components,
+        val_components=val_components,
+        adaptive_state=adaptive_state,
+        diagnostics_path=diagnostics_path,
+    )
+
+
+def test_epoch_log_formatter_builds_readable_multiclass_block() -> None:
+    context = _sample_epoch_log_context(
+        diagnostics_path=Path("diagnostics/val_epoch_016.jsonl")
+    )
+
+    block = "\n".join(format_epoch_log_block(context))
+
+    assert "Epoch 016/120" in block
+    assert "phase=2" in block
+    assert "threshold=disabled" in block
+    assert "recall normal=0.6700/crackle=0.5700/wheeze=0.3300" in block
+    assert "wheeze->normal=4" in block
+    assert "normal->wheeze=3" in block
+    assert "class_margin raw=0.4000 loss=0.0800" in block
+    assert "branch_logit_margin raw=0.3100 loss=0.0465" in block
+    assert "top_branch raw=0.5000 loss=0.1000" in block
+    assert "regret raw=0.2200/0.3000" in block
+    assert "eff_w=0.0050" in block
+    assert "multiplier=0.5000" in block
+    assert "top_margin={normal=0.3000, crackle=0.3600, wheeze=0.5200}" in block
+    assert "diagnostics=diagnostics/val_epoch_016.jsonl" in block
+    assert "entropy=" not in block
+    assert "diversity=" not in block
+
+
+def test_epoch_jsonl_logs_append_metric_loss_and_adaptive_payloads(
+    tmp_path: Path,
+) -> None:
+    context = _sample_epoch_log_context(
+        diagnostics_path=tmp_path / "diagnostics" / "val_epoch_016.jsonl"
+    )
+
+    paths = append_epoch_jsonl_logs(tmp_path, context)
+
+    assert set(paths) == {"metrics", "loss_components", "adaptive_state"}
+    metrics_payload = json.loads(paths["metrics"].read_text().splitlines()[0])
+    loss_payload = json.loads(paths["loss_components"].read_text().splitlines()[0])
+    adaptive_payload = json.loads(paths["adaptive_state"].read_text().splitlines()[0])
+    assert metrics_payload["epoch"] == 16
+    assert metrics_payload["val"]["confusion_summary"]["wheeze->normal"] == 4
+    assert loss_payload["train"]["class_evidence_margin_loss"] == pytest.approx(0.08)
+    assert adaptive_payload["adaptive_state"]["top_branch_margin_by_label"][
+        "wheeze"
+    ] == pytest.approx(0.52)
+    assert adaptive_payload["train_top_branch_violation_rate_by_label"][
+        "wheeze"
+    ] == pytest.approx(0.75)
 
 
 def test_configured_checkpoint_monitors_keep_top_three(tmp_path: Path) -> None:

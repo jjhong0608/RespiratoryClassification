@@ -5,7 +5,10 @@
     "mode": "clip",
     "seed": 1337,
     "device": "mps",
-    "output_dir": "checkpoints"
+    "output_dir": "checkpoints",
+    "logging": {
+      "terminal_width": null
+    }
   },
   "data": {
     "train_dirs": [],

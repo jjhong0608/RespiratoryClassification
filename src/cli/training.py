@@ -22,7 +22,7 @@ from src.training.initialization import initialize_from_checkpoint
 from src.training.trainer import Trainer, TrainerConfig
 from src.utils.config import JsonConfigLoader, resolve_label_float_overrides
 from src.utils.fs import Fs
-from src.utils.logging import enable_file_logging, logger
+from src.utils.logging import configure_rich_logging, enable_file_logging, logger
 from src.utils.reproducibility import Reproducibility
 
 
@@ -32,6 +32,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = JsonConfigLoader.load_training(args.config)
+    configure_rich_logging(cfg.experiment.logging.terminal_width)
     generators = Reproducibility.seed_everything(cfg.experiment.seed)
 
     run_dir = Fs.ensure_dir(Path(cfg.experiment.output_dir) / cfg.experiment.name)

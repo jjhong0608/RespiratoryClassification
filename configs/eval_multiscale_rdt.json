@@ -5,7 +5,10 @@
     "mode": "clip",
     "seed": 42,
     "device": "mps",
-    "output_dir": "checkpoints"
+    "output_dir": "checkpoints",
+    "logging": {
+      "terminal_width": null
+    }
   },
   "checkpoint_path": "checkpoints/respiratory_multiscale_rdt_ast_binary/last.pt",
   "data": {
