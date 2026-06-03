@@ -241,7 +241,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver14"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver15"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.train.loss.type == "cross_entropy"
@@ -1130,6 +1130,47 @@ def test_valid_branch_to_evidence_consistency_config_loads(tmp_path: Path) -> No
     assert consistency_cfg.warmup_epochs == 10
 
 
+def test_valid_top_branch_to_evidence_consistency_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_evidence_logits",
+        "source": "top_branch_margin",
+        "mode": "true_vs_hardest_negative",
+        "teacher_detach": True,
+        "teacher_gap_cap": 1.0,
+        "teacher_floor_by_label": {
+            "normal": 0.0,
+            "crackle": 0.2,
+            "wheeze": 0.5,
+        },
+        "class_weighted": True,
+        "reduction": "class_balanced_violating_mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "top_branch_to_evidence.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    consistency_cfg = cfg.train.loss.branch_to_evidence_ranking_consistency
+    assert consistency_cfg.source == "top_branch_margin"
+    assert consistency_cfg.teacher_gap_cap == pytest.approx(1.0)
+    assert dict(consistency_cfg.teacher_floor_by_label) == {
+        "normal": 0.0,
+        "crackle": 0.2,
+        "wheeze": 0.5,
+    }
+
+
 def test_valid_global_residual_anti_veto_config_loads(tmp_path: Path) -> None:
     payload = _class_aware_cross_entropy_payload()
     payload["train"]["loss"]["class_weighting"] = {
@@ -1161,6 +1202,40 @@ def test_valid_global_residual_anti_veto_config_loads(tmp_path: Path) -> None:
     assert anti_veto_cfg.class_weighted is True
     assert anti_veto_cfg.reduction == "class_balanced_violating_mean"
     assert anti_veto_cfg.warmup_epochs == 10
+
+
+def test_valid_final_gap_anti_veto_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["train"]["loss"]["global_residual_anti_veto"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "final_logits",
+        "reference": "class_evidence_logits",
+        "support_source": "top_branch_margin",
+        "mode": "final_gap_preservation",
+        "margin_mode": "true_vs_hardest_negative",
+        "support_threshold": 0.3,
+        "allowed_gap_drop": 0.3,
+        "class_weighted": True,
+        "reduction": "class_balanced_violating_mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "final_gap_anti_veto.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    anti_veto_cfg = cfg.train.loss.global_residual_anti_veto
+    assert anti_veto_cfg.target == "final_logits"
+    assert anti_veto_cfg.support_source == "top_branch_margin"
+    assert anti_veto_cfg.mode == "final_gap_preservation"
+    assert anti_veto_cfg.support_threshold == pytest.approx(0.3)
+    assert anti_veto_cfg.allowed_gap_drop == pytest.approx(0.3)
 
 
 def test_valid_gate_weighted_branch_margin_config_loads(tmp_path: Path) -> None:
@@ -2207,6 +2282,44 @@ def test_class_weighted_margins_require_class_weighting(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="class_evidence_margin.class_weighted"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_branch_to_evidence_teacher_floor_config_is_rejected(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_evidence_logits",
+        "source": "top_branch_margin",
+        "mode": "true_vs_hardest_negative",
+        "teacher_gap_cap": 0.4,
+        "teacher_floor_by_label": {"wheeze": 0.5},
+    }
+    config_path = _write_json(tmp_path / "bad_teacher_floor.json", payload)
+
+    with pytest.raises(ValueError, match="teacher_floor_by_label.wheeze"):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_invalid_final_gap_anti_veto_config_is_rejected(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["global_residual_anti_veto"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "global_residual_logits",
+        "reference": "class_evidence_logits",
+        "support_source": "top_branch_margin",
+        "mode": "final_gap_preservation",
+        "margin_mode": "true_vs_hardest_negative",
+        "support_threshold": 0.3,
+        "allowed_gap_drop": 0.3,
+    }
+    config_path = _write_json(tmp_path / "bad_final_gap_anti_veto.json", payload)
+
+    with pytest.raises(ValueError, match="target.*final_logits"):
         JsonConfigLoader.load_training(config_path)
 
 

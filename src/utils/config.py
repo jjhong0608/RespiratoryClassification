@@ -263,9 +263,14 @@ class BranchToEvidenceRankingConsistencyConfig:
     enabled: bool = False
     weight: float = 0.0
     target: Literal["class_evidence_logits"] = "class_evidence_logits"
-    source: Literal["class_gated_branch_logits"] = "class_gated_branch_logits"
+    source: Literal[
+        "class_gated_branch_logits",
+        "top_branch_margin",
+    ] = "class_gated_branch_logits"
     mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
     teacher_detach: bool = True
+    teacher_gap_cap: float | None = None
+    teacher_floor_by_label: Mapping[str, float] = field(default_factory=dict)
     tolerance: float = 0.0
     class_weighted: bool = False
     reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
@@ -276,11 +281,18 @@ class BranchToEvidenceRankingConsistencyConfig:
 class GlobalResidualAntiVetoConfig:
     enabled: bool = False
     weight: float = 0.0
-    target: Literal["global_residual_logits"] = "global_residual_logits"
+    target: Literal["global_residual_logits", "final_logits"] = "global_residual_logits"
     reference: Literal["class_evidence_logits"] = "class_evidence_logits"
-    mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    support_source: Literal["none", "top_branch_margin"] = "none"
+    mode: Literal[
+        "true_vs_hardest_negative",
+        "final_gap_preservation",
+    ] = "true_vs_hardest_negative"
+    margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
     evidence_confidence_threshold: float = 0.0
     min_residual_gap: float = -0.5
+    support_threshold: float = 0.0
+    allowed_gap_drop: float = 0.0
     class_weighted: bool = False
     reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
     warmup_epochs: int = 0
@@ -678,11 +690,22 @@ class JsonConfigLoader:
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_TARGETS = {"class_gated_branch_logits"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_MODES = {"true_vs_hardest_negative"}
     _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_TARGETS = {"class_evidence_logits"}
-    _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_SOURCES = {"class_gated_branch_logits"}
+    _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_SOURCES = {
+        "class_gated_branch_logits",
+        "top_branch_margin",
+    }
     _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_MODES = {"true_vs_hardest_negative"}
-    _GLOBAL_RESIDUAL_ANTI_VETO_TARGETS = {"global_residual_logits"}
+    _GLOBAL_RESIDUAL_ANTI_VETO_TARGETS = {
+        "global_residual_logits",
+        "final_logits",
+    }
     _GLOBAL_RESIDUAL_ANTI_VETO_REFERENCES = {"class_evidence_logits"}
-    _GLOBAL_RESIDUAL_ANTI_VETO_MODES = {"true_vs_hardest_negative"}
+    _GLOBAL_RESIDUAL_ANTI_VETO_SUPPORT_SOURCES = {"none", "top_branch_margin"}
+    _GLOBAL_RESIDUAL_ANTI_VETO_MODES = {
+        "true_vs_hardest_negative",
+        "final_gap_preservation",
+    }
+    _GLOBAL_RESIDUAL_ANTI_VETO_MARGIN_MODES = {"true_vs_hardest_negative"}
     _GATE_WEIGHTED_BRANCH_MARGIN_TARGETS = {"true_class_gate"}
     _GATE_WEIGHTED_BRANCH_MARGIN_SOURCES = {"branch_logits"}
     _GATE_WEIGHTED_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
@@ -1962,7 +1985,8 @@ class JsonConfigLoader:
         ):
             raise ValueError(
                 "train.loss.branch_to_evidence_ranking_consistency.source must be "
-                "'class_gated_branch_logits'"
+                "one of "
+                f"{sorted(JsonConfigLoader._BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_SOURCES)}"
             )
         if (
             b2e_cfg.mode
@@ -2000,6 +2024,38 @@ class JsonConfigLoader:
                 "train.loss.branch_to_evidence_ranking_consistency.tolerance "
                 "must be greater than or equal to zero"
             )
+        if b2e_cfg.teacher_gap_cap is not None:
+            if not isinstance(
+                b2e_cfg.teacher_gap_cap,
+                int | float,
+            ) or isinstance(b2e_cfg.teacher_gap_cap, bool):
+                raise TypeError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "teacher_gap_cap must be numeric or null"
+                )
+            if b2e_cfg.teacher_gap_cap <= 0:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "teacher_gap_cap must be greater than zero"
+                )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            b2e_cfg.teacher_floor_by_label,
+            field_name=(
+                "train.loss.branch_to_evidence_ranking_consistency."
+                "teacher_floor_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        if b2e_cfg.teacher_gap_cap is not None:
+            for label_name, floor_value in b2e_cfg.teacher_floor_by_label.items():
+                if floor_value > b2e_cfg.teacher_gap_cap:
+                    raise ValueError(
+                        "train.loss.branch_to_evidence_ranking_consistency."
+                        f"teacher_floor_by_label.{label_name} must be less than "
+                        "or equal to teacher_gap_cap"
+                    )
         if b2e_cfg.enabled:
             if b2e_cfg.weight <= 0:
                 raise ValueError(
@@ -2032,7 +2088,8 @@ class JsonConfigLoader:
         ):
             raise ValueError(
                 "train.loss.global_residual_anti_veto.target must be "
-                "'global_residual_logits'"
+                "one of "
+                f"{sorted(JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_TARGETS)}"
             )
         if (
             anti_veto_cfg.reference
@@ -2045,6 +2102,23 @@ class JsonConfigLoader:
         if anti_veto_cfg.mode not in JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_MODES:
             raise ValueError(
                 "train.loss.global_residual_anti_veto.mode must be "
+                f"one of {sorted(JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_MODES)}"
+            )
+        if (
+            anti_veto_cfg.support_source
+            not in JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_SUPPORT_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.support_source must be "
+                "one of "
+                f"{sorted(JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_SUPPORT_SOURCES)}"
+            )
+        if (
+            anti_veto_cfg.margin_mode
+            not in JsonConfigLoader._GLOBAL_RESIDUAL_ANTI_VETO_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.margin_mode must be "
                 "'true_vs_hardest_negative'"
             )
         if anti_veto_cfg.reduction not in JsonConfigLoader._MARGIN_REDUCTIONS:
@@ -2067,10 +2141,39 @@ class JsonConfigLoader:
                 "evidence_confidence_threshold",
             ),
             (anti_veto_cfg.min_residual_gap, "min_residual_gap"),
+            (anti_veto_cfg.support_threshold, "support_threshold"),
+            (anti_veto_cfg.allowed_gap_drop, "allowed_gap_drop"),
         ):
             if not isinstance(value, int | float) or isinstance(value, bool):
                 raise TypeError(
                     f"train.loss.global_residual_anti_veto.{field_name} must be numeric"
+                )
+        if anti_veto_cfg.allowed_gap_drop < 0:
+            raise ValueError(
+                "train.loss.global_residual_anti_veto.allowed_gap_drop must be "
+                "greater than or equal to zero"
+            )
+        if anti_veto_cfg.mode == "true_vs_hardest_negative":
+            if anti_veto_cfg.target != "global_residual_logits":
+                raise ValueError(
+                    "train.loss.global_residual_anti_veto.target must be "
+                    "'global_residual_logits' when mode='true_vs_hardest_negative'"
+                )
+            if anti_veto_cfg.support_source != "none":
+                raise ValueError(
+                    "train.loss.global_residual_anti_veto.support_source must be "
+                    "'none' when mode='true_vs_hardest_negative'"
+                )
+        if anti_veto_cfg.mode == "final_gap_preservation":
+            if anti_veto_cfg.target != "final_logits":
+                raise ValueError(
+                    "train.loss.global_residual_anti_veto.target must be "
+                    "'final_logits' when mode='final_gap_preservation'"
+                )
+            if anti_veto_cfg.support_source != "top_branch_margin":
+                raise ValueError(
+                    "train.loss.global_residual_anti_veto.support_source must be "
+                    "'top_branch_margin' when mode='final_gap_preservation'"
                 )
         if anti_veto_cfg.enabled:
             if anti_veto_cfg.weight <= 0:
@@ -3081,10 +3184,14 @@ class JsonConfigLoader:
         loss["class_gated_branch_logit_margin"] = ClassGatedBranchLogitMarginConfig(
             **dict(loss.get("class_gated_branch_logit_margin", {}))
         )
+        branch_to_evidence = dict(
+            loss.get("branch_to_evidence_ranking_consistency", {})
+        )
+        branch_to_evidence["teacher_floor_by_label"] = dict(
+            branch_to_evidence.get("teacher_floor_by_label", {})
+        )
         loss["branch_to_evidence_ranking_consistency"] = (
-            BranchToEvidenceRankingConsistencyConfig(
-                **dict(loss.get("branch_to_evidence_ranking_consistency", {}))
-            )
+            BranchToEvidenceRankingConsistencyConfig(**branch_to_evidence)
         )
         loss["global_residual_anti_veto"] = GlobalResidualAntiVetoConfig(
             **dict(loss.get("global_residual_anti_veto", {}))

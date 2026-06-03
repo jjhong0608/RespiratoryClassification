@@ -280,7 +280,13 @@ def _trainer_cfg(
     ] = "mean",
     branch_to_evidence_enabled: bool = False,
     branch_to_evidence_weight: float = 0.0,
+    branch_to_evidence_source: Literal[
+        "class_gated_branch_logits",
+        "top_branch_margin",
+    ] = "class_gated_branch_logits",
     branch_to_evidence_teacher_detach: bool = True,
+    branch_to_evidence_teacher_gap_cap: float | None = None,
+    branch_to_evidence_teacher_floor_by_class: tuple[float, ...] | None = None,
     branch_to_evidence_tolerance: float = 0.0,
     branch_to_evidence_class_weighted: bool = False,
     branch_to_evidence_reduction: Literal[
@@ -290,8 +296,25 @@ def _trainer_cfg(
     branch_to_evidence_warmup_epochs: int = 0,
     global_residual_anti_veto_enabled: bool = False,
     global_residual_anti_veto_weight: float = 0.0,
+    global_residual_anti_veto_target: Literal[
+        "global_residual_logits",
+        "final_logits",
+    ] = "global_residual_logits",
+    global_residual_anti_veto_support_source: Literal[
+        "none",
+        "top_branch_margin",
+    ] = "none",
+    global_residual_anti_veto_mode: Literal[
+        "true_vs_hardest_negative",
+        "final_gap_preservation",
+    ] = "true_vs_hardest_negative",
+    global_residual_anti_veto_margin_mode: Literal[
+        "true_vs_hardest_negative"
+    ] = "true_vs_hardest_negative",
     global_residual_anti_veto_evidence_confidence_threshold: float = 0.0,
     global_residual_anti_veto_min_residual_gap: float = -0.5,
+    global_residual_anti_veto_support_threshold: float = 0.0,
+    global_residual_anti_veto_allowed_gap_drop: float = 0.0,
     global_residual_anti_veto_class_weighted: bool = False,
     global_residual_anti_veto_reduction: Literal[
         "mean",
@@ -439,25 +462,33 @@ def _trainer_cfg(
                 enabled=branch_to_evidence_enabled,
                 weight=branch_to_evidence_weight,
                 target="class_evidence_logits",
-                source="class_gated_branch_logits",
+                source=branch_to_evidence_source,
                 mode="true_vs_hardest_negative",
                 teacher_detach=branch_to_evidence_teacher_detach,
+                teacher_gap_cap=branch_to_evidence_teacher_gap_cap,
                 tolerance=branch_to_evidence_tolerance,
                 class_weighted=branch_to_evidence_class_weighted,
                 reduction=branch_to_evidence_reduction,
                 warmup_epochs=branch_to_evidence_warmup_epochs,
             )
         ),
+        branch_to_evidence_teacher_floor_by_class=(
+            branch_to_evidence_teacher_floor_by_class
+        ),
         global_residual_anti_veto=GlobalResidualAntiVetoConfig(
             enabled=global_residual_anti_veto_enabled,
             weight=global_residual_anti_veto_weight,
-            target="global_residual_logits",
+            target=global_residual_anti_veto_target,
             reference="class_evidence_logits",
-            mode="true_vs_hardest_negative",
+            support_source=global_residual_anti_veto_support_source,
+            mode=global_residual_anti_veto_mode,
+            margin_mode=global_residual_anti_veto_margin_mode,
             evidence_confidence_threshold=(
                 global_residual_anti_veto_evidence_confidence_threshold
             ),
             min_residual_gap=global_residual_anti_veto_min_residual_gap,
+            support_threshold=global_residual_anti_veto_support_threshold,
+            allowed_gap_drop=global_residual_anti_veto_allowed_gap_drop,
             class_weighted=global_residual_anti_veto_class_weighted,
             reduction=global_residual_anti_veto_reduction,
             warmup_epochs=global_residual_anti_veto_warmup_epochs,
@@ -2113,6 +2144,53 @@ def test_trainer_branch_to_evidence_consistency_warmup_returns_zero() -> None:
     assert torch.isclose(weighted_loss, torch.tensor(0.0))
 
 
+def test_trainer_branch_to_evidence_consistency_uses_top_branch_teacher() -> None:
+    branch_logits = torch.tensor(
+        [[[1.0, 0.2, 0.1], [0.4, 0.3, 0.2]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    evidence_logits = torch.tensor(
+        [[0.2, 0.4, 0.0]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.1,
+            branch_to_evidence_source="top_branch_margin",
+            branch_to_evidence_teacher_detach=True,
+            branch_to_evidence_teacher_gap_cap=0.7,
+            branch_to_evidence_teacher_floor_by_class=(0.5, 0.0, 0.0),
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=branch_logits,
+        class_evidence_logits=evidence_logits,
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    raw_loss, weighted_loss = (
+        trainer._compute_branch_to_evidence_ranking_consistency_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+    weighted_loss.backward()
+
+    assert torch.isclose(raw_loss, torch.tensor(0.9))
+    assert torch.isclose(weighted_loss, torch.tensor(0.09))
+    assert branch_logits.grad is None
+    assert evidence_logits.grad is not None
+
+
 def test_trainer_global_residual_anti_veto_filters_by_evidence_confidence() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -2190,6 +2268,64 @@ def test_trainer_global_residual_anti_veto_warmup_returns_zero() -> None:
     assert torch.isclose(raw_loss, torch.tensor(0.0))
     assert torch.isclose(weighted_loss, torch.tensor(0.0))
     assert torch.isclose(eligible_fraction, torch.tensor(0.0))
+
+
+def test_trainer_global_residual_anti_veto_preserves_final_gap() -> None:
+    final_logits = torch.tensor(
+        [[0.3, 0.1, 0.4], [0.1, 0.2, 0.0]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    evidence_logits = torch.tensor(
+        [[1.0, 0.2, 0.5], [0.4, 0.9, 0.6]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    branch_logits = torch.tensor(
+        [
+            [[1.1, 0.2, 0.3], [0.1, 0.2, 0.0]],
+            [[0.1, 0.2, 0.1], [0.0, 0.1, 0.0]],
+        ],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            global_residual_anti_veto_enabled=True,
+            global_residual_anti_veto_weight=0.05,
+            global_residual_anti_veto_target="final_logits",
+            global_residual_anti_veto_support_source="top_branch_margin",
+            global_residual_anti_veto_mode="final_gap_preservation",
+            global_residual_anti_veto_support_threshold=0.3,
+            global_residual_anti_veto_allowed_gap_drop=0.3,
+        )
+    )
+    output = AstModelOutput(
+        logits=final_logits,
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=branch_logits,
+        class_evidence_logits=evidence_logits,
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_loss, weighted_loss, eligible_fraction = (
+        trainer._compute_global_residual_anti_veto_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+    weighted_loss.backward()
+
+    assert torch.isclose(raw_loss, torch.tensor(0.3))
+    assert torch.isclose(weighted_loss, torch.tensor(0.015))
+    assert torch.isclose(eligible_fraction, torch.tensor(0.5))
+    assert final_logits.grad is not None
+    assert evidence_logits.grad is None
+    assert branch_logits.grad is None
 
 
 def test_trainer_gate_weighted_branch_margin_is_zero_during_warmup() -> None:

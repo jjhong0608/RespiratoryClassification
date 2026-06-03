@@ -101,6 +101,7 @@ class TrainerConfig:
     branch_to_evidence_ranking_consistency: BranchToEvidenceRankingConsistencyConfig = (
         field(default_factory=BranchToEvidenceRankingConsistencyConfig)
     )
+    branch_to_evidence_teacher_floor_by_class: tuple[float, ...] | None = None
     global_residual_anti_veto: GlobalResidualAntiVetoConfig = field(
         default_factory=GlobalResidualAntiVetoConfig
     )
@@ -579,7 +580,7 @@ class Trainer(LoggingMixin):
 
     def _class_values_tensor(
         self,
-        values_by_class: list[float] | None,
+        values_by_class: Sequence[float] | None,
         label_indices: Tensor,
         *,
         device: torch.device,
@@ -596,6 +597,19 @@ class Trainer(LoggingMixin):
         ):
             raise ValueError("labels contain a class index outside adaptive values")
         return values[label_indices.to(device=device, dtype=torch.long)]
+
+    def _branch_to_evidence_teacher_floors(
+        self,
+        label_indices: Tensor,
+        reference: Tensor,
+    ) -> Tensor:
+        return self._class_values_tensor(
+            self.cfg.branch_to_evidence_teacher_floor_by_class,
+            label_indices,
+            device=reference.device,
+            dtype=reference.dtype,
+            fallback=0.0,
+        )
 
     def _top_branch_margin_targets(
         self, label_indices: Tensor, reference: Tensor
@@ -1223,10 +1237,10 @@ class Trainer(LoggingMixin):
                 "branch-to-evidence ranking consistency supports only "
                 "target='class_evidence_logits'"
             )
-        if cfg.source != "class_gated_branch_logits":
+        if cfg.source not in {"class_gated_branch_logits", "top_branch_margin"}:
             raise ValueError(
                 "branch-to-evidence ranking consistency supports only "
-                "source='class_gated_branch_logits'"
+                "source='class_gated_branch_logits' or source='top_branch_margin'"
             )
         if cfg.mode != "true_vs_hardest_negative":
             raise ValueError(
@@ -1241,45 +1255,68 @@ class Trainer(LoggingMixin):
                 "branch-to-evidence ranking consistency enabled but model did "
                 "not return class_evidence_logits"
             )
-        if output.class_gated_branch_logits is None:
-            raise ValueError(
-                "branch-to-evidence ranking consistency enabled but model did "
-                "not return class_gated_branch_logits"
-            )
         evidence_logits = output.class_evidence_logits
-        source_logits = output.class_gated_branch_logits
         label_indices = self._validate_class_margin_inputs(
             evidence_logits,
             labels,
             logits_name="class_evidence_logits",
             loss_name="branch-to-evidence ranking consistency",
         )
-        if tuple(source_logits.shape) != tuple(evidence_logits.shape):
-            raise ValueError(
-                "class_gated_branch_logits must match class_evidence_logits shape "
-                "for branch-to-evidence ranking consistency"
-            )
-        self._validate_class_margin_inputs(
-            source_logits,
-            labels,
-            logits_name="class_gated_branch_logits",
-            loss_name="branch-to-evidence ranking consistency",
-        )
         if label_indices.numel() == 0:
             raw_loss = evidence_logits.sum() * 0.0
             return raw_loss, raw_loss
 
-        branch_gap, _ = self._true_vs_hardest_negative_gap(
-            source_logits,
+        if cfg.source == "class_gated_branch_logits":
+            if output.class_gated_branch_logits is None:
+                raise ValueError(
+                    "branch-to-evidence ranking consistency enabled but model did "
+                    "not return class_gated_branch_logits"
+                )
+            source_logits = output.class_gated_branch_logits
+            if tuple(source_logits.shape) != tuple(evidence_logits.shape):
+                raise ValueError(
+                    "class_gated_branch_logits must match class_evidence_logits "
+                    "shape for branch-to-evidence ranking consistency"
+                )
+            self._validate_class_margin_inputs(
+                source_logits,
+                labels,
+                logits_name="class_gated_branch_logits",
+                loss_name="branch-to-evidence ranking consistency",
+            )
+            teacher_gap, _ = self._true_vs_hardest_negative_gap(
+                source_logits,
+                label_indices,
+            )
+        else:
+            branch_logits, branch_label_indices = self._branch_margin_inputs(
+                output,
+                labels,
+                loss_name="branch-to-evidence ranking consistency",
+            )
+            if not torch.equal(branch_label_indices, label_indices):
+                raise ValueError(
+                    "branch_logits labels must match class_evidence_logits labels "
+                    "for branch-to-evidence ranking consistency"
+                )
+            teacher_gap, _, _ = self._top_true_class_branch_margin(
+                branch_logits,
+                label_indices,
+            )
+        teacher_floor = self._branch_to_evidence_teacher_floors(
             label_indices,
+            teacher_gap,
         )
+        teacher_gap = torch.maximum(teacher_gap, teacher_floor)
+        if cfg.teacher_gap_cap is not None:
+            teacher_gap = torch.clamp(teacher_gap, max=float(cfg.teacher_gap_cap))
         if cfg.teacher_detach:
-            branch_gap = branch_gap.detach()
+            teacher_gap = teacher_gap.detach()
         evidence_gap, _ = self._true_vs_hardest_negative_gap(
             evidence_logits,
             label_indices,
         )
-        penalties = torch.relu(branch_gap - evidence_gap + float(cfg.tolerance))
+        penalties = torch.relu(teacher_gap - evidence_gap + float(cfg.tolerance))
         class_weights = self._class_margin_weights(
             label_indices,
             evidence_logits,
@@ -1303,45 +1340,72 @@ class Trainer(LoggingMixin):
         epoch: int,
     ) -> tuple[Tensor, Tensor, Tensor]:
         cfg = self.cfg.global_residual_anti_veto
-        if cfg.target != "global_residual_logits":
+        if cfg.target not in {"global_residual_logits", "final_logits"}:
             raise ValueError(
                 "global residual anti-veto supports only "
-                "target='global_residual_logits'"
+                "target='global_residual_logits' or target='final_logits'"
             )
         if cfg.reference != "class_evidence_logits":
             raise ValueError(
                 "global residual anti-veto supports only "
                 "reference='class_evidence_logits'"
             )
-        if cfg.mode != "true_vs_hardest_negative":
+        if cfg.mode not in {"true_vs_hardest_negative", "final_gap_preservation"}:
             raise ValueError(
                 "global residual anti-veto supports only "
-                "mode='true_vs_hardest_negative'"
+                "mode='true_vs_hardest_negative' or "
+                "mode='final_gap_preservation'"
+            )
+        if cfg.margin_mode != "true_vs_hardest_negative":
+            raise ValueError(
+                "global residual anti-veto supports only "
+                "margin_mode='true_vs_hardest_negative'"
             )
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = output.logits.sum() * 0.0
             return raw_loss, raw_loss, raw_loss
-        if output.global_residual_logits is None:
-            raise ValueError(
-                "global residual anti-veto enabled but model did not return "
-                "global_residual_logits"
-            )
         if output.class_evidence_logits is None:
             raise ValueError(
                 "global residual anti-veto enabled but model did not return "
                 "class_evidence_logits"
             )
-        residual_logits = output.global_residual_logits
         evidence_logits = output.class_evidence_logits
+        target_logits: Tensor
+        if cfg.mode == "true_vs_hardest_negative":
+            if cfg.target != "global_residual_logits":
+                raise ValueError(
+                    "global residual anti-veto target must be "
+                    "'global_residual_logits' when mode='true_vs_hardest_negative'"
+                )
+            if output.global_residual_logits is None:
+                raise ValueError(
+                    "global residual anti-veto enabled but model did not return "
+                    "global_residual_logits"
+                )
+            target_logits = output.global_residual_logits
+            target_name = "global_residual_logits"
+        else:
+            if cfg.target != "final_logits":
+                raise ValueError(
+                    "global residual anti-veto target must be 'final_logits' "
+                    "when mode='final_gap_preservation'"
+                )
+            if cfg.support_source != "top_branch_margin":
+                raise ValueError(
+                    "global residual anti-veto mode='final_gap_preservation' "
+                    "requires support_source='top_branch_margin'"
+                )
+            target_logits = output.logits
+            target_name = "final_logits"
         label_indices = self._validate_class_margin_inputs(
-            residual_logits,
+            target_logits,
             labels,
-            logits_name="global_residual_logits",
+            logits_name=target_name,
             loss_name="global residual anti-veto",
         )
-        if tuple(evidence_logits.shape) != tuple(residual_logits.shape):
+        if tuple(evidence_logits.shape) != tuple(target_logits.shape):
             raise ValueError(
-                "class_evidence_logits must match global_residual_logits shape "
+                "class_evidence_logits must match anti-veto target logits shape "
                 "for global residual anti-veto"
             )
         self._validate_class_margin_inputs(
@@ -1351,28 +1415,48 @@ class Trainer(LoggingMixin):
             loss_name="global residual anti-veto",
         )
         if label_indices.numel() == 0:
-            raw_loss = residual_logits.sum() * 0.0
+            raw_loss = target_logits.sum() * 0.0
             return raw_loss, raw_loss, raw_loss
 
         evidence_gap, negative_indices = self._true_vs_hardest_negative_gap(
             evidence_logits,
             label_indices,
         )
-        eligible = evidence_gap.detach() > float(cfg.evidence_confidence_threshold)
-        eligible_fraction = eligible.to(dtype=residual_logits.dtype).mean()
-        residual_true = residual_logits.gather(1, label_indices.unsqueeze(1)).squeeze(1)
-        residual_negative = residual_logits.gather(
+        target_true = target_logits.gather(1, label_indices.unsqueeze(1)).squeeze(1)
+        target_negative = target_logits.gather(
             1,
             negative_indices.unsqueeze(1),
         ).squeeze(1)
-        residual_gap = residual_true - residual_negative
-        penalties = torch.relu(float(cfg.min_residual_gap) - residual_gap)
+        target_gap = target_true - target_negative
+        if cfg.mode == "true_vs_hardest_negative":
+            eligible = evidence_gap.detach() > float(cfg.evidence_confidence_threshold)
+            penalties = torch.relu(float(cfg.min_residual_gap) - target_gap)
+        else:
+            branch_logits, branch_label_indices = self._branch_margin_inputs(
+                output,
+                labels,
+                loss_name="global residual anti-veto",
+            )
+            if not torch.equal(branch_label_indices, label_indices):
+                raise ValueError(
+                    "branch_logits labels must match final logits labels for "
+                    "global residual anti-veto"
+                )
+            support_gap, _, _ = self._top_true_class_branch_margin(
+                branch_logits,
+                label_indices,
+            )
+            eligible = support_gap.detach() > float(cfg.support_threshold)
+            penalties = torch.relu(
+                evidence_gap.detach() - float(cfg.allowed_gap_drop) - target_gap
+            )
+        eligible_fraction = eligible.to(dtype=target_logits.dtype).mean()
         if not bool(eligible.any().item()):
-            raw_loss = residual_logits.sum() * 0.0
+            raw_loss = target_logits.sum() * 0.0
         else:
             class_weights = self._class_margin_weights(
                 label_indices,
-                residual_logits,
+                target_logits,
                 enabled=cfg.class_weighted,
                 loss_name="global_residual_anti_veto",
             )
@@ -1494,6 +1578,39 @@ class Trainer(LoggingMixin):
             .values
         )
         return true_branch_logits - hardest_negative
+
+    def _top_true_class_branch_margin(
+        self,
+        branch_logits: Tensor,
+        label_indices: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        branch_margin = self._true_class_branch_margins(
+            branch_logits,
+            label_indices,
+        )
+        top_margin, top_branch_indices = branch_margin.max(dim=1)
+        true_class_mask = F.one_hot(
+            label_indices,
+            num_classes=int(branch_logits.shape[2]),
+        ).to(dtype=torch.bool, device=branch_logits.device)
+        negative_logits = branch_logits.masked_fill(
+            true_class_mask.unsqueeze(1),
+            -torch.inf,
+        )
+        batch_indices = torch.arange(
+            int(branch_logits.shape[0]),
+            device=branch_logits.device,
+        )
+        top_negative_indices = (
+            negative_logits[
+                batch_indices,
+                top_branch_indices,
+                :,
+            ]
+            .max(dim=1)
+            .indices
+        )
+        return top_margin, top_branch_indices, top_negative_indices
 
     def _true_class_gate_weights(
         self,
@@ -2411,7 +2528,12 @@ class Trainer(LoggingMixin):
             branch_logits,
             label_indices,
         ).detach()
-        top_margin = branch_margin.max(dim=1).values
+        top_margin, top_branch_indices, top_negative_indices = (
+            self._top_true_class_branch_margin(branch_logits, label_indices)
+        )
+        top_margin = top_margin.detach()
+        top_branch_indices = top_branch_indices.detach()
+        top_negative_indices = top_negative_indices.detach()
         if self.cfg.top_branch_margin.enabled:
             margin_targets = self._top_branch_margin_targets(label_indices, top_margin)
             top_violations = top_margin < margin_targets
@@ -2518,88 +2640,196 @@ class Trainer(LoggingMixin):
         if (
             self.cfg.branch_to_evidence_ranking_consistency.enabled
             and output.class_evidence_logits is not None
-            and output.class_gated_branch_logits is not None
         ):
+            cfg = self.cfg.branch_to_evidence_ranking_consistency
             evidence_logits = output.class_evidence_logits.detach()
-            source_logits = output.class_gated_branch_logits.detach()
-            if tuple(evidence_logits.shape) == tuple(source_logits.shape) and tuple(
-                evidence_logits.shape
-            ) == (int(labels.numel()), int(branch_logits.shape[2])):
-                branch_gap, branch_negative = self._true_vs_hardest_negative_gap(
-                    source_logits,
+            if tuple(evidence_logits.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
+                teacher_floor = self._branch_to_evidence_teacher_floors(
                     label_indices,
-                )
-                evidence_gap, evidence_negative = self._true_vs_hardest_negative_gap(
-                    evidence_logits,
-                    label_indices,
-                )
-                penalties = torch.relu(
-                    branch_gap
-                    - evidence_gap
-                    + float(self.cfg.branch_to_evidence_ranking_consistency.tolerance)
-                )
-                for index, row in enumerate(rows):
-                    row["branch_to_evidence_branch_gap"] = float(
-                        branch_gap[index].detach().cpu().item()
+                    top_margin,
+                ).detach()
+                teacher_gap: Tensor | None = None
+                teacher_negative: Tensor | None = None
+                teacher_branch_indices: Tensor | None = None
+                if (
+                    cfg.source == "class_gated_branch_logits"
+                    and output.class_gated_branch_logits is not None
+                ):
+                    source_logits = output.class_gated_branch_logits.detach()
+                    if tuple(source_logits.shape) == tuple(evidence_logits.shape):
+                        teacher_gap, teacher_negative = (
+                            self._true_vs_hardest_negative_gap(
+                                source_logits,
+                                label_indices,
+                            )
+                        )
+                elif cfg.source == "top_branch_margin":
+                    teacher_gap = top_margin
+                    teacher_negative = top_negative_indices
+                    teacher_branch_indices = top_branch_indices
+                if teacher_gap is not None and teacher_negative is not None:
+                    teacher_gap = torch.maximum(teacher_gap, teacher_floor)
+                    if cfg.teacher_gap_cap is not None:
+                        teacher_gap = torch.clamp(
+                            teacher_gap,
+                            max=float(cfg.teacher_gap_cap),
+                        )
+                    evidence_gap, evidence_negative = (
+                        self._true_vs_hardest_negative_gap(
+                            evidence_logits,
+                            label_indices,
+                        )
                     )
-                    row["branch_to_evidence_evidence_gap"] = float(
-                        evidence_gap[index].detach().cpu().item()
+                    penalties = torch.relu(
+                        teacher_gap - evidence_gap + float(cfg.tolerance)
                     )
-                    row["branch_to_evidence_branch_negative_class"] = int(
-                        branch_negative[index].detach().cpu().item()
-                    )
-                    row["branch_to_evidence_evidence_negative_class"] = int(
-                        evidence_negative[index].detach().cpu().item()
-                    )
-                    row["branch_to_evidence_penalty"] = float(
-                        penalties[index].detach().cpu().item()
-                    )
+                    for index, row in enumerate(rows):
+                        row["branch_to_evidence_source"] = cfg.source
+                        row["branch_to_evidence_branch_gap"] = float(
+                            teacher_gap[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_teacher_gap"] = float(
+                            teacher_gap[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_teacher_floor"] = float(
+                            teacher_floor[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_teacher_gap_cap"] = (
+                            float(cfg.teacher_gap_cap)
+                            if cfg.teacher_gap_cap is not None
+                            else None
+                        )
+                        row["branch_to_evidence_evidence_gap"] = float(
+                            evidence_gap[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_branch_negative_class"] = int(
+                            teacher_negative[index].detach().cpu().item()
+                        )
+                        if teacher_branch_indices is not None:
+                            row["branch_to_evidence_teacher_branch_index"] = int(
+                                teacher_branch_indices[index].detach().cpu().item()
+                            )
+                        row["branch_to_evidence_evidence_negative_class"] = int(
+                            evidence_negative[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_penalty"] = float(
+                            penalties[index].detach().cpu().item()
+                        )
         if (
             self.cfg.global_residual_anti_veto.enabled
             and output.class_evidence_logits is not None
-            and output.global_residual_logits is not None
         ):
+            anti_veto_cfg = self.cfg.global_residual_anti_veto
             evidence_logits = output.class_evidence_logits.detach()
-            residual_logits = output.global_residual_logits.detach()
-            if tuple(evidence_logits.shape) == tuple(residual_logits.shape) and tuple(
-                residual_logits.shape
-            ) == (int(labels.numel()), int(branch_logits.shape[2])):
+            if tuple(evidence_logits.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
                 evidence_gap, negative_indices = self._true_vs_hardest_negative_gap(
                     evidence_logits,
                     label_indices,
                 )
-                residual_true = residual_logits.gather(
-                    1,
-                    label_indices.unsqueeze(1),
-                ).squeeze(1)
-                residual_negative = residual_logits.gather(
-                    1,
-                    negative_indices.unsqueeze(1),
-                ).squeeze(1)
-                residual_gap = residual_true - residual_negative
-                eligible = evidence_gap > float(
-                    self.cfg.global_residual_anti_veto.evidence_confidence_threshold
-                )
-                penalties = torch.relu(
-                    float(self.cfg.global_residual_anti_veto.min_residual_gap)
-                    - residual_gap
-                )
-                for index, row in enumerate(rows):
-                    row["global_residual_anti_veto_evidence_gap"] = float(
-                        evidence_gap[index].detach().cpu().item()
-                    )
-                    row["global_residual_anti_veto_residual_gap"] = float(
-                        residual_gap[index].detach().cpu().item()
-                    )
-                    row["global_residual_anti_veto_negative_class"] = int(
-                        negative_indices[index].detach().cpu().item()
-                    )
-                    row["global_residual_anti_veto_eligible"] = bool(
-                        eligible[index].detach().cpu().item()
-                    )
-                    row["global_residual_anti_veto_penalty"] = float(
-                        penalties[index].detach().cpu().item()
-                    )
+                if (
+                    anti_veto_cfg.mode == "true_vs_hardest_negative"
+                    and output.global_residual_logits is not None
+                ):
+                    residual_logits = output.global_residual_logits.detach()
+                    if tuple(evidence_logits.shape) == tuple(residual_logits.shape):
+                        residual_true = residual_logits.gather(
+                            1,
+                            label_indices.unsqueeze(1),
+                        ).squeeze(1)
+                        residual_negative = residual_logits.gather(
+                            1,
+                            negative_indices.unsqueeze(1),
+                        ).squeeze(1)
+                        residual_gap = residual_true - residual_negative
+                        eligible = evidence_gap > float(
+                            anti_veto_cfg.evidence_confidence_threshold
+                        )
+                        penalties = torch.relu(
+                            float(anti_veto_cfg.min_residual_gap) - residual_gap
+                        )
+                        for index, row in enumerate(rows):
+                            row["global_residual_anti_veto_mode"] = anti_veto_cfg.mode
+                            row["global_residual_anti_veto_target"] = (
+                                anti_veto_cfg.target
+                            )
+                            row["global_residual_anti_veto_evidence_gap"] = float(
+                                evidence_gap[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_reference_gap"] = float(
+                                evidence_gap[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_residual_gap"] = float(
+                                residual_gap[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_negative_class"] = int(
+                                negative_indices[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_eligible"] = bool(
+                                eligible[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_penalty"] = float(
+                                penalties[index].detach().cpu().item()
+                            )
+                elif anti_veto_cfg.mode == "final_gap_preservation":
+                    final_logits = output.logits.detach()
+                    if tuple(evidence_logits.shape) == tuple(final_logits.shape):
+                        final_true = final_logits.gather(
+                            1,
+                            label_indices.unsqueeze(1),
+                        ).squeeze(1)
+                        final_negative = final_logits.gather(
+                            1,
+                            negative_indices.unsqueeze(1),
+                        ).squeeze(1)
+                        final_gap = final_true - final_negative
+                        support_gap = top_margin
+                        eligible = support_gap > float(anti_veto_cfg.support_threshold)
+                        penalties = torch.relu(
+                            evidence_gap
+                            - float(anti_veto_cfg.allowed_gap_drop)
+                            - final_gap
+                        )
+                        for index, row in enumerate(rows):
+                            row["global_residual_anti_veto_mode"] = anti_veto_cfg.mode
+                            row["global_residual_anti_veto_target"] = (
+                                anti_veto_cfg.target
+                            )
+                            row["global_residual_anti_veto_support_source"] = (
+                                anti_veto_cfg.support_source
+                            )
+                            row["global_residual_anti_veto_evidence_gap"] = float(
+                                evidence_gap[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_reference_gap"] = float(
+                                evidence_gap[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_final_gap"] = float(
+                                final_gap[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_support_gap"] = float(
+                                support_gap[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_support_threshold"] = float(
+                                anti_veto_cfg.support_threshold
+                            )
+                            row["global_residual_anti_veto_allowed_gap_drop"] = float(
+                                anti_veto_cfg.allowed_gap_drop
+                            )
+                            row["global_residual_anti_veto_negative_class"] = int(
+                                negative_indices[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_eligible"] = bool(
+                                eligible[index].detach().cpu().item()
+                            )
+                            row["global_residual_anti_veto_penalty"] = float(
+                                penalties[index].detach().cpu().item()
+                            )
         return rows
 
     def _epoch(

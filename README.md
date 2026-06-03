@@ -276,17 +276,23 @@ Both regularizers can be bounded by `start_epoch` and `end_epoch`.
 `class_gated_branch_logit_margin` applies margin ranking to
 `class_gated_branch_logits`.
 
-`branch_to_evidence_ranking_consistency` compares the true-vs-hardest-negative
-ranking gap from `class_gated_branch_logits` against the same gap from
-`class_evidence_logits`. With `teacher_detach=true`, branch-gated logits act as
-a detached teacher and the loss updates the evidence scorer when evidence
-ranking falls behind branch ranking.
+`branch_to_evidence_ranking_consistency` compares a detached branch-side
+teacher gap against the same true-vs-hardest-negative gap from
+`class_evidence_logits`. The teacher can come from
+`class_gated_branch_logits`, or from `source="top_branch_margin"`, which uses
+the best branch-level true-vs-hardest-negative margin as the teacher signal.
+`teacher_floor_by_label` can set a minimum teacher gap per label, and
+`teacher_gap_cap` can prevent overly large branch margins from dominating the
+evidence scorer update.
 
-`global_residual_anti_veto` limits label-agnostic residual veto behavior. It
-uses the hardest negative class selected by `class_evidence_logits`, applies
-only when the detached evidence gap is above `evidence_confidence_threshold`,
-and penalizes `global_residual_logits` only when the residual true-vs-negative
-gap falls below `min_residual_gap`.
+`global_residual_anti_veto` limits label-agnostic residual veto behavior. In
+the original `target="global_residual_logits"` mode, it applies only when the
+detached evidence gap is above `evidence_confidence_threshold` and penalizes
+residual logits below `min_residual_gap`. In `mode="final_gap_preservation"`,
+it uses `support_source="top_branch_margin"` to select supported samples and
+penalizes `final_logits` when the final true-vs-hardest-negative gap drops more
+than `allowed_gap_drop` below the detached `class_evidence_logits` reference
+gap.
 
 `gate_weighted_branch_margin` improves branch logits selected by the true-class
 gate. The gate is detached, so this loss updates branch heads rather than
