@@ -47,6 +47,7 @@ from src.utils.config import (
     GateWeightedBranchMarginConfig,
     GlobalResidualAntiVetoConfig,
     LabelSmoothingConfig,
+    ResidualContradictionRegularizationConfig,
     TopBranchMarginConfig,
 )
 from src.utils.fs import Fs
@@ -105,6 +106,9 @@ class TrainerConfig:
     global_residual_anti_veto: GlobalResidualAntiVetoConfig = field(
         default_factory=GlobalResidualAntiVetoConfig
     )
+    residual_contradiction_regularization: ResidualContradictionRegularizationConfig = (
+        field(default_factory=ResidualContradictionRegularizationConfig)
+    )
     gate_weighted_branch_margin: GateWeightedBranchMarginConfig = field(
         default_factory=GateWeightedBranchMarginConfig
     )
@@ -148,6 +152,9 @@ class LossComponents:
     global_residual_anti_veto: Tensor | None = None
     global_residual_anti_veto_loss: Tensor | None = None
     global_residual_anti_veto_eligible_fraction: Tensor | None = None
+    residual_contradiction_regularization: Tensor | None = None
+    residual_contradiction_regularization_loss: Tensor | None = None
+    residual_contradiction_regularization_eligible_fraction: Tensor | None = None
     gate_weighted_branch_margin: Tensor | None = None
     gate_weighted_branch_margin_loss: Tensor | None = None
     gate_branch_regret: Tensor | None = None
@@ -610,6 +617,78 @@ class Trainer(LoggingMixin):
             dtype=reference.dtype,
             fallback=0.0,
         )
+
+    def _top_branch_support_gap(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        label_indices: Tensor,
+        *,
+        loss_name: str,
+    ) -> Tensor:
+        branch_logits, branch_label_indices = self._branch_margin_inputs(
+            output,
+            labels,
+            loss_name=loss_name,
+        )
+        if not torch.equal(branch_label_indices, label_indices):
+            raise ValueError(
+                f"branch_logits labels must match class logits labels for {loss_name}"
+            )
+        support_gap, _, _ = self._top_true_class_branch_margin(
+            branch_logits,
+            label_indices,
+        )
+        return support_gap
+
+    def _margin_support_weights(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        label_indices: Tensor,
+        reference: Tensor,
+        cfg: Any,
+        *,
+        loss_name: str,
+    ) -> tuple[Tensor, Tensor]:
+        if not cfg.enabled:
+            ones = torch.ones_like(reference)
+            return ones, reference.detach() * 0.0
+        if cfg.source != "top_branch_margin" or cfg.mode != "linear":
+            raise ValueError(
+                f"{loss_name}.support_weighting supports only "
+                "source='top_branch_margin' and mode='linear'"
+            )
+        support_gap = self._top_branch_support_gap(
+            output,
+            labels,
+            label_indices,
+            loss_name=loss_name,
+        ).detach()
+        support = torch.clamp(support_gap, min=0.0, max=float(cfg.cap))
+        support_weight = 1.0 + (float(cfg.gain) * support)
+        return support_weight, support_gap
+
+    @staticmethod
+    def _margin_hardness_weights(
+        evidence_gap: Tensor,
+        cfg: Any,
+        *,
+        loss_name: str,
+    ) -> tuple[Tensor, Tensor]:
+        if not cfg.enabled:
+            ones = torch.ones_like(evidence_gap)
+            return ones, evidence_gap.detach() * 0.0
+        if cfg.source != "evidence_gap" or cfg.mode != "negative_gap":
+            raise ValueError(
+                f"{loss_name}.hardness_weighting supports only "
+                "source='evidence_gap' and mode='negative_gap'"
+            )
+        hardness = torch.relu(-evidence_gap)
+        hard_weight = 1.0 + (
+            float(cfg.gain) * torch.clamp(hardness, min=0.0, max=float(cfg.cap))
+        )
+        return hard_weight, hardness
 
     def _top_branch_margin_targets(
         self, label_indices: Tensor, reference: Tensor
@@ -1146,7 +1225,16 @@ class Trainer(LoggingMixin):
             else:
                 major_logits = logits[:, int(major_index)]
                 margin_gap = true_logits - major_logits
+                support_weight, _ = self._margin_support_weights(
+                    output,
+                    labels,
+                    label_indices,
+                    margin_gap,
+                    self.cfg.class_evidence_margin.support_weighting,
+                    loss_name="class_evidence_margin",
+                )
                 penalties = torch.relu(margin - margin_gap[eligible])
+                penalties = penalties * support_weight[eligible]
                 raw_loss = self._reduce_class_margin_penalties(
                     penalties,
                     label_indices[eligible],
@@ -1154,11 +1242,19 @@ class Trainer(LoggingMixin):
                     reduction=self.cfg.class_evidence_margin.reduction,
                 )
         elif mode == "true_vs_hardest_negative":
-            penalties = self._true_vs_hardest_negative_penalties(
+            margin_gap, _ = self._true_vs_hardest_negative_gap(
                 logits,
                 label_indices,
-                margin=margin,
             )
+            support_weight, _ = self._margin_support_weights(
+                output,
+                labels,
+                label_indices,
+                margin_gap,
+                self.cfg.class_evidence_margin.support_weighting,
+                loss_name="class_evidence_margin",
+            )
+            penalties = torch.relu(margin - margin_gap) * support_weight
             raw_loss = self._reduce_class_margin_penalties(
                 penalties,
                 label_indices,
@@ -1316,7 +1412,24 @@ class Trainer(LoggingMixin):
             evidence_logits,
             label_indices,
         )
-        penalties = torch.relu(teacher_gap - evidence_gap + float(cfg.tolerance))
+        support_weight, _ = self._margin_support_weights(
+            output,
+            labels,
+            label_indices,
+            evidence_gap,
+            cfg.support_weighting,
+            loss_name="branch_to_evidence_ranking_consistency",
+        )
+        hard_weight, _ = self._margin_hardness_weights(
+            evidence_gap,
+            cfg.hardness_weighting,
+            loss_name="branch_to_evidence_ranking_consistency",
+        )
+        penalties = (
+            torch.relu(teacher_gap - evidence_gap + float(cfg.tolerance))
+            * support_weight
+            * hard_weight
+        )
         class_weights = self._class_margin_weights(
             label_indices,
             evidence_logits,
@@ -1459,6 +1572,103 @@ class Trainer(LoggingMixin):
                 target_logits,
                 enabled=cfg.class_weighted,
                 loss_name="global_residual_anti_veto",
+            )
+            raw_loss = self._reduce_class_margin_penalties(
+                penalties[eligible],
+                label_indices[eligible],
+                class_weights[eligible],
+                reduction=cfg.reduction,
+            )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss, eligible_fraction
+
+    def _compute_residual_contradiction_regularization_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        cfg = self.cfg.residual_contradiction_regularization
+        if cfg.target != "global_residual_logits":
+            raise ValueError(
+                "residual contradiction regularization supports only "
+                "target='global_residual_logits'"
+            )
+        if cfg.reference != "class_evidence_logits":
+            raise ValueError(
+                "residual contradiction regularization supports only "
+                "reference='class_evidence_logits'"
+            )
+        if cfg.mode != "opposite_gap_penalty":
+            raise ValueError(
+                "residual contradiction regularization supports only "
+                "mode='opposite_gap_penalty'"
+            )
+        if cfg.margin_mode != "true_vs_hardest_negative":
+            raise ValueError(
+                "residual contradiction regularization supports only "
+                "margin_mode='true_vs_hardest_negative'"
+            )
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = output.logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        if output.class_evidence_logits is None:
+            raise ValueError(
+                "residual contradiction regularization enabled but model did "
+                "not return class_evidence_logits"
+            )
+        if output.global_residual_logits is None:
+            raise ValueError(
+                "residual contradiction regularization enabled but model did "
+                "not return global_residual_logits"
+            )
+        evidence_logits = output.class_evidence_logits
+        residual_logits = output.global_residual_logits
+        if tuple(evidence_logits.shape) != tuple(residual_logits.shape):
+            raise ValueError(
+                "class_evidence_logits must match global_residual_logits shape "
+                "for residual contradiction regularization"
+            )
+        label_indices = self._validate_class_margin_inputs(
+            residual_logits,
+            labels,
+            logits_name="global_residual_logits",
+            loss_name="residual contradiction regularization",
+        )
+        self._validate_class_margin_inputs(
+            evidence_logits,
+            labels,
+            logits_name="class_evidence_logits",
+            loss_name="residual contradiction regularization",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = residual_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        evidence_gap, negative_indices = self._true_vs_hardest_negative_gap(
+            evidence_logits,
+            label_indices,
+        )
+        residual_true = residual_logits.gather(
+            1,
+            label_indices.unsqueeze(1),
+        ).squeeze(1)
+        residual_negative = residual_logits.gather(
+            1,
+            negative_indices.unsqueeze(1),
+        ).squeeze(1)
+        residual_gap = residual_true - residual_negative
+        eligible = evidence_gap.detach() > float(cfg.evidence_gap_threshold)
+        eligible_fraction = eligible.to(dtype=residual_logits.dtype).mean()
+        penalties = torch.relu(float(cfg.min_residual_gap) - residual_gap)
+        if not bool(eligible.any().item()):
+            raw_loss = residual_logits.sum() * 0.0
+        else:
+            class_weights = self._class_margin_weights(
+                label_indices,
+                residual_logits,
+                enabled=cfg.class_weighted,
+                loss_name="residual_contradiction_regularization",
             )
             raw_loss = self._reduce_class_margin_penalties(
                 penalties[eligible],
@@ -2095,6 +2305,23 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + global_residual_anti_veto_loss
             monitor_total = monitor_total + global_residual_anti_veto_loss
+        residual_contradiction_regularization: Tensor | None = None
+        residual_contradiction_regularization_loss: Tensor | None = None
+        residual_contradiction_regularization_eligible_fraction: Tensor | None = None
+        if self.cfg.residual_contradiction_regularization.enabled:
+            (
+                residual_contradiction_regularization,
+                residual_contradiction_regularization_loss,
+                residual_contradiction_regularization_eligible_fraction,
+            ) = self._compute_residual_contradiction_regularization_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = (
+                scheduled_total + residual_contradiction_regularization_loss
+            )
+            monitor_total = monitor_total + residual_contradiction_regularization_loss
         gate_weighted_branch_margin: Tensor | None = None
         gate_weighted_branch_margin_loss: Tensor | None = None
         if self.cfg.gate_weighted_branch_margin.enabled:
@@ -2184,6 +2411,15 @@ class Trainer(LoggingMixin):
             global_residual_anti_veto_loss=global_residual_anti_veto_loss,
             global_residual_anti_veto_eligible_fraction=(
                 global_residual_anti_veto_eligible_fraction
+            ),
+            residual_contradiction_regularization=(
+                residual_contradiction_regularization
+            ),
+            residual_contradiction_regularization_loss=(
+                residual_contradiction_regularization_loss
+            ),
+            residual_contradiction_regularization_eligible_fraction=(
+                residual_contradiction_regularization_eligible_fraction
             ),
             gate_weighted_branch_margin=gate_weighted_branch_margin,
             gate_weighted_branch_margin_loss=gate_weighted_branch_margin_loss,
@@ -2548,6 +2784,74 @@ class Trainer(LoggingMixin):
                     top_violations[index].detach().cpu().item()
                 )
         if (
+            self.cfg.class_evidence_margin.enabled
+            and output.class_evidence_logits is not None
+        ):
+            margin_cfg = self.cfg.class_evidence_margin
+            evidence_logits = output.class_evidence_logits.detach()
+            if tuple(evidence_logits.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
+                margin_gap: Tensor | None = None
+                margin_negative: Tensor | None = None
+                eligible = torch.ones_like(label_indices, dtype=torch.bool)
+                if margin_cfg.mode == "true_vs_hardest_negative":
+                    margin_gap, margin_negative = self._true_vs_hardest_negative_gap(
+                        evidence_logits,
+                        label_indices,
+                    )
+                elif (
+                    margin_cfg.mode == "minority_vs_major"
+                    and self.cfg.class_evidence_margin_major_index is not None
+                ):
+                    major_index = int(self.cfg.class_evidence_margin_major_index)
+                    if 0 <= major_index < int(evidence_logits.shape[1]):
+                        true_logits = evidence_logits.gather(
+                            1,
+                            label_indices.unsqueeze(1),
+                        ).squeeze(1)
+                        margin_gap = true_logits - evidence_logits[:, major_index]
+                        margin_negative = torch.full_like(label_indices, major_index)
+                        eligible = label_indices != major_index
+                if margin_gap is not None and margin_negative is not None:
+                    support_weight, support_gap = self._margin_support_weights(
+                        output,
+                        labels,
+                        label_indices,
+                        margin_gap,
+                        margin_cfg.support_weighting,
+                        loss_name="class_evidence_margin",
+                    )
+                    penalties = (
+                        torch.relu(float(margin_cfg.margin) - margin_gap)
+                        * support_weight
+                    )
+                    penalties = torch.where(
+                        eligible,
+                        penalties,
+                        torch.zeros_like(penalties),
+                    )
+                    for index, row in enumerate(rows):
+                        row["class_evidence_margin_gap"] = float(
+                            margin_gap[index].detach().cpu().item()
+                        )
+                        row["class_evidence_margin_negative_class"] = int(
+                            margin_negative[index].detach().cpu().item()
+                        )
+                        row["class_evidence_margin_support_gap"] = float(
+                            support_gap[index].detach().cpu().item()
+                        )
+                        row["class_evidence_margin_support_weight"] = float(
+                            support_weight[index].detach().cpu().item()
+                        )
+                        row["class_evidence_margin_penalty"] = float(
+                            penalties[index].detach().cpu().item()
+                        )
+                        row["class_evidence_margin_eligible"] = bool(
+                            eligible[index].detach().cpu().item()
+                        )
+        if (
             self.cfg.gate_branch_regret.enabled
             and output.class_evidence_gate_weights is not None
         ):
@@ -2683,9 +2987,23 @@ class Trainer(LoggingMixin):
                             label_indices,
                         )
                     )
-                    penalties = torch.relu(
+                    support_weight, support_gap = self._margin_support_weights(
+                        output,
+                        labels,
+                        label_indices,
+                        evidence_gap,
+                        cfg.support_weighting,
+                        loss_name="branch_to_evidence_ranking_consistency",
+                    )
+                    hard_weight, hardness = self._margin_hardness_weights(
+                        evidence_gap,
+                        cfg.hardness_weighting,
+                        loss_name="branch_to_evidence_ranking_consistency",
+                    )
+                    base_penalties = torch.relu(
                         teacher_gap - evidence_gap + float(cfg.tolerance)
                     )
+                    penalties = base_penalties * support_weight * hard_weight
                     for index, row in enumerate(rows):
                         row["branch_to_evidence_source"] = cfg.source
                         row["branch_to_evidence_branch_gap"] = float(
@@ -2705,6 +3023,18 @@ class Trainer(LoggingMixin):
                         row["branch_to_evidence_evidence_gap"] = float(
                             evidence_gap[index].detach().cpu().item()
                         )
+                        row["branch_to_evidence_support_gap"] = float(
+                            support_gap[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_support_weight"] = float(
+                            support_weight[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_hardness"] = float(
+                            hardness[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_hardness_weight"] = float(
+                            hard_weight[index].detach().cpu().item()
+                        )
                         row["branch_to_evidence_branch_negative_class"] = int(
                             teacher_negative[index].detach().cpu().item()
                         )
@@ -2716,6 +3046,9 @@ class Trainer(LoggingMixin):
                             evidence_negative[index].detach().cpu().item()
                         )
                         row["branch_to_evidence_penalty"] = float(
+                            base_penalties[index].detach().cpu().item()
+                        )
+                        row["branch_to_evidence_weighted_penalty"] = float(
                             penalties[index].detach().cpu().item()
                         )
         if (
@@ -2830,6 +3163,61 @@ class Trainer(LoggingMixin):
                             row["global_residual_anti_veto_penalty"] = float(
                                 penalties[index].detach().cpu().item()
                             )
+        if (
+            self.cfg.residual_contradiction_regularization.enabled
+            and output.class_evidence_logits is not None
+            and output.global_residual_logits is not None
+        ):
+            residual_cfg = self.cfg.residual_contradiction_regularization
+            evidence_logits = output.class_evidence_logits.detach()
+            residual_logits = output.global_residual_logits.detach()
+            if (
+                tuple(evidence_logits.shape)
+                == tuple(residual_logits.shape)
+                == (
+                    int(labels.numel()),
+                    int(branch_logits.shape[2]),
+                )
+            ):
+                evidence_gap, negative_indices = self._true_vs_hardest_negative_gap(
+                    evidence_logits,
+                    label_indices,
+                )
+                residual_true = residual_logits.gather(
+                    1,
+                    label_indices.unsqueeze(1),
+                ).squeeze(1)
+                residual_negative = residual_logits.gather(
+                    1,
+                    negative_indices.unsqueeze(1),
+                ).squeeze(1)
+                residual_gap = residual_true - residual_negative
+                eligible = evidence_gap > float(residual_cfg.evidence_gap_threshold)
+                penalties = torch.relu(
+                    float(residual_cfg.min_residual_gap) - residual_gap
+                )
+                for index, row in enumerate(rows):
+                    row["residual_contradiction_evidence_gap"] = float(
+                        evidence_gap[index].detach().cpu().item()
+                    )
+                    row["residual_contradiction_residual_gap"] = float(
+                        residual_gap[index].detach().cpu().item()
+                    )
+                    row["residual_contradiction_negative_class"] = int(
+                        negative_indices[index].detach().cpu().item()
+                    )
+                    row["residual_contradiction_evidence_gap_threshold"] = float(
+                        residual_cfg.evidence_gap_threshold
+                    )
+                    row["residual_contradiction_min_residual_gap"] = float(
+                        residual_cfg.min_residual_gap
+                    )
+                    row["residual_contradiction_eligible"] = bool(
+                        eligible[index].detach().cpu().item()
+                    )
+                    row["residual_contradiction_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
         return rows
 
     def _epoch(
@@ -2868,6 +3256,9 @@ class Trainer(LoggingMixin):
             "global_residual_anti_veto": 0.0,
             "global_residual_anti_veto_loss": 0.0,
             "global_residual_anti_veto_eligible_fraction": 0.0,
+            "residual_contradiction_regularization": 0.0,
+            "residual_contradiction_regularization_loss": 0.0,
+            "residual_contradiction_regularization_eligible_fraction": 0.0,
             "gate_weighted_branch_margin": 0.0,
             "gate_weighted_branch_margin_loss": 0.0,
             "gate_branch_regret": 0.0,
@@ -2986,6 +3377,15 @@ class Trainer(LoggingMixin):
                 ),
                 "global_residual_anti_veto_eligible_fraction": (
                     loss_components.global_residual_anti_veto_eligible_fraction
+                ),
+                "residual_contradiction_regularization": (
+                    loss_components.residual_contradiction_regularization
+                ),
+                "residual_contradiction_regularization_loss": (
+                    loss_components.residual_contradiction_regularization_loss
+                ),
+                "residual_contradiction_regularization_eligible_fraction": (
+                    loss_components.residual_contradiction_regularization_eligible_fraction
                 ),
                 "gate_weighted_branch_margin": (
                     loss_components.gate_weighted_branch_margin
@@ -3301,6 +3701,24 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "train_residual_contradiction_regularization": (
+                        train_components.get(
+                            "residual_contradiction_regularization",
+                            0.0,
+                        )
+                    ),
+                    "train_loss_residual_contradiction_regularization": (
+                        train_components.get(
+                            "residual_contradiction_regularization_loss",
+                            0.0,
+                        )
+                    ),
+                    "train_residual_contradiction_regularization_eligible_fraction": (
+                        train_components.get(
+                            "residual_contradiction_regularization_eligible_fraction",
+                            0.0,
+                        )
+                    ),
                     "train_gate_weighted_branch_margin": train_components.get(
                         "gate_weighted_branch_margin",
                         0.0,
@@ -3456,6 +3874,24 @@ class Trainer(LoggingMixin):
                     "val_global_residual_anti_veto_eligible_fraction": (
                         val_components.get(
                             "global_residual_anti_veto_eligible_fraction",
+                            0.0,
+                        )
+                    ),
+                    "val_residual_contradiction_regularization": (
+                        val_components.get(
+                            "residual_contradiction_regularization",
+                            0.0,
+                        )
+                    ),
+                    "val_loss_residual_contradiction_regularization": (
+                        val_components.get(
+                            "residual_contradiction_regularization_loss",
+                            0.0,
+                        )
+                    ),
+                    "val_residual_contradiction_regularization_eligible_fraction": (
+                        val_components.get(
+                            "residual_contradiction_regularization_eligible_fraction",
                             0.0,
                         )
                     ),

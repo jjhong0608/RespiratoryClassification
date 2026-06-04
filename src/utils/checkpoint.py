@@ -10,6 +10,9 @@ from src.models.model import (
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
     ClassGateEvidenceAuxiliaryConfig,
+    ClassGateEvidenceScorerBranchFeatureConcatConfig,
+    ClassGateEvidenceScorerConfig,
+    ClassGateGlobalResidualBoundingConfig,
     ClassGateGlobalResidualConfig,
     ClassGateGlobalResidualWarmupConfig,
     ClassGateMixingConfig,
@@ -91,6 +94,12 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
             "model_cfg.encoder.architecture.evidence_pooling.class_gate."
             "evidence_auxiliary must be a dict"
         )
+    evidence_scorer_raw = class_gate_kwargs.get("evidence_scorer", {})
+    if not isinstance(evidence_scorer_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "evidence_scorer must be a dict"
+        )
     branch_logit_feature_raw = class_gate_kwargs.get("branch_logit_feature", {})
     if not isinstance(branch_logit_feature_raw, Mapping):
         raise TypeError(
@@ -110,11 +119,38 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
             "model_cfg.encoder.architecture.evidence_pooling.class_gate."
             "global_residual.warmup must be a dict"
         )
+    bounding_raw = global_residual_kwargs.get("bounding", {})
+    if not isinstance(bounding_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "global_residual.bounding must be a dict"
+        )
     global_residual_kwargs["warmup"] = ClassGateGlobalResidualWarmupConfig(
         **dict(warmup_raw)
     )
+    global_residual_kwargs["bounding"] = ClassGateGlobalResidualBoundingConfig(
+        **dict(bounding_raw)
+    )
     class_gate_kwargs["global_residual"] = ClassGateGlobalResidualConfig(
         **global_residual_kwargs
+    )
+    evidence_scorer_kwargs = dict(evidence_scorer_raw)
+    branch_feature_concat_raw = evidence_scorer_kwargs.get("branch_feature_concat", {})
+    if not isinstance(branch_feature_concat_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "evidence_scorer.branch_feature_concat must be a dict"
+        )
+    branch_feature_concat_kwargs = dict(branch_feature_concat_raw)
+    if isinstance(branch_feature_concat_kwargs.get("features"), list | tuple):
+        branch_feature_concat_kwargs["features"] = tuple(
+            branch_feature_concat_kwargs["features"]
+        )
+    evidence_scorer_kwargs["branch_feature_concat"] = (
+        ClassGateEvidenceScorerBranchFeatureConcatConfig(**branch_feature_concat_kwargs)
+    )
+    class_gate_kwargs["evidence_scorer"] = ClassGateEvidenceScorerConfig(
+        **evidence_scorer_kwargs
     )
     class_gate_kwargs["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(
         **dict(evidence_auxiliary_raw)

@@ -13,6 +13,9 @@ from src.models.model import (
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
     ClassGateEvidenceAuxiliaryConfig,
+    ClassGateEvidenceScorerBranchFeatureConcatConfig,
+    ClassGateEvidenceScorerConfig,
+    ClassGateGlobalResidualBoundingConfig,
     ClassGateGlobalResidualConfig,
     ClassGateGlobalResidualWarmupConfig,
     ClassGateMixingConfig,
@@ -233,6 +236,24 @@ class ClassGateDiversityRegularizationConfig:
 
 
 @dataclass(frozen=True)
+class MarginSupportWeightingConfig:
+    enabled: bool = False
+    source: Literal["top_branch_margin"] = "top_branch_margin"
+    mode: Literal["linear"] = "linear"
+    gain: float = 1.0
+    cap: float = 2.0
+
+
+@dataclass(frozen=True)
+class MarginHardnessWeightingConfig:
+    enabled: bool = False
+    source: Literal["evidence_gap"] = "evidence_gap"
+    mode: Literal["negative_gap"] = "negative_gap"
+    gain: float = 1.0
+    cap: float = 3.0
+
+
+@dataclass(frozen=True)
 class ClassEvidenceMarginConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -245,6 +266,9 @@ class ClassEvidenceMarginConfig:
     major_class: str | None = None
     class_weighted: bool = False
     reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
+    support_weighting: MarginSupportWeightingConfig = field(
+        default_factory=MarginSupportWeightingConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -275,6 +299,12 @@ class BranchToEvidenceRankingConsistencyConfig:
     class_weighted: bool = False
     reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
     warmup_epochs: int = 0
+    support_weighting: MarginSupportWeightingConfig = field(
+        default_factory=MarginSupportWeightingConfig
+    )
+    hardness_weighting: MarginHardnessWeightingConfig = field(
+        default_factory=MarginHardnessWeightingConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -293,6 +323,21 @@ class GlobalResidualAntiVetoConfig:
     min_residual_gap: float = -0.5
     support_threshold: float = 0.0
     allowed_gap_drop: float = 0.0
+    class_weighted: bool = False
+    reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class ResidualContradictionRegularizationConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["global_residual_logits"] = "global_residual_logits"
+    reference: Literal["class_evidence_logits"] = "class_evidence_logits"
+    mode: Literal["opposite_gap_penalty"] = "opposite_gap_penalty"
+    margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    evidence_gap_threshold: float = 0.0
+    min_residual_gap: float = -0.3
     class_weighted: bool = False
     reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
     warmup_epochs: int = 0
@@ -503,6 +548,9 @@ class LossConfig:
     global_residual_anti_veto: GlobalResidualAntiVetoConfig = field(
         default_factory=GlobalResidualAntiVetoConfig
     )
+    residual_contradiction_regularization: ResidualContradictionRegularizationConfig = (
+        field(default_factory=ResidualContradictionRegularizationConfig)
+    )
     gate_weighted_branch_margin: GateWeightedBranchMarginConfig = field(
         default_factory=GateWeightedBranchMarginConfig
     )
@@ -668,8 +716,16 @@ class JsonConfigLoader:
     _CLASS_GATE_MODES = {"query"}
     _CLASS_GATE_SCORERS = {"diagonal", "normalized_mlp"}
     _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
+    _CLASS_GATE_EVIDENCE_SCORER_BRANCH_FEATURES = {
+        "class_gated_branch_logit_features",
+        "top_branch_margin_style",
+    }
     _CLASS_GATE_MIXING_MODES = {"uniform_to_learned"}
     _GLOBAL_RESIDUAL_WARMUP_MODES = {"zero_to_learned"}
+    _MARGIN_SUPPORT_WEIGHTING_SOURCES = {"top_branch_margin"}
+    _MARGIN_SUPPORT_WEIGHTING_MODES = {"linear"}
+    _MARGIN_HARDNESS_WEIGHTING_SOURCES = {"evidence_gap"}
+    _MARGIN_HARDNESS_WEIGHTING_MODES = {"negative_gap"}
     _GATE_ENTROPY_TARGETS = {
         "evidence_gate",
         "class_evidence_gate",
@@ -706,6 +762,10 @@ class JsonConfigLoader:
         "final_gap_preservation",
     }
     _GLOBAL_RESIDUAL_ANTI_VETO_MARGIN_MODES = {"true_vs_hardest_negative"}
+    _RESIDUAL_CONTRADICTION_TARGETS = {"global_residual_logits"}
+    _RESIDUAL_CONTRADICTION_REFERENCES = {"class_evidence_logits"}
+    _RESIDUAL_CONTRADICTION_MODES = {"opposite_gap_penalty"}
+    _RESIDUAL_CONTRADICTION_MARGIN_MODES = {"true_vs_hardest_negative"}
     _GATE_WEIGHTED_BRANCH_MARGIN_TARGETS = {"true_class_gate"}
     _GATE_WEIGHTED_BRANCH_MARGIN_SOURCES = {"branch_logits"}
     _GATE_WEIGHTED_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
@@ -1090,6 +1150,46 @@ class JsonConfigLoader:
             )
 
     @staticmethod
+    def _validate_margin_support_weighting(
+        cfg: MarginSupportWeightingConfig,
+        *,
+        field_name: str,
+    ) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if cfg.source not in JsonConfigLoader._MARGIN_SUPPORT_WEIGHTING_SOURCES:
+            raise ValueError(f"{field_name}.source must be 'top_branch_margin'")
+        if cfg.mode not in JsonConfigLoader._MARGIN_SUPPORT_WEIGHTING_MODES:
+            raise ValueError(f"{field_name}.mode must be 'linear'")
+        for value, suffix in ((cfg.gain, "gain"), (cfg.cap, "cap")):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{suffix} must be numeric")
+        if cfg.gain < 0:
+            raise ValueError(f"{field_name}.gain must be greater than or equal to zero")
+        if cfg.cap <= 0:
+            raise ValueError(f"{field_name}.cap must be greater than zero")
+
+    @staticmethod
+    def _validate_margin_hardness_weighting(
+        cfg: MarginHardnessWeightingConfig,
+        *,
+        field_name: str,
+    ) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if cfg.source not in JsonConfigLoader._MARGIN_HARDNESS_WEIGHTING_SOURCES:
+            raise ValueError(f"{field_name}.source must be 'evidence_gap'")
+        if cfg.mode not in JsonConfigLoader._MARGIN_HARDNESS_WEIGHTING_MODES:
+            raise ValueError(f"{field_name}.mode must be 'negative_gap'")
+        for value, suffix in ((cfg.gain, "gain"), (cfg.cap, "cap")):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{suffix} must be numeric")
+        if cfg.gain < 0:
+            raise ValueError(f"{field_name}.gain must be greater than or equal to zero")
+        if cfg.cap <= 0:
+            raise ValueError(f"{field_name}.cap must be greater than zero")
+
+    @staticmethod
     def _validate_hold_decay_schedule(
         *,
         enabled: bool,
@@ -1464,6 +1564,56 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "scorer_dropout must be within [0, 1)"
             )
+        branch_feature_concat = class_gate.evidence_scorer.branch_feature_concat
+        if not isinstance(branch_feature_concat.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_feature_concat.enabled must be a boolean"
+            )
+        if branch_feature_concat.enabled and class_gate.scorer != "normalized_mlp":
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_feature_concat requires "
+                "class_gate.scorer='normalized_mlp'"
+            )
+        if not isinstance(branch_feature_concat.features, Sequence) or isinstance(
+            branch_feature_concat.features,
+            (str, bytes),
+        ):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_feature_concat.features must be a list"
+            )
+        if branch_feature_concat.enabled and not branch_feature_concat.features:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_feature_concat.features must not be "
+                "empty when enabled"
+            )
+        seen_scorer_features: set[str] = set()
+        for feature_name in branch_feature_concat.features:
+            if (
+                feature_name
+                not in JsonConfigLoader._CLASS_GATE_EVIDENCE_SCORER_BRANCH_FEATURES
+            ):
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_feature_concat.features must contain "
+                    "only "
+                    f"{sorted(JsonConfigLoader._CLASS_GATE_EVIDENCE_SCORER_BRANCH_FEATURES)}"
+                )
+            if feature_name in seen_scorer_features:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_feature_concat.features must not "
+                    "contain duplicates"
+                )
+            seen_scorer_features.add(feature_name)
+        if not isinstance(branch_feature_concat.normalize, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_feature_concat.normalize must be a boolean"
+            )
         if (
             class_gate.branch_logit_feature.mode
             not in JsonConfigLoader._CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES
@@ -1544,6 +1694,27 @@ class JsonConfigLoader:
                 "global_residual.warmup.end_multiplier"
             ),
         )
+        bounding = class_gate.global_residual.bounding
+        if not isinstance(bounding.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.bounding.enabled must be a boolean"
+            )
+        for value, field_name in (
+            (bounding.bound, "bound"),
+            (bounding.temperature, "temperature"),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"global_residual.bounding.{field_name} must be numeric"
+                )
+            if value <= 0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"global_residual.bounding.{field_name} must be greater "
+                    "than zero"
+                )
         if not isinstance(class_gate.evidence_auxiliary.enabled, bool):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
@@ -1854,6 +2025,10 @@ class JsonConfigLoader:
                 "train.loss.class_evidence_margin.reduction must be one of "
                 f"{sorted(JsonConfigLoader._MARGIN_REDUCTIONS)}"
             )
+        JsonConfigLoader._validate_margin_support_weighting(
+            cfg.loss.class_evidence_margin.support_weighting,
+            field_name="train.loss.class_evidence_margin.support_weighting",
+        )
         if cfg.loss.class_evidence_margin.major_class is not None and not isinstance(
             cfg.loss.class_evidence_margin.major_class, str
         ):
@@ -2001,6 +2176,18 @@ class JsonConfigLoader:
                 "train.loss.branch_to_evidence_ranking_consistency.reduction "
                 f"must be one of {sorted(JsonConfigLoader._MARGIN_REDUCTIONS)}"
             )
+        JsonConfigLoader._validate_margin_support_weighting(
+            b2e_cfg.support_weighting,
+            field_name=(
+                "train.loss.branch_to_evidence_ranking_consistency.support_weighting"
+            ),
+        )
+        JsonConfigLoader._validate_margin_hardness_weighting(
+            b2e_cfg.hardness_weighting,
+            field_name=(
+                "train.loss.branch_to_evidence_ranking_consistency.hardness_weighting"
+            ),
+        )
         if not isinstance(b2e_cfg.warmup_epochs, int):
             raise TypeError(
                 "train.loss.branch_to_evidence_ranking_consistency.warmup_epochs "
@@ -2189,6 +2376,96 @@ class JsonConfigLoader:
             if evidence_pooling_type != "class_aware_branch_gated":
                 raise ValueError(
                     "train.loss.global_residual_anti_veto requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+        residual_contradiction_cfg = cfg.loss.residual_contradiction_regularization
+        if not isinstance(residual_contradiction_cfg.enabled, bool):
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.enabled "
+                "must be a boolean"
+            )
+        if not isinstance(residual_contradiction_cfg.class_weighted, bool):
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            residual_contradiction_cfg.target
+            not in JsonConfigLoader._RESIDUAL_CONTRADICTION_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.target must be "
+                "'global_residual_logits'"
+            )
+        if (
+            residual_contradiction_cfg.reference
+            not in JsonConfigLoader._RESIDUAL_CONTRADICTION_REFERENCES
+        ):
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.reference must be "
+                "'class_evidence_logits'"
+            )
+        if (
+            residual_contradiction_cfg.mode
+            not in JsonConfigLoader._RESIDUAL_CONTRADICTION_MODES
+        ):
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.mode must be "
+                "'opposite_gap_penalty'"
+            )
+        if (
+            residual_contradiction_cfg.margin_mode
+            not in JsonConfigLoader._RESIDUAL_CONTRADICTION_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.margin_mode "
+                "must be 'true_vs_hardest_negative'"
+            )
+        if (
+            residual_contradiction_cfg.reduction
+            not in JsonConfigLoader._MARGIN_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.reduction "
+                f"must be one of {sorted(JsonConfigLoader._MARGIN_REDUCTIONS)}"
+            )
+        if not isinstance(residual_contradiction_cfg.warmup_epochs, int):
+            raise TypeError(
+                "train.loss.residual_contradiction_regularization.warmup_epochs "
+                "must be an integer"
+            )
+        if residual_contradiction_cfg.warmup_epochs < 0:
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.warmup_epochs "
+                "must be greater than or equal to zero"
+            )
+        for value, field_name in (
+            (
+                residual_contradiction_cfg.evidence_gap_threshold,
+                "evidence_gap_threshold",
+            ),
+            (residual_contradiction_cfg.min_residual_gap, "min_residual_gap"),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(
+                    "train.loss.residual_contradiction_regularization."
+                    f"{field_name} must be numeric"
+                )
+        if residual_contradiction_cfg.enabled:
+            if residual_contradiction_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.residual_contradiction_regularization.weight "
+                    "must be greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.residual_contradiction_regularization is "
+                    "supported only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.residual_contradiction_regularization requires "
                     "model.encoder.architecture.evidence_pooling.type="
                     "'class_aware_branch_gated'"
                 )
@@ -2672,6 +2949,15 @@ class JsonConfigLoader:
                 "train.loss.class_weighting.enabled=true"
             )
         if (
+            cfg.loss.residual_contradiction_regularization.enabled
+            and cfg.loss.residual_contradiction_regularization.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.residual_contradiction_regularization.class_weighted "
+                "requires train.loss.class_weighting.enabled=true"
+            )
+        if (
             cfg.loss.gate_weighted_branch_margin.enabled
             and cfg.loss.gate_weighted_branch_margin.class_weighted
             and not cfg.loss.class_weighting.enabled
@@ -3054,7 +3340,24 @@ class JsonConfigLoader:
         global_residual["warmup"] = ClassGateGlobalResidualWarmupConfig(
             **dict(global_residual.get("warmup", {}))
         )
+        global_residual["bounding"] = ClassGateGlobalResidualBoundingConfig(
+            **dict(global_residual.get("bounding", {}))
+        )
         class_gate["global_residual"] = ClassGateGlobalResidualConfig(**global_residual)
+        evidence_scorer = dict(class_gate.get("evidence_scorer", {}))
+        branch_feature_concat = dict(evidence_scorer.get("branch_feature_concat", {}))
+        if isinstance(
+            branch_feature_concat.get("features"),
+            Sequence,
+        ) and not isinstance(
+            branch_feature_concat.get("features"),
+            str | bytes,
+        ):
+            branch_feature_concat["features"] = tuple(branch_feature_concat["features"])
+        evidence_scorer["branch_feature_concat"] = (
+            ClassGateEvidenceScorerBranchFeatureConcatConfig(**branch_feature_concat)
+        )
+        class_gate["evidence_scorer"] = ClassGateEvidenceScorerConfig(**evidence_scorer)
         class_gate["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(
             **dict(class_gate.get("evidence_auxiliary", {}))
         )
@@ -3178,8 +3481,12 @@ class JsonConfigLoader:
                 **dict(loss.get("class_gate_diversity_regularization", {}))
             )
         )
+        class_evidence_margin = dict(loss.get("class_evidence_margin", {}))
+        class_evidence_margin["support_weighting"] = MarginSupportWeightingConfig(
+            **dict(class_evidence_margin.get("support_weighting", {}))
+        )
         loss["class_evidence_margin"] = ClassEvidenceMarginConfig(
-            **dict(loss.get("class_evidence_margin", {}))
+            **class_evidence_margin
         )
         loss["class_gated_branch_logit_margin"] = ClassGatedBranchLogitMarginConfig(
             **dict(loss.get("class_gated_branch_logit_margin", {}))
@@ -3190,11 +3497,22 @@ class JsonConfigLoader:
         branch_to_evidence["teacher_floor_by_label"] = dict(
             branch_to_evidence.get("teacher_floor_by_label", {})
         )
+        branch_to_evidence["support_weighting"] = MarginSupportWeightingConfig(
+            **dict(branch_to_evidence.get("support_weighting", {}))
+        )
+        branch_to_evidence["hardness_weighting"] = MarginHardnessWeightingConfig(
+            **dict(branch_to_evidence.get("hardness_weighting", {}))
+        )
         loss["branch_to_evidence_ranking_consistency"] = (
             BranchToEvidenceRankingConsistencyConfig(**branch_to_evidence)
         )
         loss["global_residual_anti_veto"] = GlobalResidualAntiVetoConfig(
             **dict(loss.get("global_residual_anti_veto", {}))
+        )
+        loss["residual_contradiction_regularization"] = (
+            ResidualContradictionRegularizationConfig(
+                **dict(loss.get("residual_contradiction_regularization", {}))
+            )
         )
         if "gate_branch_alignment" in loss:
             raise ValueError(

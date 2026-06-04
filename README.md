@@ -127,7 +127,11 @@ In `class_aware_branch_gated`, the model computes class-specific evidence
 embeddings and class evidence logits. The final logits are:
 
 ```text
-final_logits = class_evidence_logits + effective_residual_scale * global_residual_logits
+residual_term = global_residual_logits
+if global_residual.bounding.enabled:
+  residual_term = bound * tanh(global_residual_logits / temperature)
+
+final_logits = class_evidence_logits + effective_residual_scale * residual_term
 ```
 
 The global residual path reuses `model.classifier`. Its input combines
@@ -140,8 +144,11 @@ The active class-aware gate config lives under
 
 - `mode="query"` uses learnable class queries.
 - `scorer="diagonal"` scores each class-specific evidence embedding with a class-specific diagonal scorer.
+- `scorer="normalized_mlp"` scores each class-specific evidence embedding with a per-class normalized MLP.
+- `evidence_scorer.branch_feature_concat` can append label-free branch support features to the normalized MLP scorer input.
 - `global_residual.enabled` controls whether the residual classifier contributes to final logits.
 - `global_residual.warmup` can hold residual contribution near zero early and increase it later.
+- `global_residual.bounding` can bound residual logits with `bound * tanh(residual / temperature)` before final-logit fusion.
 - `evidence_auxiliary.enabled` adds cross entropy on `class_evidence_logits`.
 - `branch_logit_feature.mode="raw"` feeds raw class-gated branch logits to the residual path.
 - `branch_logit_feature.mode="hardest_negative_margin"` feeds label-free class margin features.
@@ -252,6 +259,16 @@ linear scorer. `normalized_mlp` uses an independent scorer per class:
 uses half of the hidden size, and `scorer_dropout` controls only this evidence
 scorer path.
 
+When `scorer="normalized_mlp"`, `class_gate.evidence_scorer.branch_feature_concat`
+can append branch-side support features to each class evidence embedding before
+scoring. Supported features are:
+
+- `class_gated_branch_logit_features`: the same class-wise branch-logit feature used by the residual path.
+- `top_branch_margin_style`: label-free class-wise `max_r(branch_logit[c] - max_{j != c} branch_logit[j])`.
+
+This path is inference-safe because it does not use true labels. It is rejected
+for `scorer="diagonal"` because diagonal scoring has no extra feature input.
+
 ### Gate Regularization
 
 `gate_entropy_regularization` adds an entropy bonus as a negative loss term:
@@ -283,7 +300,14 @@ teacher gap against the same true-vs-hardest-negative gap from
 the best branch-level true-vs-hardest-negative margin as the teacher signal.
 `teacher_floor_by_label` can set a minimum teacher gap per label, and
 `teacher_gap_cap` can prevent overly large branch margins from dominating the
-evidence scorer update.
+evidence scorer update. `support_weighting` can increase the penalty when
+top-branch support is strong, and `hardness_weighting` can increase the penalty
+when the evidence gap is currently negative. The support signal is detached so
+this loss still updates the evidence path rather than the branch teacher.
+
+`class_evidence_margin.support_weighting` applies the same detached branch
+support multiplier to the class evidence margin. This makes evidence ranking
+errors matter more when at least one branch already provides a strong signal.
 
 `global_residual_anti_veto` limits label-agnostic residual veto behavior. In
 the original `target="global_residual_logits"` mode, it applies only when the
@@ -319,6 +343,13 @@ head. `bad_margin_threshold_by_label` can override the scalar fallback; negative
 thresholds are allowed, so normal can be fixed at a permissive value such as
 `-0.2`. It uses the same `weight_schedule` shape as `gate_branch_regret`, but
 keeps independent values and adaptive state.
+
+`residual_contradiction_regularization` penalizes the raw global residual logits
+when class evidence supports the true class but the residual gap points too far
+against it. It is label-agnostic and uses the same true-vs-hardest-negative
+negative class as the evidence reference. This differs from final-gap anti-veto:
+anti-veto preserves the final logits, while residual contradiction limits the
+raw residual path.
 
 `auto_margin_by_train_stats` and `auto_positive_threshold_by_train_stats` adjust
 these label-wise values from training-epoch statistics only. Validation

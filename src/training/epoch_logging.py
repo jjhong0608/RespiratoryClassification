@@ -269,6 +269,13 @@ def _format_component_line(
     )
     _append_raw_loss_pair(
         parts,
+        "resid_contra",
+        components,
+        raw_key="residual_contradiction_regularization",
+        loss_key="residual_contradiction_regularization_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
         "gate_weighted",
         components,
         raw_key="gate_weighted_branch_margin",

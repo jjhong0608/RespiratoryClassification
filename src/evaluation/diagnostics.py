@@ -119,6 +119,16 @@ def build_diagnostic_rows(
         if output.class_gated_branch_logit_features is not None
         else None
     )
+    class_top_branch_margin_features = (
+        output.class_top_branch_margin_features.detach().cpu()
+        if output.class_top_branch_margin_features is not None
+        else None
+    )
+    class_evidence_scorer_branch_features = (
+        output.class_evidence_scorer_branch_features.detach().cpu()
+        if output.class_evidence_scorer_branch_features is not None
+        else None
+    )
     global_residual_scale = (
         output.global_residual_scale.detach().cpu()
         if output.global_residual_scale is not None
@@ -132,6 +142,21 @@ def build_diagnostic_rows(
     global_residual_effective_scale = (
         output.global_residual_effective_scale.detach().cpu()
         if output.global_residual_effective_scale is not None
+        else None
+    )
+    bounded_global_residual_logits = (
+        output.bounded_global_residual_logits.detach().cpu()
+        if output.bounded_global_residual_logits is not None
+        else None
+    )
+    global_residual_bound = (
+        output.global_residual_bound.detach().cpu()
+        if output.global_residual_bound is not None
+        else None
+    )
+    global_residual_temperature = (
+        output.global_residual_temperature.detach().cpu()
+        if output.global_residual_temperature is not None
         else None
     )
     branch_evidence_norms = (
@@ -182,6 +207,10 @@ def build_diagnostic_rows(
                 row["class_evidence_logits"] = class_evidence_logits[index].tolist()
             if global_residual_logits is not None:
                 row["global_residual_logits"] = global_residual_logits[index].tolist()
+            if bounded_global_residual_logits is not None:
+                row["bounded_global_residual_logits"] = bounded_global_residual_logits[
+                    index
+                ].tolist()
             if class_gated_branch_logits is not None:
                 row["class_gated_branch_logits"] = class_gated_branch_logits[
                     index
@@ -189,6 +218,14 @@ def build_diagnostic_rows(
             if class_gated_branch_logit_features is not None:
                 row["class_gated_branch_logit_features"] = (
                     class_gated_branch_logit_features[index].tolist()
+                )
+            if class_top_branch_margin_features is not None:
+                row["class_top_branch_margin_features"] = (
+                    class_top_branch_margin_features[index].tolist()
+                )
+            if class_evidence_scorer_branch_features is not None:
+                row["class_evidence_scorer_branch_features"] = (
+                    class_evidence_scorer_branch_features[index].tolist()
                 )
             if output.class_gated_branch_logit_feature_mode is not None:
                 row["class_gated_branch_logit_feature_mode"] = (
@@ -268,6 +305,12 @@ def build_diagnostic_rows(
         if global_residual_effective_scale is not None:
             row["global_residual_effective_scale"] = float(
                 global_residual_effective_scale.item()
+            )
+        if global_residual_bound is not None:
+            row["global_residual_bound"] = float(global_residual_bound.item())
+        if global_residual_temperature is not None:
+            row["global_residual_temperature"] = float(
+                global_residual_temperature.item()
             )
         if branch_evidence_norms is not None:
             row["branch_evidence_norms"] = branch_evidence_norms[index].tolist()

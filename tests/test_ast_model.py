@@ -15,6 +15,9 @@ from src.models.model import (
     ClassAwareBranchGatedEvidencePooling,
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
+    ClassGateEvidenceScorerBranchFeatureConcatConfig,
+    ClassGateEvidenceScorerConfig,
+    ClassGateGlobalResidualBoundingConfig,
     ClassGateGlobalResidualConfig,
     ClassGateGlobalResidualWarmupConfig,
     ClassGateMixingConfig,
@@ -807,6 +810,83 @@ def test_class_aware_model_uses_hardest_negative_branch_logit_features() -> None
     )
     assert torch.allclose(output.class_gated_branch_logit_features, expected_features)
     assert output.class_gated_branch_logit_feature_mode == "hardest_negative_margin"
+
+
+def test_class_aware_model_scores_evidence_with_branch_feature_concat_and_bounded_residual() -> (
+    None
+):
+    model = MultiScaleRdtAstModel(
+        _small_model_config(
+            num_classes=3,
+            evidence_pooling=EvidencePoolingConfig(
+                type="class_aware_branch_gated",
+                dropout=0.0,
+                class_gate=ClassGateConfig(
+                    scorer="normalized_mlp",
+                    scorer_hidden_size=16,
+                    scorer_dropout=0.0,
+                    evidence_scorer=ClassGateEvidenceScorerConfig(
+                        branch_feature_concat=(
+                            ClassGateEvidenceScorerBranchFeatureConcatConfig(
+                                enabled=True,
+                                features=(
+                                    "class_gated_branch_logit_features",
+                                    "top_branch_margin_style",
+                                ),
+                                normalize=False,
+                            )
+                        )
+                    ),
+                    global_residual=ClassGateGlobalResidualConfig(
+                        enabled=True,
+                        init_scale=0.4,
+                        learnable=False,
+                        bounding=ClassGateGlobalResidualBoundingConfig(
+                            enabled=True,
+                            bound=0.5,
+                            temperature=2.0,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    model.eval()
+
+    output = model(torch.randn(2, 32, 32))
+
+    assert output.branch_logits is not None
+    assert output.class_evidence_logits is not None
+    assert output.global_residual_logits is not None
+    assert output.bounded_global_residual_logits is not None
+    assert output.class_gated_branch_logit_features is not None
+    assert output.class_top_branch_margin_features is not None
+    assert output.class_evidence_scorer_branch_features is not None
+    assert output.class_evidence_scorer_branch_features.shape == (2, 3, 2)
+    expected_top_branch = model._class_top_branch_margin_features(output.branch_logits)
+    expected_scorer_features = torch.stack(
+        [output.class_gated_branch_logit_features, expected_top_branch],
+        dim=-1,
+    )
+    assert torch.allclose(
+        output.class_top_branch_margin_features,
+        expected_top_branch,
+    )
+    assert torch.allclose(
+        output.class_evidence_scorer_branch_features,
+        expected_scorer_features,
+    )
+    expected_bounded = 0.5 * torch.tanh(output.global_residual_logits / 2.0)
+    assert torch.allclose(output.bounded_global_residual_logits, expected_bounded)
+    assert output.global_residual_bound is not None
+    assert torch.isclose(output.global_residual_bound, torch.tensor(0.5))
+    assert output.global_residual_temperature is not None
+    assert torch.isclose(output.global_residual_temperature, torch.tensor(2.0))
+    assert torch.allclose(
+        output.logits,
+        output.class_evidence_logits + (0.4 * expected_bounded),
+        atol=1e-5,
+    )
 
 
 def test_class_aware_model_fixed_residual_scale_is_not_trainable() -> None:

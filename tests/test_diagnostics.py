@@ -57,9 +57,16 @@ def _class_aware_output() -> AstModelOutput:
         evidence_gate_entropy=torch.tensor([0.61]),
         class_evidence_logits=torch.tensor([[0.2, 0.8, -0.1]]),
         global_residual_logits=torch.tensor([[0.01, 0.02, 0.03]]),
+        bounded_global_residual_logits=torch.tensor([[0.01, 0.02, 0.03]]),
+        global_residual_bound=torch.tensor(1.0),
+        global_residual_temperature=torch.tensor(1.0),
         class_gated_branch_logits=torch.tensor([[0.12, 0.34, 0.56]]),
         class_gated_branch_logit_features=torch.tensor([[-0.44, -0.22, 0.22]]),
         class_gated_branch_logit_feature_mode="hardest_negative_margin",
+        class_top_branch_margin_features=torch.tensor([[0.2, 0.4, 0.6]]),
+        class_evidence_scorer_branch_features=torch.tensor(
+            [[[-0.44, 0.2], [-0.22, 0.4], [0.22, 0.6]]]
+        ),
         class_evidence_gate_weights=torch.tensor(
             [[[0.8, 0.2], [0.25, 0.75], [0.5, 0.5]]]
         ),
@@ -201,6 +208,13 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
         0.019999999552965164,
         0.029999999329447746,
     ]
+    assert row["bounded_global_residual_logits"] == [
+        0.009999999776482582,
+        0.019999999552965164,
+        0.029999999329447746,
+    ]
+    assert row["global_residual_bound"] == pytest.approx(1.0)
+    assert row["global_residual_temperature"] == pytest.approx(1.0)
     assert row["class_gated_branch_logits"] == [
         0.11999999731779099,
         0.3400000035762787,
@@ -212,6 +226,15 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
         0.2199999988079071,
     ]
     assert row["class_gated_branch_logit_feature_mode"] == ("hardest_negative_margin")
+    assert row["class_top_branch_margin_features"] == [
+        0.20000000298023224,
+        0.4000000059604645,
+        0.6000000238418579,
+    ]
+    assert row["class_evidence_scorer_branch_features"][1] == [
+        -0.2199999988079071,
+        0.4000000059604645,
+    ]
     assert row["class_evidence_gate_weights"][1] == [
         0.25,
         0.75,

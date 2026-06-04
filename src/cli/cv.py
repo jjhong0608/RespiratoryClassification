@@ -371,6 +371,9 @@ def main() -> None:
                     branch_to_evidence_teacher_floor_by_class
                 ),
                 global_residual_anti_veto=cfg.train.loss.global_residual_anti_veto,
+                residual_contradiction_regularization=(
+                    cfg.train.loss.residual_contradiction_regularization
+                ),
                 gate_weighted_branch_margin=(
                     cfg.train.loss.gate_weighted_branch_margin
                 ),
