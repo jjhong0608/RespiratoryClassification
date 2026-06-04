@@ -13,9 +13,9 @@ from src.models.model import (
     BranchMilHead,
     BranchMilOutput,
     ClassAwareBranchGatedEvidencePooling,
+    ClassGateBranchFeatureTransformConfig,
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
-    ClassGateEvidenceScorerBranchFeatureConcatConfig,
     ClassGateEvidenceScorerConfig,
     ClassGateGlobalResidualBoundingConfig,
     ClassGateGlobalResidualConfig,
@@ -393,6 +393,42 @@ def test_class_aware_gated_pooling_normalized_mlp_scorer_outputs_logits() -> Non
     assert len(pooler.class_scorers) == 3
     assert pooler.class_scorer_weight is None
     assert pooler.class_scorer_bias is None
+
+
+def test_class_aware_gated_pooling_two_tower_scorer_outputs_logits() -> None:
+    pooler = ClassAwareBranchGatedEvidencePooling(
+        hidden_size=16,
+        num_classes=3,
+        cfg=EvidencePoolingConfig(
+            type="class_aware_branch_gated",
+            dropout=0.0,
+            class_gate=ClassGateConfig(
+                evidence_scorer=ClassGateEvidenceScorerConfig(
+                    type="two_tower_mlp",
+                    embedding_hidden_size=12,
+                    branch_hidden_size=5,
+                    fusion_hidden_size=9,
+                    dropout=0.0,
+                    branch_feature_transform=ClassGateBranchFeatureTransformConfig(
+                        mode="tanh",
+                        temperature=0.5,
+                    ),
+                ),
+            ),
+        ),
+    )
+    class_embeddings = torch.randn(2, 3, 16)
+    branch_features = torch.randn(2, 3, 2)
+
+    logits = pooler.score_class_evidence(class_embeddings, branch_features)
+
+    assert logits.shape == (2, 3)
+    assert pooler.class_embedding_towers is not None
+    assert pooler.class_branch_feature_towers is not None
+    assert pooler.class_fusion_scorers is not None
+    assert len(pooler.class_embedding_towers) == 3
+    assert len(pooler.class_branch_feature_towers) == 3
+    assert len(pooler.class_fusion_scorers) == 3
 
 
 def test_class_aware_gated_pooling_rejects_invalid_class_count() -> None:
@@ -812,7 +848,7 @@ def test_class_aware_model_uses_hardest_negative_branch_logit_features() -> None
     assert output.class_gated_branch_logit_feature_mode == "hardest_negative_margin"
 
 
-def test_class_aware_model_scores_evidence_with_branch_feature_concat_and_bounded_residual() -> (
+def test_class_aware_model_scores_evidence_with_two_tower_and_bounded_residual() -> (
     None
 ):
     model = MultiScaleRdtAstModel(
@@ -822,20 +858,18 @@ def test_class_aware_model_scores_evidence_with_branch_feature_concat_and_bounde
                 type="class_aware_branch_gated",
                 dropout=0.0,
                 class_gate=ClassGateConfig(
-                    scorer="normalized_mlp",
-                    scorer_hidden_size=16,
-                    scorer_dropout=0.0,
                     evidence_scorer=ClassGateEvidenceScorerConfig(
-                        branch_feature_concat=(
-                            ClassGateEvidenceScorerBranchFeatureConcatConfig(
-                                enabled=True,
-                                features=(
-                                    "class_gated_branch_logit_features",
-                                    "top_branch_margin_style",
-                                ),
-                                normalize=False,
+                        type="two_tower_mlp",
+                        embedding_hidden_size=16,
+                        branch_hidden_size=4,
+                        fusion_hidden_size=16,
+                        dropout=0.0,
+                        branch_feature_transform=(
+                            ClassGateBranchFeatureTransformConfig(
+                                mode="tanh",
+                                temperature=2.0,
                             )
-                        )
+                        ),
                     ),
                     global_residual=ClassGateGlobalResidualConfig(
                         enabled=True,
@@ -868,6 +902,7 @@ def test_class_aware_model_scores_evidence_with_branch_feature_concat_and_bounde
         [output.class_gated_branch_logit_features, expected_top_branch],
         dim=-1,
     )
+    expected_scorer_features = torch.tanh(expected_scorer_features / 2.0)
     assert torch.allclose(
         output.class_top_branch_margin_features,
         expected_top_branch,
@@ -875,6 +910,13 @@ def test_class_aware_model_scores_evidence_with_branch_feature_concat_and_bounde
     assert torch.allclose(
         output.class_evidence_scorer_branch_features,
         expected_scorer_features,
+    )
+    assert output.class_evidence_scorer_type == "two_tower_mlp"
+    assert output.class_evidence_scorer_branch_feature_transform_mode == "tanh"
+    assert output.class_evidence_scorer_branch_feature_transform_temperature is not None
+    assert torch.isclose(
+        output.class_evidence_scorer_branch_feature_transform_temperature,
+        torch.tensor(2.0),
     )
     expected_bounded = 0.5 * torch.tanh(output.global_residual_logits / 2.0)
     assert torch.allclose(output.bounded_global_residual_logits, expected_bounded)

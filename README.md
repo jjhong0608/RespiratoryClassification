@@ -144,8 +144,7 @@ The active class-aware gate config lives under
 
 - `mode="query"` uses learnable class queries.
 - `scorer="diagonal"` scores each class-specific evidence embedding with a class-specific diagonal scorer.
-- `scorer="normalized_mlp"` scores each class-specific evidence embedding with a per-class normalized MLP.
-- `evidence_scorer.branch_feature_concat` can append label-free branch support features to the normalized MLP scorer input.
+- `evidence_scorer.type="two_tower_mlp"` scores class evidence with separate embedding and branch-feature towers before fusion.
 - `global_residual.enabled` controls whether the residual classifier contributes to final logits.
 - `global_residual.warmup` can hold residual contribution near zero early and increase it later.
 - `global_residual.bounding` can bound residual logits with `bound * tanh(residual / temperature)` before final-logit fusion.
@@ -252,22 +251,23 @@ target. This binary auxiliary is independent of the main multiclass CE target.
 It is available for `class_aware_branch_gated` and is meant to improve the
 class evidence scorer before the residual classifier dominates.
 
-`class_gate.scorer` controls how class-aware evidence embeddings are converted
-into `class_evidence_logits`. `diagonal` keeps the original class-wise diagonal
-linear scorer. `normalized_mlp` uses an independent scorer per class:
-`LayerNorm -> Linear -> GELU -> Dropout -> Linear`. `scorer_hidden_size=null`
-uses half of the hidden size, and `scorer_dropout` controls only this evidence
-scorer path.
+`class_gate.evidence_scorer.type="two_tower_mlp"` converts class-aware evidence
+embeddings into `class_evidence_logits` with independent per-class towers:
 
-When `scorer="normalized_mlp"`, `class_gate.evidence_scorer.branch_feature_concat`
-can append branch-side support features to each class evidence embedding before
-scoring. Supported features are:
+```text
+embedding_tower: class_evidence_embeddings -> LayerNorm -> Linear -> GELU -> Dropout
+branch_feature_tower: tanh(branch_features / temperature) -> Linear -> GELU -> Dropout
+fusion: concat(embedding_hidden, branch_hidden) -> LayerNorm -> Linear -> GELU -> Dropout -> Linear
+```
+
+The branch tower always receives two label-free features:
 
 - `class_gated_branch_logit_features`: the same class-wise branch-logit feature used by the residual path.
-- `top_branch_margin_style`: label-free class-wise `max_r(branch_logit[c] - max_{j != c} branch_logit[j])`.
+- `top_branch_margin_style`: class-wise `max_r(branch_logit[c] - max_{j != c} branch_logit[j])`.
 
-This path is inference-safe because it does not use true labels. It is rejected
-for `scorer="diagonal"` because diagonal scoring has no extra feature input.
+This path is inference-safe because it does not use true labels. It does not
+class-wise normalize branch features; `branch_feature_transform.mode="tanh"`
+keeps absolute branch support information while bounding the feature scale.
 
 ### Gate Regularization
 

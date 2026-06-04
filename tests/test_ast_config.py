@@ -241,7 +241,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver16"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver17"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.train.loss.type == "cross_entropy"
@@ -252,9 +252,16 @@ def test_retained_repo_configs_load() -> None:
     current_class_gate = (
         current_training_cfg.model.encoder.architecture.evidence_pooling.class_gate
     )
-    assert current_class_gate.scorer == "normalized_mlp"
-    assert current_class_gate.scorer_hidden_size is None
-    assert current_class_gate.scorer_dropout == pytest.approx(0.15)
+    assert current_class_gate.evidence_scorer.type == "two_tower_mlp"
+    assert current_class_gate.evidence_scorer.embedding_hidden_size == 512
+    assert current_class_gate.evidence_scorer.branch_hidden_size == 64
+    assert current_class_gate.evidence_scorer.fusion_hidden_size == 512
+    assert current_class_gate.evidence_scorer.dropout == pytest.approx(0.05)
+    assert current_class_gate.evidence_scorer.branch_feature_transform.mode == "tanh"
+    assert (
+        current_class_gate.evidence_scorer.branch_feature_transform.temperature
+        == pytest.approx(1.0)
+    )
     assert (
         current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.enabled
         is True
@@ -502,51 +509,71 @@ def test_explicit_evidence_pooling_configs_load(tmp_path: Path) -> None:
     assert class_gate.global_residual.warmup.end_multiplier == 1.0
     assert class_gate.evidence_auxiliary.enabled is False
     assert class_gate.evidence_auxiliary.weight == 0.1
-    assert class_gate.evidence_scorer.branch_feature_concat.enabled is False
-    assert class_gate.evidence_scorer.branch_feature_concat.features == ()
-    assert class_gate.evidence_scorer.branch_feature_concat.normalize is True
+    assert class_gate.evidence_scorer.type == "embedding_mlp"
+    assert class_gate.evidence_scorer.embedding_hidden_size == 512
+    assert class_gate.evidence_scorer.branch_hidden_size == 64
+    assert class_gate.evidence_scorer.fusion_hidden_size == 512
+    assert class_gate.evidence_scorer.dropout == pytest.approx(0.05)
+    assert class_gate.evidence_scorer.branch_feature_transform.mode == "tanh"
+    assert (
+        class_gate.evidence_scorer.branch_feature_transform.temperature
+        == pytest.approx(1.0)
+    )
     assert class_gate.branch_logit_feature.mode == "raw"
     assert class_gate.gate_mixing.enabled is False
 
 
-def test_class_aware_normalized_mlp_scorer_config_loads(tmp_path: Path) -> None:
-    payload = _class_aware_cross_entropy_payload()
-    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
-        "class_gate"
-    ]
-    class_gate["scorer"] = "normalized_mlp"
-    class_gate["scorer_hidden_size"] = 24
-    class_gate["scorer_dropout"] = 0.2
-    config_path = _write_json(tmp_path / "normalized_mlp_scorer.json", payload)
-
-    cfg = JsonConfigLoader.load_training(config_path)
-
-    loaded = cfg.model.encoder.architecture.evidence_pooling.class_gate
-    assert loaded.scorer == "normalized_mlp"
-    assert loaded.scorer_hidden_size == 24
-    assert loaded.scorer_dropout == pytest.approx(0.2)
-    assert loaded.gate_mixing.mode == "uniform_to_learned"
-    assert loaded.gate_mixing.start_alpha == 1.0
-    assert loaded.gate_mixing.end_alpha == 0.0
-
-
-def test_class_aware_evidence_scorer_branch_feature_concat_and_bounding_load(
+def test_class_aware_two_tower_evidence_scorer_config_loads(
     tmp_path: Path,
 ) -> None:
     payload = _class_aware_cross_entropy_payload()
     class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
         "class_gate"
     ]
-    class_gate["scorer"] = "normalized_mlp"
     class_gate["evidence_scorer"] = {
-        "branch_feature_concat": {
-            "enabled": True,
-            "features": [
-                "class_gated_branch_logit_features",
-                "top_branch_margin_style",
-            ],
-            "normalize": False,
-        }
+        "type": "two_tower_mlp",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "dropout": 0.2,
+        "branch_feature_transform": {
+            "mode": "tanh",
+            "temperature": 0.75,
+        },
+    }
+    config_path = _write_json(tmp_path / "two_tower_scorer.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    loaded = cfg.model.encoder.architecture.evidence_pooling.class_gate
+    assert loaded.evidence_scorer.type == "two_tower_mlp"
+    assert loaded.evidence_scorer.embedding_hidden_size == 32
+    assert loaded.evidence_scorer.branch_hidden_size == 8
+    assert loaded.evidence_scorer.fusion_hidden_size == 24
+    assert loaded.evidence_scorer.dropout == pytest.approx(0.2)
+    assert loaded.evidence_scorer.branch_feature_transform.mode == "tanh"
+    assert loaded.evidence_scorer.branch_feature_transform.temperature == pytest.approx(
+        0.75
+    )
+    assert loaded.gate_mixing.mode == "uniform_to_learned"
+    assert loaded.gate_mixing.start_alpha == 1.0
+    assert loaded.gate_mixing.end_alpha == 0.0
+
+
+def test_class_aware_two_tower_evidence_scorer_and_bounding_load(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "two_tower_mlp",
+        "embedding_hidden_size": 512,
+        "branch_hidden_size": 64,
+        "fusion_hidden_size": 512,
+        "dropout": 0.05,
+        "branch_feature_transform": {"mode": "tanh", "temperature": 1.0},
     }
     class_gate["global_residual"]["bounding"] = {
         "enabled": True,
@@ -561,38 +588,36 @@ def test_class_aware_evidence_scorer_branch_feature_concat_and_bounding_load(
     cfg = JsonConfigLoader.load_training(config_path)
 
     loaded = cfg.model.encoder.architecture.evidence_pooling.class_gate
-    concat = loaded.evidence_scorer.branch_feature_concat
-    assert concat.enabled is True
-    assert concat.features == (
-        "class_gated_branch_logit_features",
-        "top_branch_margin_style",
-    )
-    assert concat.normalize is False
+    assert loaded.evidence_scorer.type == "two_tower_mlp"
+    assert loaded.evidence_scorer.embedding_hidden_size == 512
+    assert loaded.evidence_scorer.branch_hidden_size == 64
+    assert loaded.evidence_scorer.fusion_hidden_size == 512
     assert loaded.global_residual.bounding.enabled is True
     assert loaded.global_residual.bounding.bound == pytest.approx(1.0)
     assert loaded.global_residual.bounding.temperature == pytest.approx(0.75)
 
 
-def test_class_aware_evidence_scorer_concat_requires_normalized_mlp(
+def test_class_aware_two_tower_evidence_scorer_rejects_invalid_transform(
     tmp_path: Path,
 ) -> None:
     payload = _class_aware_cross_entropy_payload()
     class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
         "class_gate"
     ]
-    class_gate["scorer"] = "diagonal"
     class_gate["evidence_scorer"] = {
-        "branch_feature_concat": {
-            "enabled": True,
-            "features": ["top_branch_margin_style"],
-        }
+        "type": "two_tower_mlp",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "dropout": 0.0,
+        "branch_feature_transform": {"mode": "identity", "temperature": 1.0},
     }
     config_path = _write_json(
-        tmp_path / "bad_diagonal_evidence_scorer_branch_features.json",
+        tmp_path / "bad_two_tower_transform.json",
         payload,
     )
 
-    with pytest.raises(ValueError, match="branch_feature_concat requires"):
+    with pytest.raises(ValueError, match="branch_feature_transform.mode"):
         JsonConfigLoader.load_training(config_path)
 
 
@@ -795,6 +820,43 @@ def test_load_multiclass_training_config_requires_cross_entropy(tmp_path: Path) 
         (("class_gate", "scorer_hidden_size"), "32", "scorer_hidden_size"),
         (("class_gate", "scorer_dropout"), 1.0, "scorer_dropout"),
         (("class_gate", "scorer_dropout"), "0.1", "scorer_dropout"),
+        (("class_gate", "evidence_scorer", "type"), "concat", "evidence_scorer.type"),
+        (
+            ("class_gate", "evidence_scorer", "embedding_hidden_size"),
+            0,
+            "embedding_hidden_size",
+        ),
+        (
+            ("class_gate", "evidence_scorer", "branch_hidden_size"),
+            "64",
+            "branch_hidden_size",
+        ),
+        (
+            ("class_gate", "evidence_scorer", "fusion_hidden_size"),
+            0,
+            "fusion_hidden_size",
+        ),
+        (("class_gate", "evidence_scorer", "dropout"), 1.0, "evidence_scorer.dropout"),
+        (
+            (
+                "class_gate",
+                "evidence_scorer",
+                "branch_feature_transform",
+                "mode",
+            ),
+            "identity",
+            "branch_feature_transform.mode",
+        ),
+        (
+            (
+                "class_gate",
+                "evidence_scorer",
+                "branch_feature_transform",
+                "temperature",
+            ),
+            0.0,
+            "branch_feature_transform.temperature",
+        ),
         (
             ("class_gate", "global_residual", "enabled"),
             "yes",
@@ -881,6 +943,18 @@ def test_invalid_class_aware_evidence_pooling_config_is_rejected(
         "hold_epochs": 0,
         "decay_epochs": 0,
     }
+    if "evidence_scorer" in path:
+        evidence_pooling["class_gate"]["evidence_scorer"] = {
+            "type": "two_tower_mlp",
+            "embedding_hidden_size": 512,
+            "branch_hidden_size": 64,
+            "fusion_hidden_size": 512,
+            "dropout": 0.05,
+            "branch_feature_transform": {
+                "mode": "tanh",
+                "temperature": 1.0,
+            },
+        }
     payload["model"]["encoder"]["architecture"]["evidence_pooling"] = evidence_pooling
     target: dict = evidence_pooling
     for key in path[:-1]:

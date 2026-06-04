@@ -67,6 +67,9 @@ def _class_aware_output() -> AstModelOutput:
         class_evidence_scorer_branch_features=torch.tensor(
             [[[-0.44, 0.2], [-0.22, 0.4], [0.22, 0.6]]]
         ),
+        class_evidence_scorer_type="two_tower_mlp",
+        class_evidence_scorer_branch_feature_transform_mode="tanh",
+        class_evidence_scorer_branch_feature_transform_temperature=torch.tensor(1.0),
         class_evidence_gate_weights=torch.tensor(
             [[[0.8, 0.2], [0.25, 0.75], [0.5, 0.5]]]
         ),
@@ -235,6 +238,9 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
         -0.2199999988079071,
         0.4000000059604645,
     ]
+    assert row["class_evidence_scorer_type"] == "two_tower_mlp"
+    assert row["class_evidence_scorer_branch_feature_transform_mode"] == "tanh"
+    assert row["class_evidence_scorer_branch_feature_transform_temperature"] == 1.0
     assert row["class_evidence_gate_weights"][1] == [
         0.25,
         0.75,

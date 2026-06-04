@@ -10,10 +10,10 @@ from src.evaluation.thresholds import ThresholdOptimizationConfig
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassGateBranchFeatureTransformConfig,
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
     ClassGateEvidenceAuxiliaryConfig,
-    ClassGateEvidenceScorerBranchFeatureConcatConfig,
     ClassGateEvidenceScorerConfig,
     ClassGateGlobalResidualBoundingConfig,
     ClassGateGlobalResidualConfig,
@@ -715,11 +715,9 @@ class JsonConfigLoader:
     _EVIDENCE_POOLING_TYPES = {"mean", "branch_gated", "class_aware_branch_gated"}
     _CLASS_GATE_MODES = {"query"}
     _CLASS_GATE_SCORERS = {"diagonal", "normalized_mlp"}
+    _CLASS_GATE_EVIDENCE_SCORER_TYPES = {"embedding_mlp", "two_tower_mlp"}
+    _CLASS_GATE_BRANCH_FEATURE_TRANSFORM_MODES = {"tanh"}
     _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
-    _CLASS_GATE_EVIDENCE_SCORER_BRANCH_FEATURES = {
-        "class_gated_branch_logit_features",
-        "top_branch_margin_style",
-    }
     _CLASS_GATE_MIXING_MODES = {"uniform_to_learned"}
     _GLOBAL_RESIDUAL_WARMUP_MODES = {"zero_to_learned"}
     _MARGIN_SUPPORT_WEIGHTING_SOURCES = {"top_branch_margin"}
@@ -1564,55 +1562,68 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "scorer_dropout must be within [0, 1)"
             )
-        branch_feature_concat = class_gate.evidence_scorer.branch_feature_concat
-        if not isinstance(branch_feature_concat.enabled, bool):
-            raise TypeError(
-                "model.encoder.architecture.evidence_pooling.class_gate."
-                "evidence_scorer.branch_feature_concat.enabled must be a boolean"
-            )
-        if branch_feature_concat.enabled and class_gate.scorer != "normalized_mlp":
+        evidence_scorer = class_gate.evidence_scorer
+        if (
+            evidence_scorer.type
+            not in JsonConfigLoader._CLASS_GATE_EVIDENCE_SCORER_TYPES
+        ):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
-                "evidence_scorer.branch_feature_concat requires "
-                "class_gate.scorer='normalized_mlp'"
+                "evidence_scorer.type must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_EVIDENCE_SCORER_TYPES)}"
             )
-        if not isinstance(branch_feature_concat.features, Sequence) or isinstance(
-            branch_feature_concat.features,
-            (str, bytes),
+        for field_name in (
+            "embedding_hidden_size",
+            "branch_hidden_size",
+            "fusion_hidden_size",
+        ):
+            value = getattr(evidence_scorer, field_name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.{field_name} must be an integer"
+                )
+            if value <= 0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.{field_name} must be greater than zero"
+                )
+        if isinstance(evidence_scorer.dropout, bool) or not isinstance(
+            evidence_scorer.dropout,
+            int | float,
         ):
             raise TypeError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
-                "evidence_scorer.branch_feature_concat.features must be a list"
+                "evidence_scorer.dropout must be numeric"
             )
-        if branch_feature_concat.enabled and not branch_feature_concat.features:
+        if not (0.0 <= float(evidence_scorer.dropout) < 1.0):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
-                "evidence_scorer.branch_feature_concat.features must not be "
-                "empty when enabled"
+                "evidence_scorer.dropout must be within [0, 1)"
             )
-        seen_scorer_features: set[str] = set()
-        for feature_name in branch_feature_concat.features:
-            if (
-                feature_name
-                not in JsonConfigLoader._CLASS_GATE_EVIDENCE_SCORER_BRANCH_FEATURES
-            ):
-                raise ValueError(
-                    "model.encoder.architecture.evidence_pooling.class_gate."
-                    "evidence_scorer.branch_feature_concat.features must contain "
-                    "only "
-                    f"{sorted(JsonConfigLoader._CLASS_GATE_EVIDENCE_SCORER_BRANCH_FEATURES)}"
-                )
-            if feature_name in seen_scorer_features:
-                raise ValueError(
-                    "model.encoder.architecture.evidence_pooling.class_gate."
-                    "evidence_scorer.branch_feature_concat.features must not "
-                    "contain duplicates"
-                )
-            seen_scorer_features.add(feature_name)
-        if not isinstance(branch_feature_concat.normalize, bool):
+        transform = evidence_scorer.branch_feature_transform
+        if (
+            transform.mode
+            not in JsonConfigLoader._CLASS_GATE_BRANCH_FEATURE_TRANSFORM_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_feature_transform.mode must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_BRANCH_FEATURE_TRANSFORM_MODES)}"
+            )
+        if isinstance(transform.temperature, bool) or not isinstance(
+            transform.temperature,
+            int | float,
+        ):
             raise TypeError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
-                "evidence_scorer.branch_feature_concat.normalize must be a boolean"
+                "evidence_scorer.branch_feature_transform.temperature must be numeric"
+            )
+        if float(transform.temperature) <= 0.0:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_feature_transform.temperature must be "
+                "greater than zero"
             )
         if (
             class_gate.branch_logit_feature.mode
@@ -3345,17 +3356,10 @@ class JsonConfigLoader:
         )
         class_gate["global_residual"] = ClassGateGlobalResidualConfig(**global_residual)
         evidence_scorer = dict(class_gate.get("evidence_scorer", {}))
-        branch_feature_concat = dict(evidence_scorer.get("branch_feature_concat", {}))
-        if isinstance(
-            branch_feature_concat.get("features"),
-            Sequence,
-        ) and not isinstance(
-            branch_feature_concat.get("features"),
-            str | bytes,
-        ):
-            branch_feature_concat["features"] = tuple(branch_feature_concat["features"])
-        evidence_scorer["branch_feature_concat"] = (
-            ClassGateEvidenceScorerBranchFeatureConcatConfig(**branch_feature_concat)
+        evidence_scorer["branch_feature_transform"] = (
+            ClassGateBranchFeatureTransformConfig(
+                **dict(evidence_scorer.get("branch_feature_transform", {}))
+            )
         )
         class_gate["evidence_scorer"] = ClassGateEvidenceScorerConfig(**evidence_scorer)
         class_gate["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(

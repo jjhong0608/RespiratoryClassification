@@ -7,10 +7,10 @@ import torch
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassGateBranchFeatureTransformConfig,
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
     ClassGateEvidenceAuxiliaryConfig,
-    ClassGateEvidenceScorerBranchFeatureConcatConfig,
     ClassGateEvidenceScorerConfig,
     ClassGateGlobalResidualBoundingConfig,
     ClassGateGlobalResidualConfig,
@@ -135,19 +135,17 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
         **global_residual_kwargs
     )
     evidence_scorer_kwargs = dict(evidence_scorer_raw)
-    branch_feature_concat_raw = evidence_scorer_kwargs.get("branch_feature_concat", {})
-    if not isinstance(branch_feature_concat_raw, Mapping):
+    branch_feature_transform_raw = evidence_scorer_kwargs.get(
+        "branch_feature_transform",
+        {},
+    )
+    if not isinstance(branch_feature_transform_raw, Mapping):
         raise TypeError(
             "model_cfg.encoder.architecture.evidence_pooling.class_gate."
-            "evidence_scorer.branch_feature_concat must be a dict"
+            "evidence_scorer.branch_feature_transform must be a dict"
         )
-    branch_feature_concat_kwargs = dict(branch_feature_concat_raw)
-    if isinstance(branch_feature_concat_kwargs.get("features"), list | tuple):
-        branch_feature_concat_kwargs["features"] = tuple(
-            branch_feature_concat_kwargs["features"]
-        )
-    evidence_scorer_kwargs["branch_feature_concat"] = (
-        ClassGateEvidenceScorerBranchFeatureConcatConfig(**branch_feature_concat_kwargs)
+    evidence_scorer_kwargs["branch_feature_transform"] = (
+        ClassGateBranchFeatureTransformConfig(**dict(branch_feature_transform_raw))
     )
     class_gate_kwargs["evidence_scorer"] = ClassGateEvidenceScorerConfig(
         **evidence_scorer_kwargs

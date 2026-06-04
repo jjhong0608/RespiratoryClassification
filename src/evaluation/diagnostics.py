@@ -129,6 +129,11 @@ def build_diagnostic_rows(
         if output.class_evidence_scorer_branch_features is not None
         else None
     )
+    class_evidence_scorer_branch_feature_transform_temperature = (
+        output.class_evidence_scorer_branch_feature_transform_temperature.detach().cpu()
+        if output.class_evidence_scorer_branch_feature_transform_temperature is not None
+        else None
+    )
     global_residual_scale = (
         output.global_residual_scale.detach().cpu()
         if output.global_residual_scale is not None
@@ -226,6 +231,18 @@ def build_diagnostic_rows(
             if class_evidence_scorer_branch_features is not None:
                 row["class_evidence_scorer_branch_features"] = (
                     class_evidence_scorer_branch_features[index].tolist()
+                )
+            if output.class_evidence_scorer_type is not None:
+                row["class_evidence_scorer_type"] = output.class_evidence_scorer_type
+            if output.class_evidence_scorer_branch_feature_transform_mode is not None:
+                row["class_evidence_scorer_branch_feature_transform_mode"] = (
+                    output.class_evidence_scorer_branch_feature_transform_mode
+                )
+            if class_evidence_scorer_branch_feature_transform_temperature is not None:
+                row["class_evidence_scorer_branch_feature_transform_temperature"] = (
+                    float(
+                        class_evidence_scorer_branch_feature_transform_temperature.item()
+                    )
                 )
             if output.class_gated_branch_logit_feature_mode is not None:
                 row["class_gated_branch_logit_feature_mode"] = (

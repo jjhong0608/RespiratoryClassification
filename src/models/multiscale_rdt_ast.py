@@ -125,22 +125,20 @@ class ClassGateBranchLogitFeatureConfig:
 
 
 @dataclass(frozen=True)
-class ClassGateEvidenceScorerBranchFeatureConcatConfig:
-    enabled: bool = False
-    features: tuple[
-        Literal[
-            "class_gated_branch_logit_features",
-            "top_branch_margin_style",
-        ],
-        ...,
-    ] = ()
-    normalize: bool = True
+class ClassGateBranchFeatureTransformConfig:
+    mode: Literal["tanh"] = "tanh"
+    temperature: float = 1.0
 
 
 @dataclass(frozen=True)
 class ClassGateEvidenceScorerConfig:
-    branch_feature_concat: ClassGateEvidenceScorerBranchFeatureConcatConfig = field(
-        default_factory=ClassGateEvidenceScorerBranchFeatureConcatConfig
+    type: Literal["embedding_mlp", "two_tower_mlp"] = "embedding_mlp"
+    embedding_hidden_size: int = 512
+    branch_hidden_size: int = 64
+    fusion_hidden_size: int = 512
+    dropout: float = 0.05
+    branch_feature_transform: ClassGateBranchFeatureTransformConfig = field(
+        default_factory=ClassGateBranchFeatureTransformConfig
     )
 
 
@@ -286,6 +284,9 @@ class AstModelOutput:
     class_gated_branch_logit_feature_mode: str | None = None
     class_top_branch_margin_features: Tensor | None = None
     class_evidence_scorer_branch_features: Tensor | None = None
+    class_evidence_scorer_type: str | None = None
+    class_evidence_scorer_branch_feature_transform_mode: str | None = None
+    class_evidence_scorer_branch_feature_transform_temperature: Tensor | None = None
     global_residual_scale: Tensor | None = None
     global_residual_schedule_multiplier: Tensor | None = None
     global_residual_effective_scale: Tensor | None = None
@@ -534,9 +535,9 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         self.class_gate_scorer = cfg.class_gate.scorer
         self.gate_mixing = cfg.class_gate.gate_mixing
         self.evidence_scorer_cfg = cfg.class_gate.evidence_scorer
-        branch_feature_concat = self.evidence_scorer_cfg.branch_feature_concat
+        self.evidence_scorer_type = self.evidence_scorer_cfg.type
         self.scorer_branch_feature_count = (
-            len(branch_feature_concat.features) if branch_feature_concat.enabled else 0
+            2 if self.evidence_scorer_type == "two_tower_mlp" else 0
         )
         self._runtime_epoch: int | None = None
         gate_hidden_size = cfg.gate_hidden_size or max(hidden_size // 2, 1)
@@ -551,17 +552,68 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         self.class_scorer_weight: nn.Parameter | None
         self.class_scorer_bias: nn.Parameter | None
         self.class_scorers: nn.ModuleList | None
-        if self.class_gate_scorer == "diagonal":
-            if self.scorer_branch_feature_count > 0:
-                raise ValueError(
-                    "class_gate.evidence_scorer.branch_feature_concat requires "
-                    "class_gate.scorer='normalized_mlp'"
-                )
+        self.class_embedding_towers: nn.ModuleList | None
+        self.class_branch_feature_towers: nn.ModuleList | None
+        self.class_fusion_scorers: nn.ModuleList | None
+        if self.evidence_scorer_type == "two_tower_mlp":
+            self.class_scorer_weight = None
+            self.class_scorer_bias = None
+            self.class_scorers = None
+            self.class_embedding_towers = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.LayerNorm(hidden_size),
+                        nn.Linear(
+                            hidden_size,
+                            self.evidence_scorer_cfg.embedding_hidden_size,
+                        ),
+                        nn.GELU(),
+                        nn.Dropout(self.evidence_scorer_cfg.dropout),
+                    )
+                    for _ in range(num_classes)
+                ]
+            )
+            self.class_branch_feature_towers = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(
+                            self.scorer_branch_feature_count,
+                            self.evidence_scorer_cfg.branch_hidden_size,
+                        ),
+                        nn.GELU(),
+                        nn.Dropout(self.evidence_scorer_cfg.dropout),
+                    )
+                    for _ in range(num_classes)
+                ]
+            )
+            fusion_input_size = (
+                self.evidence_scorer_cfg.embedding_hidden_size
+                + self.evidence_scorer_cfg.branch_hidden_size
+            )
+            self.class_fusion_scorers = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.LayerNorm(fusion_input_size),
+                        nn.Linear(
+                            fusion_input_size,
+                            self.evidence_scorer_cfg.fusion_hidden_size,
+                        ),
+                        nn.GELU(),
+                        nn.Dropout(self.evidence_scorer_cfg.dropout),
+                        nn.Linear(self.evidence_scorer_cfg.fusion_hidden_size, 1),
+                    )
+                    for _ in range(num_classes)
+                ]
+            )
+        elif self.class_gate_scorer == "diagonal":
             self.class_scorer_weight = nn.Parameter(
                 torch.empty(num_classes, hidden_size)
             )
             self.class_scorer_bias = nn.Parameter(torch.zeros(num_classes))
             self.class_scorers = None
+            self.class_embedding_towers = None
+            self.class_branch_feature_towers = None
+            self.class_fusion_scorers = None
         elif self.class_gate_scorer == "normalized_mlp":
             scorer_hidden_size = cfg.class_gate.scorer_hidden_size or max(
                 hidden_size // 2,
@@ -582,6 +634,9 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                     for _ in range(num_classes)
                 ]
             )
+            self.class_embedding_towers = None
+            self.class_branch_feature_towers = None
+            self.class_fusion_scorers = None
         else:
             raise ValueError(
                 "class_aware_branch_gated class_gate.scorer must be 'diagonal' "
@@ -609,6 +664,41 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         class_evidence_embeddings: Tensor,
         branch_feature_inputs: Tensor | None = None,
     ) -> Tensor:
+        if self.evidence_scorer_type == "two_tower_mlp":
+            if branch_feature_inputs is None:
+                raise ValueError(
+                    "two_tower_mlp evidence scorer requires branch_feature_inputs"
+                )
+            expected_shape = (
+                class_evidence_embeddings.shape[0],
+                class_evidence_embeddings.shape[1],
+                self.scorer_branch_feature_count,
+            )
+            if tuple(branch_feature_inputs.shape) != expected_shape:
+                raise ValueError(
+                    "branch_feature_inputs must have shape "
+                    f"{expected_shape}, got {tuple(branch_feature_inputs.shape)}"
+                )
+            if (
+                self.class_embedding_towers is None
+                or self.class_branch_feature_towers is None
+                or self.class_fusion_scorers is None
+            ):
+                raise RuntimeError("two_tower_mlp class scorers are not initialized")
+            logits = []
+            for class_index in range(self.num_classes):
+                embedding_hidden = self.class_embedding_towers[class_index](
+                    class_evidence_embeddings[:, class_index, :]
+                )
+                branch_hidden = self.class_branch_feature_towers[class_index](
+                    branch_feature_inputs[:, class_index, :]
+                )
+                fusion_input = torch.cat([embedding_hidden, branch_hidden], dim=-1)
+                logits.append(
+                    self.class_fusion_scorers[class_index](fusion_input).squeeze(-1)
+                )
+            return torch.stack(logits, dim=1)
+
         scorer_input = class_evidence_embeddings
         if self.scorer_branch_feature_count > 0:
             if branch_feature_inputs is None:
@@ -1452,22 +1542,23 @@ class MultiScaleRdtAstModel(nn.Module):
         class_top_branch_margin_features: Tensor,
     ) -> Tensor | None:
         class_gate = self.cfg.encoder.architecture.evidence_pooling.class_gate
-        feature_cfg = class_gate.evidence_scorer.branch_feature_concat
-        if not feature_cfg.enabled:
+        evidence_scorer = class_gate.evidence_scorer
+        if evidence_scorer.type != "two_tower_mlp":
             return None
-        feature_map = {
-            "class_gated_branch_logit_features": class_gated_branch_logit_features,
-            "top_branch_margin_style": class_top_branch_margin_features,
-        }
-        features = [feature_map[name] for name in feature_cfg.features]
-        stacked = torch.stack(features, dim=-1)
-        if not feature_cfg.normalize:
-            return stacked
-        mean = stacked.mean(dim=1, keepdim=True)
-        std = stacked.std(dim=1, keepdim=True, unbiased=False).clamp_min(
-            torch.finfo(stacked.dtype).eps
+        stacked = torch.stack(
+            [
+                class_gated_branch_logit_features,
+                class_top_branch_margin_features,
+            ],
+            dim=-1,
         )
-        return (stacked - mean) / std
+        transform = evidence_scorer.branch_feature_transform
+        if transform.mode != "tanh":
+            raise ValueError(
+                "Unsupported class evidence branch feature transform mode: "
+                f"{transform.mode}"
+            )
+        return torch.tanh(stacked / float(transform.temperature))
 
     def _global_residual_schedule_multiplier(self) -> float:
         residual_cfg = (
@@ -1790,6 +1881,19 @@ class MultiScaleRdtAstModel(nn.Module):
             class_top_branch_margin_features=class_top_branch_margin_features,
             class_evidence_scorer_branch_features=(
                 class_evidence_scorer_branch_features
+            ),
+            class_evidence_scorer_type=(
+                self.cfg.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.type
+            ),
+            class_evidence_scorer_branch_feature_transform_mode=(
+                self.cfg.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_feature_transform.mode
+            ),
+            class_evidence_scorer_branch_feature_transform_temperature=torch.tensor(
+                float(
+                    self.cfg.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_feature_transform.temperature
+                ),
+                device=logits.device,
+                dtype=logits.dtype,
             ),
             global_residual_scale=global_residual_scale,
             global_residual_schedule_multiplier=global_residual_schedule_multiplier,
