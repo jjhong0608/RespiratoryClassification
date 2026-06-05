@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 import torch
+import torch.nn.functional as F
 from src.cli.cv import main as cv_main
 from src.cli.evaluate import evaluate_checkpoint
 from src.data.loaders import ClipBatch, build_clip_loader, build_dataset
@@ -287,8 +288,15 @@ def _trainer_cfg(
     branch_to_evidence_source: Literal[
         "class_gated_branch_logits",
         "top_branch_margin",
+        "class_top_branch_margin_features",
     ] = "class_gated_branch_logits",
+    branch_to_evidence_mode: Literal[
+        "true_vs_hardest_negative",
+        "teacher_distribution_kl",
+    ] = "true_vs_hardest_negative",
     branch_to_evidence_teacher_detach: bool = True,
+    branch_to_evidence_teacher_temperature: float = 1.0,
+    branch_to_evidence_student_temperature: float = 1.0,
     branch_to_evidence_teacher_gap_cap: float | None = None,
     branch_to_evidence_teacher_floor_by_class: tuple[float, ...] | None = None,
     branch_to_evidence_tolerance: float = 0.0,
@@ -483,8 +491,10 @@ def _trainer_cfg(
                 weight=branch_to_evidence_weight,
                 target="class_evidence_logits",
                 source=branch_to_evidence_source,
-                mode="true_vs_hardest_negative",
+                mode=branch_to_evidence_mode,
                 teacher_detach=branch_to_evidence_teacher_detach,
+                teacher_temperature=branch_to_evidence_teacher_temperature,
+                student_temperature=branch_to_evidence_student_temperature,
                 teacher_gap_cap=branch_to_evidence_teacher_gap_cap,
                 tolerance=branch_to_evidence_tolerance,
                 class_weighted=branch_to_evidence_class_weighted,
@@ -2344,6 +2354,129 @@ def test_trainer_branch_to_evidence_consistency_applies_support_and_hardness_wei
     assert evidence_logits.grad is not None
 
 
+def test_trainer_branch_to_evidence_teacher_distribution_kl() -> None:
+    teacher_logits = torch.tensor(
+        [[1.2, 0.2, -0.4], [0.1, 1.1, 0.3]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    evidence_logits = torch.tensor(
+        [[0.5, 0.3, -0.2], [0.4, 0.2, 0.8]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.0, 2.0, 3.0),
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.1,
+            branch_to_evidence_source="class_top_branch_margin_features",
+            branch_to_evidence_mode="teacher_distribution_kl",
+            branch_to_evidence_teacher_detach=True,
+            branch_to_evidence_teacher_temperature=0.7,
+            branch_to_evidence_student_temperature=1.0,
+            branch_to_evidence_class_weighted=True,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=evidence_logits,
+        class_top_branch_margin_features=teacher_logits,
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_loss, weighted_loss = (
+        trainer._compute_branch_to_evidence_ranking_consistency_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+
+    teacher_probs = F.softmax(teacher_logits.detach() / 0.7, dim=-1)
+    student_log_probs = F.log_softmax(evidence_logits / 1.0, dim=-1)
+    per_sample = F.kl_div(
+        student_log_probs,
+        teacher_probs,
+        reduction="none",
+    ).sum(dim=-1)
+    expected_raw = (per_sample * torch.tensor([1.0, 2.0])).mean()
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.1 * expected_raw)
+    weighted_loss.backward()
+    assert teacher_logits.grad is None
+    assert evidence_logits.grad is not None
+
+
+def test_trainer_branch_to_evidence_teacher_distribution_kl_warmup_returns_zero() -> (
+    None
+):
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.1,
+            branch_to_evidence_source="class_top_branch_margin_features",
+            branch_to_evidence_mode="teacher_distribution_kl",
+            branch_to_evidence_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        class_evidence_logits=torch.tensor([[0.1, 0.0, 0.2]], dtype=torch.float32),
+        class_top_branch_margin_features=torch.tensor(
+            [[0.3, 0.2, 0.1]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    raw_loss, weighted_loss = (
+        trainer._compute_branch_to_evidence_ranking_consistency_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+
+    assert torch.isclose(raw_loss, torch.tensor(0.0))
+    assert torch.isclose(weighted_loss, torch.tensor(0.0))
+
+
+def test_trainer_branch_to_evidence_teacher_distribution_kl_requires_teacher() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.1,
+            branch_to_evidence_source="class_top_branch_margin_features",
+            branch_to_evidence_mode="teacher_distribution_kl",
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        class_evidence_logits=torch.tensor([[0.1, 0.0, 0.2]], dtype=torch.float32),
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="class_top_branch_margin_features"):
+        trainer._compute_branch_to_evidence_ranking_consistency_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+
+
 def test_trainer_global_residual_anti_veto_filters_by_evidence_confidence() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -3438,6 +3571,58 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
     assert row["global_residual_anti_veto_residual_gap"] == pytest.approx(-0.8)
     assert row["global_residual_anti_veto_eligible"] is True
     assert row["global_residual_anti_veto_penalty"] == pytest.approx(0.3)
+
+
+def test_trainer_branch_objective_diagnostics_include_b2e_kl_fields() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.1,
+            branch_to_evidence_source="class_top_branch_margin_features",
+            branch_to_evidence_mode="teacher_distribution_kl",
+            branch_to_evidence_teacher_temperature=0.7,
+            branch_to_evidence_student_temperature=1.0,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=torch.tensor(
+            [[[0.8, 0.6, 0.5], [0.4, 0.7, 0.2]]],
+            dtype=torch.float32,
+        ),
+        class_evidence_logits=torch.tensor(
+            [[0.4, 0.55, 0.2]],
+            dtype=torch.float32,
+        ),
+        class_top_branch_margin_features=torch.tensor(
+            [[0.2, 0.3, -0.1]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([1], dtype=torch.long)
+
+    rows = trainer._branch_objective_diagnostic_rows(output, labels, epoch=1)
+
+    row = rows[0]
+    assert row["branch_to_evidence_mode"] == "teacher_distribution_kl"
+    assert row["branch_to_evidence_source"] == "class_top_branch_margin_features"
+    assert row["branch_to_evidence_teacher_temperature"] == pytest.approx(0.7)
+    assert row["branch_to_evidence_student_temperature"] == pytest.approx(1.0)
+    assert len(row["branch_to_evidence_teacher_probs"]) == 3
+    assert len(row["branch_to_evidence_student_probs"]) == 3
+    assert row["branch_to_evidence_teacher_top_class"] == 1
+    assert row["branch_to_evidence_student_top_class"] == 1
+    assert row["branch_to_evidence_true_teacher_prob"] == pytest.approx(
+        row["branch_to_evidence_teacher_probs"][1]
+    )
+    assert row["branch_to_evidence_true_student_prob"] == pytest.approx(
+        row["branch_to_evidence_student_probs"][1]
+    )
+    assert row["branch_to_evidence_kl"] >= 0.0
 
 
 def test_trainer_top_branch_margin_class_balanced_and_warmup() -> None:

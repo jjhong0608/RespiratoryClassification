@@ -1320,6 +1320,62 @@ class Trainer(LoggingMixin):
         weighted_loss = float(cfg.weight) * raw_loss
         return raw_loss, weighted_loss
 
+    def _compute_branch_to_evidence_teacher_distribution_kl_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        evidence_logits: Tensor,
+        label_indices: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        cfg = self.cfg.branch_to_evidence_ranking_consistency
+        if cfg.source != "class_top_branch_margin_features":
+            raise ValueError(
+                "branch-to-evidence teacher distribution KL supports only "
+                "source='class_top_branch_margin_features'"
+            )
+        if output.class_top_branch_margin_features is None:
+            raise ValueError(
+                "branch-to-evidence teacher distribution KL enabled but model "
+                "did not return class_top_branch_margin_features"
+            )
+        teacher_logits = output.class_top_branch_margin_features
+        if tuple(teacher_logits.shape) != tuple(evidence_logits.shape):
+            raise ValueError(
+                "class_top_branch_margin_features must match "
+                "class_evidence_logits shape for branch-to-evidence teacher "
+                "distribution KL"
+            )
+        self._validate_class_margin_inputs(
+            teacher_logits,
+            labels,
+            logits_name="class_top_branch_margin_features",
+            loss_name="branch-to-evidence teacher distribution KL",
+        )
+        if cfg.teacher_detach:
+            teacher_logits = teacher_logits.detach()
+        teacher_probs = F.softmax(
+            teacher_logits / float(cfg.teacher_temperature),
+            dim=-1,
+        )
+        student_log_probs = F.log_softmax(
+            evidence_logits / float(cfg.student_temperature),
+            dim=-1,
+        )
+        per_sample_kl = F.kl_div(
+            student_log_probs,
+            teacher_probs,
+            reduction="none",
+        ).sum(dim=-1)
+        class_weights = self._class_margin_weights(
+            label_indices,
+            evidence_logits,
+            enabled=cfg.class_weighted,
+            loss_name="branch_to_evidence_ranking_consistency",
+        )
+        raw_loss = (per_sample_kl * class_weights).mean()
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss
+
     def _compute_branch_to_evidence_ranking_consistency_loss(
         self,
         output: AstModelOutput,
@@ -1333,15 +1389,21 @@ class Trainer(LoggingMixin):
                 "branch-to-evidence ranking consistency supports only "
                 "target='class_evidence_logits'"
             )
-        if cfg.source not in {"class_gated_branch_logits", "top_branch_margin"}:
+        if cfg.source not in {
+            "class_gated_branch_logits",
+            "top_branch_margin",
+            "class_top_branch_margin_features",
+        }:
             raise ValueError(
                 "branch-to-evidence ranking consistency supports only "
-                "source='class_gated_branch_logits' or source='top_branch_margin'"
+                "source='class_gated_branch_logits', source='top_branch_margin', "
+                "or source='class_top_branch_margin_features'"
             )
-        if cfg.mode != "true_vs_hardest_negative":
+        if cfg.mode not in {"true_vs_hardest_negative", "teacher_distribution_kl"}:
             raise ValueError(
                 "branch-to-evidence ranking consistency supports only "
-                "mode='true_vs_hardest_negative'"
+                "mode='true_vs_hardest_negative' or "
+                "mode='teacher_distribution_kl'"
             )
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = output.logits.sum() * 0.0
@@ -1361,6 +1423,14 @@ class Trainer(LoggingMixin):
         if label_indices.numel() == 0:
             raw_loss = evidence_logits.sum() * 0.0
             return raw_loss, raw_loss
+
+        if cfg.mode == "teacher_distribution_kl":
+            return self._compute_branch_to_evidence_teacher_distribution_kl_loss(
+                output,
+                labels,
+                evidence_logits,
+                label_indices,
+            )
 
         if cfg.source == "class_gated_branch_logits":
             if output.class_gated_branch_logits is None:
@@ -1384,7 +1454,7 @@ class Trainer(LoggingMixin):
                 source_logits,
                 label_indices,
             )
-        else:
+        elif cfg.source == "top_branch_margin":
             branch_logits, branch_label_indices = self._branch_margin_inputs(
                 output,
                 labels,
@@ -1398,6 +1468,11 @@ class Trainer(LoggingMixin):
             teacher_gap, _, _ = self._top_true_class_branch_margin(
                 branch_logits,
                 label_indices,
+            )
+        else:
+            raise ValueError(
+                "branch-to-evidence hard-margin consistency supports only "
+                "source='class_gated_branch_logits' or source='top_branch_margin'"
             )
         teacher_floor = self._branch_to_evidence_teacher_floors(
             label_indices,
@@ -2951,6 +3026,77 @@ class Trainer(LoggingMixin):
                 int(labels.numel()),
                 int(branch_logits.shape[2]),
             ):
+                if (
+                    cfg.mode == "teacher_distribution_kl"
+                    and output.class_top_branch_margin_features is not None
+                ):
+                    teacher_logits = output.class_top_branch_margin_features.detach()
+                    if tuple(teacher_logits.shape) == tuple(evidence_logits.shape):
+                        teacher_probs = F.softmax(
+                            teacher_logits / float(cfg.teacher_temperature),
+                            dim=-1,
+                        )
+                        student_probs = F.softmax(
+                            evidence_logits / float(cfg.student_temperature),
+                            dim=-1,
+                        )
+                        student_log_probs = F.log_softmax(
+                            evidence_logits / float(cfg.student_temperature),
+                            dim=-1,
+                        )
+                        kl_values = F.kl_div(
+                            student_log_probs,
+                            teacher_probs,
+                            reduction="none",
+                        ).sum(dim=-1)
+                        teacher_top_class = teacher_probs.argmax(dim=-1)
+                        student_top_class = student_probs.argmax(dim=-1)
+                        true_teacher_prob = teacher_probs.gather(
+                            1,
+                            label_indices.unsqueeze(1),
+                        ).squeeze(1)
+                        true_student_prob = student_probs.gather(
+                            1,
+                            label_indices.unsqueeze(1),
+                        ).squeeze(1)
+                        for index, row in enumerate(rows):
+                            row["branch_to_evidence_mode"] = cfg.mode
+                            row["branch_to_evidence_source"] = cfg.source
+                            row["branch_to_evidence_teacher_temperature"] = float(
+                                cfg.teacher_temperature
+                            )
+                            row["branch_to_evidence_student_temperature"] = float(
+                                cfg.student_temperature
+                            )
+                            row["branch_to_evidence_teacher_probs"] = [
+                                float(value)
+                                for value in teacher_probs[index]
+                                .detach()
+                                .cpu()
+                                .tolist()
+                            ]
+                            row["branch_to_evidence_student_probs"] = [
+                                float(value)
+                                for value in student_probs[index]
+                                .detach()
+                                .cpu()
+                                .tolist()
+                            ]
+                            row["branch_to_evidence_teacher_top_class"] = int(
+                                teacher_top_class[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_student_top_class"] = int(
+                                student_top_class[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_true_teacher_prob"] = float(
+                                true_teacher_prob[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_true_student_prob"] = float(
+                                true_student_prob[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_kl"] = float(
+                                kl_values[index].detach().cpu().item()
+                            )
                 teacher_floor = self._branch_to_evidence_teacher_floors(
                     label_indices,
                     top_margin,
@@ -3005,6 +3151,7 @@ class Trainer(LoggingMixin):
                     )
                     penalties = base_penalties * support_weight * hard_weight
                     for index, row in enumerate(rows):
+                        row["branch_to_evidence_mode"] = cfg.mode
                         row["branch_to_evidence_source"] = cfg.source
                         row["branch_to_evidence_branch_gap"] = float(
                             teacher_gap[index].detach().cpu().item()

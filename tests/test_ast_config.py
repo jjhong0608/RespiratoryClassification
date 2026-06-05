@@ -235,13 +235,16 @@ def test_retained_repo_configs_load() -> None:
     current_training_cfg = JsonConfigLoader.load_training(
         ROOT / "configs/training_CNUH_new_test_CNUH_3classes.json"
     )
+    disease_training_cfg = JsonConfigLoader.load_training(
+        ROOT / "configs/training_CNUH_disease_3classes.json"
+    )
     baseline_training_cfg = JsonConfigLoader.load_training(
         ROOT / "configs/training_CNUH.json"
     )
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver17"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver18"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.train.loss.type == "cross_entropy"
@@ -266,9 +269,34 @@ def test_retained_repo_configs_load() -> None:
         current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.enabled
         is True
     )
+    assert (
+        current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.mode
+        == "teacher_distribution_kl"
+    )
+    assert (
+        current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.source
+        == "class_top_branch_margin_features"
+    )
+    assert (
+        current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.weight
+        == pytest.approx(0.1)
+    )
     assert current_training_cfg.train.loss.global_residual_anti_veto.enabled is True
     assert current_training_cfg.train.loss.top_branch_margin.enabled is True
     assert current_training_cfg.train.loss.gate_bad_branch_suppression.enabled is True
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER2"
+    assert (
+        disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.mode
+        == "teacher_distribution_kl"
+    )
+    assert (
+        disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.source
+        == "class_top_branch_margin_features"
+    )
+    assert (
+        disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.weight
+        == pytest.approx(0.1)
+    )
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
     assert baseline_training_cfg.experiment.logging.terminal_width is None
     assert baseline_training_cfg.model.encoder.type == "multiscale_rdt_ast"
@@ -1372,6 +1400,42 @@ def test_valid_weighted_top_branch_to_evidence_consistency_config_loads(
     assert consistency_cfg.hardness_weighting.enabled is True
     assert consistency_cfg.hardness_weighting.gain == pytest.approx(1.0)
     assert consistency_cfg.hardness_weighting.cap == pytest.approx(3.0)
+
+
+def test_valid_teacher_distribution_kl_branch_to_evidence_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_evidence_logits",
+        "source": "class_top_branch_margin_features",
+        "mode": "teacher_distribution_kl",
+        "teacher_detach": True,
+        "teacher_temperature": 0.7,
+        "student_temperature": 1.0,
+        "class_weighted": True,
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "teacher_distribution_kl.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    consistency_cfg = cfg.train.loss.branch_to_evidence_ranking_consistency
+    assert consistency_cfg.source == "class_top_branch_margin_features"
+    assert consistency_cfg.mode == "teacher_distribution_kl"
+    assert consistency_cfg.teacher_temperature == pytest.approx(0.7)
+    assert consistency_cfg.student_temperature == pytest.approx(1.0)
+    assert consistency_cfg.teacher_detach is True
+    assert consistency_cfg.class_weighted is True
+    assert consistency_cfg.reduction == "mean"
 
 
 def test_class_evidence_margin_support_weighting_config_loads(
@@ -2574,6 +2638,56 @@ def test_invalid_branch_to_evidence_teacher_floor_config_is_rejected(
     config_path = _write_json(tmp_path / "bad_teacher_floor.json", payload)
 
     with pytest.raises(ValueError, match="teacher_floor_by_label.wheeze"):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("teacher_temperature", 0.0, "teacher_temperature"),
+        ("student_temperature", -1.0, "student_temperature"),
+    ],
+)
+def test_invalid_teacher_distribution_kl_temperature_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: float,
+    match: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_evidence_logits",
+        "source": "class_top_branch_margin_features",
+        "mode": "teacher_distribution_kl",
+        "teacher_temperature": 0.7,
+        "student_temperature": 1.0,
+    }
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"][field] = value
+    config_path = _write_json(tmp_path / "bad_kl_temperature.json", payload)
+
+    with pytest.raises(ValueError, match=match):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_teacher_distribution_kl_rejects_hard_margin_options(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_evidence_logits",
+        "source": "class_top_branch_margin_features",
+        "mode": "teacher_distribution_kl",
+        "teacher_temperature": 0.7,
+        "student_temperature": 1.0,
+        "teacher_floor_by_label": {"wheeze": 0.5},
+    }
+    config_path = _write_json(tmp_path / "kl_with_hard_options.json", payload)
+
+    with pytest.raises(ValueError, match="teacher_floor_by_label"):
         JsonConfigLoader.load_training(config_path)
 
 

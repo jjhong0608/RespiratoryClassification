@@ -290,9 +290,15 @@ class BranchToEvidenceRankingConsistencyConfig:
     source: Literal[
         "class_gated_branch_logits",
         "top_branch_margin",
+        "class_top_branch_margin_features",
     ] = "class_gated_branch_logits"
-    mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    mode: Literal[
+        "true_vs_hardest_negative",
+        "teacher_distribution_kl",
+    ] = "true_vs_hardest_negative"
     teacher_detach: bool = True
+    teacher_temperature: float = 1.0
+    student_temperature: float = 1.0
     teacher_gap_cap: float | None = None
     teacher_floor_by_label: Mapping[str, float] = field(default_factory=dict)
     tolerance: float = 0.0
@@ -747,8 +753,12 @@ class JsonConfigLoader:
     _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_SOURCES = {
         "class_gated_branch_logits",
         "top_branch_margin",
+        "class_top_branch_margin_features",
     }
-    _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_MODES = {"true_vs_hardest_negative"}
+    _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_MODES = {
+        "true_vs_hardest_negative",
+        "teacher_distribution_kl",
+    }
     _GLOBAL_RESIDUAL_ANTI_VETO_TARGETS = {
         "global_residual_logits",
         "final_logits",
@@ -2180,12 +2190,87 @@ class JsonConfigLoader:
         ):
             raise ValueError(
                 "train.loss.branch_to_evidence_ranking_consistency.mode must be "
-                "'true_vs_hardest_negative'"
+                "one of "
+                f"{sorted(JsonConfigLoader._BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_MODES)}"
             )
         if b2e_cfg.reduction not in JsonConfigLoader._MARGIN_REDUCTIONS:
             raise ValueError(
                 "train.loss.branch_to_evidence_ranking_consistency.reduction "
                 f"must be one of {sorted(JsonConfigLoader._MARGIN_REDUCTIONS)}"
+            )
+        if not isinstance(b2e_cfg.teacher_temperature, int | float) or isinstance(
+            b2e_cfg.teacher_temperature,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.branch_to_evidence_ranking_consistency."
+                "teacher_temperature must be numeric"
+            )
+        if b2e_cfg.teacher_temperature <= 0:
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency."
+                "teacher_temperature must be greater than zero"
+            )
+        if not isinstance(b2e_cfg.student_temperature, int | float) or isinstance(
+            b2e_cfg.student_temperature,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.branch_to_evidence_ranking_consistency."
+                "student_temperature must be numeric"
+            )
+        if b2e_cfg.student_temperature <= 0:
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency."
+                "student_temperature must be greater than zero"
+            )
+        if b2e_cfg.mode == "teacher_distribution_kl":
+            if b2e_cfg.source != "class_top_branch_margin_features":
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency.source "
+                    "must be 'class_top_branch_margin_features' when "
+                    "mode='teacher_distribution_kl'"
+                )
+            if b2e_cfg.teacher_gap_cap is not None:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "teacher_gap_cap is not used when "
+                    "mode='teacher_distribution_kl'"
+                )
+            if b2e_cfg.teacher_floor_by_label:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "teacher_floor_by_label is not used when "
+                    "mode='teacher_distribution_kl'"
+                )
+            if b2e_cfg.support_weighting.enabled:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "support_weighting is not used when "
+                    "mode='teacher_distribution_kl'"
+                )
+            if b2e_cfg.hardness_weighting.enabled:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "hardness_weighting is not used when "
+                    "mode='teacher_distribution_kl'"
+                )
+            if b2e_cfg.tolerance != 0:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "tolerance is not used when mode='teacher_distribution_kl'"
+                )
+            if b2e_cfg.reduction != "mean":
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "reduction must be 'mean' when "
+                    "mode='teacher_distribution_kl'"
+                )
+        elif b2e_cfg.source == "class_top_branch_margin_features":
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.source "
+                "'class_top_branch_margin_features' requires "
+                "mode='teacher_distribution_kl'"
             )
         JsonConfigLoader._validate_margin_support_weighting(
             b2e_cfg.support_weighting,

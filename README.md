@@ -248,8 +248,10 @@ target. This binary auxiliary is independent of the main multiclass CE target.
 ### Evidence Auxiliary Loss
 
 `class_gate.evidence_auxiliary` applies CE directly to `class_evidence_logits`.
-It is available for `class_aware_branch_gated` and is meant to improve the
-class evidence scorer before the residual classifier dominates.
+It is available for `class_aware_branch_gated`, but the current branch-teacher
+experiments keep it disabled when `branch_to_evidence_ranking_consistency`
+uses `mode="teacher_distribution_kl"` because both objectives provide
+CE-like supervision to the evidence scorer.
 
 `class_gate.evidence_scorer.type="two_tower_mlp"` converts class-aware evidence
 embeddings into `class_evidence_logits` with independent per-class towers:
@@ -293,21 +295,28 @@ Both regularizers can be bounded by `start_epoch` and `end_epoch`.
 `class_gated_branch_logit_margin` applies margin ranking to
 `class_gated_branch_logits`.
 
-`branch_to_evidence_ranking_consistency` compares a detached branch-side
-teacher gap against the same true-vs-hardest-negative gap from
-`class_evidence_logits`. The teacher can come from
-`class_gated_branch_logits`, or from `source="top_branch_margin"`, which uses
-the best branch-level true-vs-hardest-negative margin as the teacher signal.
-`teacher_floor_by_label` can set a minimum teacher gap per label, and
-`teacher_gap_cap` can prevent overly large branch margins from dominating the
-evidence scorer update. `support_weighting` can increase the penalty when
-top-branch support is strong, and `hardness_weighting` can increase the penalty
-when the evidence gap is currently negative. The support signal is detached so
-this loss still updates the evidence path rather than the branch teacher.
+`branch_to_evidence_ranking_consistency` is the main branch-to-evidence
+transfer objective. In the recommended `mode="teacher_distribution_kl"` setup,
+the detached `class_top_branch_margin_features` are converted into a teacher
+distribution:
+
+```text
+teacher_probs = softmax(class_top_branch_margin_features / teacher_temperature)
+student_log_probs = log_softmax(class_evidence_logits / student_temperature)
+loss = KL(teacher_probs || student_log_probs)
+```
+
+This passes the branch-side class ranking distribution into
+`class_evidence_logits` instead of forcing only a single hard true-vs-negative
+gap. The legacy `mode="true_vs_hardest_negative"` path remains available for
+older configs and compares a detached branch-side teacher gap against the same
+gap from `class_evidence_logits`.
 
 `class_evidence_margin.support_weighting` applies the same detached branch
 support multiplier to the class evidence margin. This makes evidence ranking
 errors matter more when at least one branch already provides a strong signal.
+The current KL-based configs keep this support multiplier disabled and use
+`class_evidence_margin` only as a weak true-label anchor.
 
 `global_residual_anti_veto` limits label-agnostic residual veto behavior. In
 the original `target="global_residual_logits"` mode, it applies only when the

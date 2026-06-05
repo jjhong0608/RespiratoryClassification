@@ -1,0 +1,553 @@
+{
+  "experiment": {
+    "name": "CNUH_DISEASE_VER2",
+    "task": "Normal_vs_LungParenchymal_vs_Airway",
+    "mode": "clip",
+    "seed": 1337,
+    "device": "mps",
+    "output_dir": "checkpoints",
+    "logging": {
+      "terminal_width": 310
+    }
+  },
+  "data": {
+    "train_dirs": [
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_1/",
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_2/",
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_3/",
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_4/"
+    ],
+    "val_dirs": [
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_0/"
+    ],
+    "eval_dirs": [
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/test/"
+    ],
+    "label_to_index": {
+      "Normal": 0,
+      "Lung_Parenchymal": 1,
+      "Airway": 2
+    },
+    "batch_size": 4,
+    "num_workers": 0,
+    "audio": {
+      "sample_rate": 16000,
+      "clip_duration_sec": 30.0
+    },
+    "preprocessing": {
+      "source_type": "original",
+      "bandpass": {
+        "enabled": false,
+        "low_hz": 250.0,
+        "high_hz": 1000.0,
+        "q": 0.707
+      },
+      "ast_fbank": {
+        "num_mel_bins": 128,
+        "max_length": 1024,
+        "do_normalize": true,
+        "mean": -4.2677393,
+        "std": 4.5689974
+      }
+    },
+    "augmentation": {
+      "enabled": true,
+      "policy": {
+        "type": "one_of",
+        "choices": [
+          {
+            "name": "none",
+            "probability": 0.1
+          },
+          {
+            "name": "waveform",
+            "probability": 0.35
+          },
+          {
+            "name": "fbank",
+            "probability": 0.35
+          },
+          {
+            "name": "both_light",
+            "probability": 0.2
+          }
+        ]
+      },
+      "waveform": {
+        "enabled": true,
+        "probability": 1.0,
+        "gain": {
+          "enabled": true,
+          "probability": 0.4,
+          "min_db": -2.0,
+          "max_db": 2.0
+        },
+        "noise": {
+          "enabled": true,
+          "probability": 0.2,
+          "snr_db_min": 20.0,
+          "snr_db_max": 35.0
+        },
+        "time_shift": {
+          "enabled": true,
+          "probability": 0.3,
+          "max_shift_fraction": 0.025,
+          "mode": "zero_pad"
+        }
+      },
+      "fbank": {
+        "enabled": true,
+        "probability": 1.0,
+        "time_mask": {
+          "enabled": true,
+          "num_masks": 1,
+          "max_width": 16
+        },
+        "freq_mask": {
+          "enabled": true,
+          "num_masks": 1,
+          "max_width": 4
+        },
+        "mask_value": 0.0
+      }
+    }
+  },
+  "model": {
+    "encoder": {
+      "type": "multiscale_rdt_ast",
+      "adaptation": {
+        "mode": "full",
+        "num_layers": 0
+      },
+      "architecture": {
+        "hidden_size": 320,
+        "num_attention_heads": 8,
+        "mlp_ratio": 2.0,
+        "hidden_dropout_prob": 0.1,
+        "attention_probs_dropout_prob": 0.1,
+        "layer_norm_eps": 1e-6,
+        "shared_stem_depth": 1,
+        "adapter_depth": 4,
+        "rdt": {
+          "enabled": true,
+          "steps": 3,
+          "top_tokens_per_branch": 3,
+          "gated_residual": true,
+          "layerscale_init": 0.01,
+          "evidence_score_source": "attention_weight",
+          "exclude_branches_from_evidence": []
+        },
+        "evidence_pooling": {
+          "type": "class_aware_branch_gated",
+          "gate_hidden_size": null,
+          "dropout": 0.15,
+          "temperature": 1.0,
+          "class_gate": {
+            "mode": "query",
+            "evidence_scorer": {
+              "type": "two_tower_mlp",
+              "embedding_hidden_size": 512,
+              "branch_hidden_size": 64,
+              "fusion_hidden_size": 512,
+              "dropout": 0.05,
+              "branch_feature_transform": {
+                "mode": "tanh",
+                "temperature": 1.0
+              }
+            },
+            "global_residual": {
+              "enabled": true,
+              "init_scale": 0.1,
+              "learnable": true,
+              "warmup": {
+                "enabled": true,
+                "mode": "zero_to_learned",
+                "start_multiplier": 0.0,
+                "end_multiplier": 1.0,
+                "hold_epochs": 10,
+                "decay_epochs": 20
+              },
+              "bounding": {
+                "enabled": true,
+                "bound": 1.0,
+                "temperature": 1.0
+              }
+            },
+            "evidence_auxiliary": {
+              "enabled": false,
+              "weight": 0.1
+            },
+            "branch_logit_feature": {
+              "mode": "hardest_negative_margin"
+            },
+            "gate_mixing": {
+              "enabled": true,
+              "mode": "uniform_to_learned",
+              "start_alpha": 1.0,
+              "end_alpha": 0.0,
+              "hold_epochs": 10,
+              "decay_epochs": 20
+            }
+          }
+        },
+        "token_augmentation": {
+          "branch_event_dropout": {
+            "enabled": true,
+            "probability": 0.1,
+            "mode": "zero_mask",
+            "min_keep_tokens": 1
+          },
+          "selected_evidence_dropout": {
+            "enabled": true,
+            "probability": 0.1,
+            "mode": "zero",
+            "min_keep_per_branch": 1
+          }
+        },
+        "patch_branches": [
+          {
+            "patch_size": [16, 16],
+            "stride": [8, 16]
+          },
+          {
+            "patch_size": [8, 32],
+            "stride": [4, 32]
+          },
+          {
+            "patch_size": [4, 64],
+            "stride": [2, 64]
+          },
+          {
+            "patch_size": [2, 128],
+            "stride": [1, 128]
+          }
+        ]
+      }
+    },
+    "classifier": {
+      "type": "mlp",
+      "hidden_dim": 512,
+      "dropout": 0.15,
+      "pooling": "latent_mean"
+    }
+  },
+  "train": {
+    "epochs": 120,
+    "top_k": 3,
+    "max_grad_norm": 1.0,
+    "optimizer": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.0001,
+      "weight_decay": 0.01
+    },
+    "scheduler": {
+      "warmup_ratio": 0.05
+    },
+    "loss": {
+      "type": "cross_entropy",
+      "auto_pos_weight": false,
+      "pos_weight": null,
+      "gamma": 2.0,
+      "class_weighting": {
+        "enabled": true,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train"
+      },
+      "label_smoothing": {
+        "enabled": false,
+        "value": 0.05
+      },
+      "gate_entropy_regularization": {
+        "enabled": true,
+        "weight": 0.001,
+        "target": "class_evidence_learned_gate",
+        "start_epoch": 16,
+        "end_epoch": 30
+      },
+      "class_gate_diversity_regularization": {
+        "enabled": true,
+        "weight": 0.01,
+        "target": "class_evidence_learned_gate",
+        "metric": "js_divergence",
+        "start_epoch": 16,
+        "end_epoch": 30
+      },
+      "class_evidence_margin": {
+        "enabled": true,
+        "weight": 0.05,
+        "margin": 0.5,
+        "target": "class_evidence_logits",
+        "mode": "true_vs_hardest_negative",
+        "major_class": null,
+        "class_weighted": true,
+        "reduction": "class_balanced_violating_mean",
+        "support_weighting": {
+          "enabled": false,
+          "source": "top_branch_margin",
+          "mode": "linear",
+          "gain": 1.0,
+          "cap": 2.0
+        }
+      },
+      "class_gated_branch_logit_margin": {
+        "enabled": false,
+        "weight": 0.15,
+        "margin": 0.3,
+        "target": "class_gated_branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": true,
+        "reduction": "class_balanced_violating_mean"
+      },
+      "branch_to_evidence_ranking_consistency": {
+        "enabled": true,
+        "weight": 0.1,
+        "target": "class_evidence_logits",
+        "source": "class_top_branch_margin_features",
+        "mode": "teacher_distribution_kl",
+        "teacher_detach": true,
+        "teacher_temperature": 0.7,
+        "student_temperature": 1.0,
+        "class_weighted": true,
+        "warmup_epochs": 10
+      },
+      "global_residual_anti_veto": {
+        "enabled": true,
+        "weight": 0.1,
+        "target": "final_logits",
+        "reference": "class_evidence_logits",
+        "support_source": "top_branch_margin",
+        "mode": "final_gap_preservation",
+        "margin_mode": "true_vs_hardest_negative",
+        "support_threshold": 0.3,
+        "allowed_gap_drop": 0.0,
+        "class_weighted": true,
+        "reduction": "class_balanced_violating_mean",
+        "warmup_epochs": 10
+      },
+      "residual_contradiction_regularization": {
+        "enabled": false,
+        "weight": 0.02,
+        "target": "global_residual_logits",
+        "reference": "class_evidence_logits",
+        "mode": "opposite_gap_penalty",
+        "margin_mode": "true_vs_hardest_negative",
+        "evidence_gap_threshold": 0.0,
+        "min_residual_gap": -0.3,
+        "class_weighted": true,
+        "reduction": "class_balanced_violating_mean",
+        "warmup_epochs": 10
+      },
+      "gate_weighted_branch_margin": {
+        "enabled": true,
+        "weight": 0.1,
+        "margin": 0.3,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "class_weighted": true,
+        "warmup_epochs": 10,
+        "reduction": "class_balanced_violating_mean",
+        "branch_selection": "gate_weighted"
+      },
+      "gate_branch_regret": {
+        "enabled": true,
+        "weight": 0.05,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "best_margin_regret",
+        "margin_mode": "true_vs_hardest_negative",
+        "positive_threshold": 0.3,
+        "positive_threshold_by_label": {
+          "Normal": 0.3,
+          "Lung_Parenchymal": 0.25,
+          "Airway": 0.1
+        },
+        "tolerance": 0.05,
+        "warmup_epochs": 10,
+        "weight_schedule": {
+          "enabled": true,
+          "start_epoch": 11,
+          "end_epoch": 16,
+          "start_multiplier": 0.5,
+          "end_multiplier": 1.0
+        },
+        "auto_positive_threshold_by_train_stats": {
+          "enabled": true,
+          "strategy": "ema_eligible_controller",
+          "start_epoch": 31,
+          "update_interval_epochs": 1,
+          "ema": 0.9,
+          "step": 0.02,
+          "target_eligible_rate_by_label": {
+            "Normal": 0.7,
+            "Lung_Parenchymal": 0.6,
+            "Airway": 0.5
+          },
+          "min_threshold_by_label": {
+            "Normal": 0.3,
+            "Lung_Parenchymal": 0.2,
+            "Airway": 0.0
+          },
+          "max_threshold_by_label": {
+            "Normal": 0.3,
+            "Lung_Parenchymal": 0.35,
+            "Airway": 0.25
+          }
+        }
+      },
+      "gate_bad_branch_suppression": {
+        "enabled": true,
+        "weight": 0.025,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "margin_below_threshold",
+        "margin_mode": "true_vs_hardest_negative",
+        "bad_margin_threshold": 0.0,
+        "bad_margin_threshold_by_label": {
+          "Normal": -0.2,
+          "Lung_Parenchymal": 0.1,
+          "Airway": 0.1
+        },
+        "warmup_epochs": 15,
+        "weight_schedule": {
+          "enabled": true,
+          "start_epoch": 16,
+          "end_epoch": 25,
+          "start_multiplier": 0.3,
+          "end_multiplier": 1.0
+        },
+        "auto_bad_margin_threshold_by_train_stats": {
+          "enabled": true,
+          "strategy": "ema_bad_gate_mass_controller",
+          "start_epoch": 31,
+          "update_interval_epochs": 1,
+          "ema": 0.9,
+          "step": 0.01,
+          "target_bad_gate_mass_by_label": {
+            "Normal": 0.05,
+            "Lung_Parenchymal": 0.15,
+            "Airway": 0.1
+          },
+          "min_threshold_by_label": {
+            "Normal": -0.2,
+            "Lung_Parenchymal": 0.0,
+            "Airway": 0.0
+          },
+          "max_threshold_by_label": {
+            "Normal": -0.2,
+            "Lung_Parenchymal": 0.35,
+            "Airway": 0.3
+          }
+        }
+      },
+      "top_branch_margin": {
+        "enabled": true,
+        "weight": 0.2,
+        "margin": 0.3,
+        "margin_by_label": {
+          "Normal": 0.3,
+          "Lung_Parenchymal": 0.35,
+          "Airway": 0.5
+        },
+        "target": "branch_logits",
+        "mode": "true_vs_hardest_negative",
+        "branch_reduction": "max",
+        "class_weighted": true,
+        "reduction": "class_balanced_violating_mean",
+        "warmup_epochs": 0,
+        "auto_margin_by_train_stats": {
+          "enabled": true,
+          "strategy": "ema_violation_controller",
+          "start_epoch": 11,
+          "update_interval_epochs": 1,
+          "ema": 0.9,
+          "step": 0.02,
+          "target_violation_rate_by_label": {
+            "Normal": 0.2,
+            "Lung_Parenchymal": 0.55,
+            "Airway": 0.75
+          },
+          "min_margin_by_label": {
+            "Normal": 0.3,
+            "Lung_Parenchymal": 0.3,
+            "Airway": 0.45
+          },
+          "max_margin_by_label": {
+            "Normal": 0.3,
+            "Lung_Parenchymal": 0.5,
+            "Airway": 0.8
+          }
+        }
+      },
+      "branch_auxiliary": {
+        "enabled": false,
+        "weight": 0.3,
+        "aggregation": "mean"
+      },
+      "branch_binary_auxiliary": {
+        "enabled": false,
+        "weight": 0.1,
+        "label_to_index": {
+          "Normal": 0,
+          "Lung_Parenchymal": 1,
+          "Airway": 1
+        },
+        "pos_weight": {
+          "enabled": true,
+          "type": "sqrt_normal_over_abnormal",
+          "source": "train"
+        },
+        "aggregation": "mean"
+      }
+    },
+    "sampler": {
+      "weighted_random": false
+    },
+    "early_stopping": {
+      "enabled": false,
+      "monitor": "val_loss",
+      "patience": 15,
+      "min_delta": 0.0001
+    }
+  },
+  "val": {
+    "loss": {
+      "use_train_loss_config": true,
+      "class_weight_source": "train",
+      "binary_pos_weight_source": "train"
+    }
+  },
+  "checkpointing": {
+    "monitors": [
+      {
+        "name": "val_macro_f1",
+        "mode": "max",
+        "top_k": 3
+      },
+      {
+        "name": "val_macro_recall",
+        "mode": "max",
+        "top_k": 3
+      },
+      {
+        "name": "val_loss",
+        "mode": "min",
+        "top_k": 3
+      },
+      {
+        "name": "last",
+        "mode": "latest",
+        "top_k": 3
+      }
+    ]
+  },
+  "analysis": {
+    "outputs": {
+      "save_logits": true,
+      "save_probabilities": true,
+      "save_embeddings": false,
+      "save_clip_metadata": true
+    }
+  }
+}
