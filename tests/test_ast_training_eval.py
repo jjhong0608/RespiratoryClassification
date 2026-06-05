@@ -267,6 +267,7 @@ def _trainer_cfg(
     class_evidence_margin_mode: Literal[
         "minority_vs_major",
         "true_vs_hardest_negative",
+        "softplus_true_vs_hardest_negative",
     ] = "minority_vs_major",
     class_evidence_margin_major_index: int | None = None,
     class_evidence_margin_class_weighted: bool = False,
@@ -274,6 +275,7 @@ def _trainer_cfg(
         "mean",
         "class_balanced_violating_mean",
     ] = "mean",
+    class_evidence_margin_temperature: float = 1.0,
     class_evidence_margin_support_weighting: MarginSupportWeightingConfig | None = None,
     class_gated_branch_logit_margin_enabled: bool = False,
     class_gated_branch_logit_margin_weight: float = 0.0,
@@ -470,6 +472,7 @@ def _trainer_cfg(
             else None,
             class_weighted=class_evidence_margin_class_weighted,
             reduction=class_evidence_margin_reduction,
+            temperature=class_evidence_margin_temperature,
             support_weighting=(
                 class_evidence_margin_support_weighting
                 or MarginSupportWeightingConfig()
@@ -1882,6 +1885,44 @@ def test_trainer_class_evidence_margin_true_vs_hardest_negative() -> None:
 
     assert torch.isclose(raw_margin, torch.tensor(0.5))
     assert torch.isclose(weighted_margin, torch.tensor(0.1))
+
+
+def test_trainer_class_evidence_margin_softplus_true_vs_hardest_negative() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.5, 2.0, 0.5),
+            class_evidence_margin_enabled=True,
+            class_evidence_margin_weight=0.05,
+            class_evidence_margin_value=0.0,
+            class_evidence_margin_mode="softplus_true_vs_hardest_negative",
+            class_evidence_margin_class_weighted=True,
+            class_evidence_margin_reduction="mean",
+            class_evidence_margin_temperature=1.0,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.tensor(
+            [[1.0, 0.4, 1.3], [0.2, 0.9, 0.6]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_margin, weighted_margin = trainer._compute_class_evidence_margin_loss(
+        output,
+        labels,
+    )
+
+    gaps = torch.tensor([-0.3, 0.3], dtype=torch.float32)
+    penalties = F.softplus(-gaps)
+    expected_raw = torch.mean(penalties * torch.tensor([1.5, 2.0]))
+    assert torch.isclose(raw_margin, expected_raw)
+    assert torch.isclose(weighted_margin, 0.05 * expected_raw)
 
 
 def test_trainer_class_evidence_margin_applies_class_weights() -> None:

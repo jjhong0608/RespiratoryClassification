@@ -7,13 +7,15 @@ from src.training.imbalance import (
     build_sqrt_inverse_class_sampler,
     compute_binary_pos_weight,
     compute_class_counts_by_index,
+    compute_power_inverse_class_weights,
     compute_sqrt_inverse_class_weights,
     compute_sqrt_inverse_sample_weights,
     compute_sqrt_normal_over_abnormal_pos_weight,
     resolve_imbalance,
+    resolve_loss_weights,
     resolve_sampler_num_samples,
 )
-from src.utils.config import SamplerConfig
+from src.utils.config import ClassWeightingConfig, LossConfig, SamplerConfig
 
 
 def test_compute_binary_pos_weight_uses_negative_over_positive_ratio() -> None:
@@ -101,6 +103,52 @@ def test_sqrt_inverse_class_weights_are_mean_one_and_ranked() -> None:
     assert weights[0] < weights[1]
     assert weights[1].item() == pytest.approx(weights[2].item(), rel=0.05)
     assert weights[2] < weights[3]
+
+
+def test_power_inverse_class_weights_are_mean_one_and_ranked() -> None:
+    counts = torch.tensor([658, 252, 156], dtype=torch.float32)
+
+    weights = compute_power_inverse_class_weights(counts, power=0.75)
+
+    expected = counts.pow(-0.75)
+    expected = expected / expected.mean()
+    assert torch.allclose(weights, expected)
+    assert weights.mean().item() == pytest.approx(1.0)
+    assert weights[0] < weights[1] < weights[2]
+
+
+def test_power_half_matches_sqrt_inverse_class_weights() -> None:
+    counts = torch.tensor([3108, 554, 514, 235], dtype=torch.float32)
+
+    power_weights = compute_power_inverse_class_weights(counts, power=0.5)
+    sqrt_weights = compute_sqrt_inverse_class_weights(counts)
+
+    assert torch.allclose(power_weights, sqrt_weights)
+
+
+def test_resolve_loss_weights_uses_power_inverse_class_weighting() -> None:
+    resolved = resolve_loss_weights(
+        targets=[0, 0, 0, 1, 2],
+        num_classes=3,
+        label_to_index={"normal": 0, "crackle": 1, "wheeze": 2},
+        loss_cfg=LossConfig(
+            type="cross_entropy",
+            class_weighting=ClassWeightingConfig(
+                enabled=True,
+                type="power_inverse_frequency",
+                power=0.75,
+            ),
+        ),
+    )
+
+    expected = compute_power_inverse_class_weights(
+        torch.tensor([3.0, 1.0, 1.0]),
+        power=0.75,
+    )
+    assert resolved.class_weights is not None
+    assert resolved.class_weights == pytest.approx(
+        tuple(float(value.item()) for value in expected)
+    )
 
 
 def test_sqrt_inverse_sample_weights_match_class_counts() -> None:

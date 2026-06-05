@@ -22,6 +22,7 @@ from src.models.model import (
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
+    FusionProjectorConfig,
     MilConfig,
     MultiScaleRdtArchitectureConfig,
     PatchBranchConfig,
@@ -262,10 +263,12 @@ class ClassEvidenceMarginConfig:
     mode: Literal[
         "minority_vs_major",
         "true_vs_hardest_negative",
+        "softplus_true_vs_hardest_negative",
     ] = "minority_vs_major"
     major_class: str | None = None
     class_weighted: bool = False
     reduction: Literal["mean", "class_balanced_violating_mean"] = "mean"
+    temperature: float = 1.0
     support_weighting: MarginSupportWeightingConfig = field(
         default_factory=MarginSupportWeightingConfig
     )
@@ -470,9 +473,13 @@ class TopBranchMarginConfig:
 @dataclass(frozen=True)
 class ClassWeightingConfig:
     enabled: bool = False
-    type: Literal["sqrt_inverse_frequency"] = "sqrt_inverse_frequency"
+    type: Literal[
+        "sqrt_inverse_frequency",
+        "power_inverse_frequency",
+    ] = "sqrt_inverse_frequency"
     normalize: Literal["mean_one"] = "mean_one"
     source: Literal["train"] = "train"
+    power: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -745,6 +752,7 @@ class JsonConfigLoader:
     _CLASS_EVIDENCE_MARGIN_MODES = {
         "minority_vs_major",
         "true_vs_hardest_negative",
+        "softplus_true_vs_hardest_negative",
     }
     _MARGIN_REDUCTIONS = {"mean", "class_balanced_violating_mean"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_TARGETS = {"class_gated_branch_logits"}
@@ -797,7 +805,10 @@ class JsonConfigLoader:
     _AUGMENTATION_POLICY_CHOICES = {"none", "waveform", "fbank", "both_light"}
     _BRANCH_EVENT_DROPOUT_MODES = {"zero_mask"}
     _SELECTED_EVIDENCE_DROPOUT_MODES = {"zero"}
-    _CLASS_WEIGHTING_TYPES = {"sqrt_inverse_frequency"}
+    _CLASS_WEIGHTING_TYPES = {
+        "sqrt_inverse_frequency",
+        "power_inverse_frequency",
+    }
     _CLASS_WEIGHTING_NORMALIZERS = {"mean_one"}
     _LOSS_WEIGHT_SOURCES = {"train"}
     _BRANCH_BINARY_POS_WEIGHT_TYPES = {"sqrt_normal_over_abnormal"}
@@ -1861,6 +1872,26 @@ class JsonConfigLoader:
             raise ValueError(
                 "model.classifier.pooling must be 'latent_mean' for this branch"
             )
+        if cfg.fusion_projector.type not in {"linear", "mlp"}:
+            raise ValueError(
+                "model.classifier.fusion_projector.type must be one of "
+                "['linear', 'mlp']"
+            )
+        if isinstance(cfg.fusion_projector.hidden_dim, bool) or not isinstance(
+            cfg.fusion_projector.hidden_dim,
+            int,
+        ):
+            raise TypeError(
+                "model.classifier.fusion_projector.hidden_dim must be an integer"
+            )
+        if cfg.fusion_projector.hidden_dim <= 0:
+            raise ValueError(
+                "model.classifier.fusion_projector.hidden_dim must be greater than zero"
+            )
+        if not isinstance(cfg.fusion_projector.layer_norm, bool):
+            raise TypeError(
+                "model.classifier.fusion_projector.layer_norm must be a boolean"
+            )
 
     @staticmethod
     def _validate_model(cfg: ModelConfig, data_cfg: DataConfig) -> None:
@@ -2050,6 +2081,14 @@ class JsonConfigLoader:
             cfg.loss.class_evidence_margin.support_weighting,
             field_name="train.loss.class_evidence_margin.support_weighting",
         )
+        if (
+            not isinstance(cfg.loss.class_evidence_margin.temperature, (int, float))
+            or isinstance(cfg.loss.class_evidence_margin.temperature, bool)
+            or cfg.loss.class_evidence_margin.temperature <= 0
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_margin.temperature must be greater than zero"
+            )
         if cfg.loss.class_evidence_margin.major_class is not None and not isinstance(
             cfg.loss.class_evidence_margin.major_class, str
         ):
@@ -2070,7 +2109,22 @@ class JsonConfigLoader:
                     "train.loss.class_evidence_margin.weight must be greater than "
                     "zero when enabled"
                 )
-            if cfg.loss.class_evidence_margin.margin <= 0:
+            if (
+                cfg.loss.class_evidence_margin.mode
+                == "softplus_true_vs_hardest_negative"
+            ):
+                if cfg.loss.class_evidence_margin.margin < 0:
+                    raise ValueError(
+                        "train.loss.class_evidence_margin.margin must be "
+                        "non-negative when mode="
+                        "'softplus_true_vs_hardest_negative'"
+                    )
+                if cfg.loss.class_evidence_margin.reduction != "mean":
+                    raise ValueError(
+                        "train.loss.class_evidence_margin.reduction must be 'mean' "
+                        "when mode='softplus_true_vs_hardest_negative'"
+                    )
+            elif cfg.loss.class_evidence_margin.margin <= 0:
                 raise ValueError(
                     "train.loss.class_evidence_margin.margin must be greater than "
                     "zero when enabled"
@@ -2995,7 +3049,16 @@ class JsonConfigLoader:
             raise ValueError("train.loss.class_weighting.enabled must be a boolean")
         if cfg.loss.class_weighting.type not in JsonConfigLoader._CLASS_WEIGHTING_TYPES:
             raise ValueError(
-                "train.loss.class_weighting.type must be 'sqrt_inverse_frequency'"
+                "train.loss.class_weighting.type must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_WEIGHTING_TYPES)}"
+            )
+        if (
+            not isinstance(cfg.loss.class_weighting.power, (int, float))
+            or isinstance(cfg.loss.class_weighting.power, bool)
+            or cfg.loss.class_weighting.power <= 0
+        ):
+            raise ValueError(
+                "train.loss.class_weighting.power must be greater than zero"
             )
         if (
             cfg.loss.class_weighting.normalize
@@ -3519,7 +3582,11 @@ class JsonConfigLoader:
         )
         encoder["architecture"] = MultiScaleRdtArchitectureConfig(**architecture)
         kwargs["encoder"] = ModelEncoderConfig(**encoder)
-        kwargs["classifier"] = ClassifierConfig(**dict(raw["classifier"]))
+        classifier = dict(raw["classifier"])
+        classifier["fusion_projector"] = FusionProjectorConfig(
+            **dict(classifier.get("fusion_projector", {}))
+        )
+        kwargs["classifier"] = ClassifierConfig(**classifier)
         cfg = ModelConfig(**kwargs)
         JsonConfigLoader._validate_model(cfg, data_cfg)
         return cfg

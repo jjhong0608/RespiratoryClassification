@@ -244,7 +244,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver18"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver20"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.train.loss.type == "cross_entropy"
@@ -257,8 +257,8 @@ def test_retained_repo_configs_load() -> None:
     )
     assert current_class_gate.evidence_scorer.type == "two_tower_mlp"
     assert current_class_gate.evidence_scorer.embedding_hidden_size == 512
-    assert current_class_gate.evidence_scorer.branch_hidden_size == 64
-    assert current_class_gate.evidence_scorer.fusion_hidden_size == 512
+    assert current_class_gate.evidence_scorer.branch_hidden_size == 128
+    assert current_class_gate.evidence_scorer.fusion_hidden_size == 768
     assert current_class_gate.evidence_scorer.dropout == pytest.approx(0.05)
     assert current_class_gate.evidence_scorer.branch_feature_transform.mode == "tanh"
     assert (
@@ -284,7 +284,26 @@ def test_retained_repo_configs_load() -> None:
     assert current_training_cfg.train.loss.global_residual_anti_veto.enabled is True
     assert current_training_cfg.train.loss.top_branch_margin.enabled is True
     assert current_training_cfg.train.loss.gate_bad_branch_suppression.enabled is True
-    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER2"
+    assert (
+        current_training_cfg.train.loss.class_weighting.type
+        == "power_inverse_frequency"
+    )
+    assert current_training_cfg.train.loss.class_weighting.power == pytest.approx(0.75)
+    assert (
+        current_training_cfg.train.loss.class_evidence_margin.mode
+        == "softplus_true_vs_hardest_negative"
+    )
+    assert current_training_cfg.train.loss.class_evidence_margin.margin == 0.0
+    assert current_training_cfg.train.loss.class_evidence_margin.reduction == "mean"
+    assert current_training_cfg.model.classifier.hidden_dim == 1024
+    assert current_training_cfg.model.classifier.fusion_projector.type == "mlp"
+    assert current_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
+    assert current_training_cfg.model.classifier.fusion_projector.layer_norm is True
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER4"
+    assert disease_training_cfg.model.classifier.hidden_dim == 1024
+    assert disease_training_cfg.model.classifier.fusion_projector.type == "mlp"
+    assert disease_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
+    assert disease_training_cfg.model.classifier.fusion_projector.layer_norm is True
     assert (
         disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.mode
         == "teacher_distribution_kl"
@@ -296,6 +315,15 @@ def test_retained_repo_configs_load() -> None:
     assert (
         disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.weight
         == pytest.approx(0.1)
+    )
+    assert (
+        disease_training_cfg.train.loss.class_weighting.type
+        == "power_inverse_frequency"
+    )
+    assert disease_training_cfg.train.loss.class_weighting.power == pytest.approx(0.75)
+    assert (
+        disease_training_cfg.train.loss.class_evidence_margin.mode
+        == "softplus_true_vs_hardest_negative"
     )
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
     assert baseline_training_cfg.experiment.logging.terminal_width is None
@@ -319,6 +347,9 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.data.preprocessing.ast_fbank.max_length == 32
     assert cfg.model.encoder.type == "multiscale_rdt_ast"
     assert cfg.model.classifier.pooling == "latent_mean"
+    assert cfg.model.classifier.fusion_projector.type == "linear"
+    assert cfg.model.classifier.fusion_projector.hidden_dim == 640
+    assert cfg.model.classifier.fusion_projector.layer_norm is False
     assert cfg.model.encoder.architecture.rdt.enabled is True
     assert cfg.model.encoder.architecture.evidence_pooling.type == "mean"
     assert cfg.data.augmentation.enabled is False
@@ -338,6 +369,7 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
         cfg.train.loss.class_gate_diversity_regularization.target
         == "class_evidence_gate"
     )
+
     assert cfg.train.loss.class_gate_diversity_regularization.metric == "js_divergence"
     assert cfg.train.loss.class_gate_diversity_regularization.start_epoch == 1
     assert cfg.train.loss.class_gate_diversity_regularization.end_epoch is None
@@ -349,6 +381,8 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.loss.class_evidence_margin.major_class is None
     assert cfg.train.loss.class_evidence_margin.class_weighted is False
     assert cfg.train.loss.class_evidence_margin.reduction == "mean"
+    assert cfg.train.loss.class_evidence_margin.temperature == 1.0
+    assert cfg.train.loss.class_weighting.power == 0.5
     assert cfg.train.loss.class_gated_branch_logit_margin.enabled is False
     assert cfg.train.loss.class_gated_branch_logit_margin.weight == 0.0
     assert cfg.train.loss.class_gated_branch_logit_margin.margin == 0.0
@@ -429,6 +463,54 @@ def test_load_training_config_uses_event_mil_schema(tmp_path: Path) -> None:
     assert cfg.train.sampler.enabled is False
     assert cfg.train.sampler.type == "none"
     assert cfg.train.initialization.checkpoint_path is None
+
+
+def test_classifier_fusion_projector_mlp_config_loads(tmp_path: Path) -> None:
+    payload = _base_payload()
+    payload["model"]["classifier"]["fusion_projector"] = {
+        "type": "mlp",
+        "hidden_dim": 640,
+        "layer_norm": True,
+    }
+    config_path = _write_json(tmp_path / "fusion_projector_mlp.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    fusion_projector = cfg.model.classifier.fusion_projector
+    assert fusion_projector.type == "mlp"
+    assert fusion_projector.hidden_dim == 640
+    assert fusion_projector.layer_norm is True
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "error"),
+    [
+        ("type", "residual_mlp", "fusion_projector.type"),
+        ("hidden_dim", 0, "fusion_projector.hidden_dim"),
+        ("hidden_dim", "640", "fusion_projector.hidden_dim"),
+        ("layer_norm", "true", "fusion_projector.layer_norm"),
+    ],
+)
+def test_invalid_classifier_fusion_projector_config_is_rejected(
+    tmp_path: Path,
+    field_name: str,
+    field_value: object,
+    error: str,
+) -> None:
+    payload = _base_payload()
+    payload["model"]["classifier"]["fusion_projector"] = {
+        "type": "mlp",
+        "hidden_dim": 640,
+        "layer_norm": True,
+    }
+    payload["model"]["classifier"]["fusion_projector"][field_name] = field_value
+    config_path = _write_json(
+        tmp_path / f"bad_fusion_projector_{field_name}.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 def test_experiment_logging_terminal_width_parses(tmp_path: Path) -> None:
@@ -1237,6 +1319,59 @@ def test_valid_class_weighted_class_evidence_margin_config_loads(
     )
 
 
+def test_valid_power_inverse_class_weighting_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    config_path = _write_json(tmp_path / "power_class_weighting.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    assert cfg.train.loss.class_weighting.type == "power_inverse_frequency"
+    assert cfg.train.loss.class_weighting.power == 0.75
+
+
+def test_valid_class_evidence_margin_softplus_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["class_evidence_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.0,
+        "target": "class_evidence_logits",
+        "mode": "softplus_true_vs_hardest_negative",
+        "major_class": None,
+        "class_weighted": True,
+        "reduction": "mean",
+        "temperature": 1.0,
+    }
+    config_path = _write_json(tmp_path / "class_evidence_margin_softplus.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    margin_cfg = cfg.train.loss.class_evidence_margin
+    assert margin_cfg.enabled is True
+    assert margin_cfg.mode == "softplus_true_vs_hardest_negative"
+    assert margin_cfg.margin == 0.0
+    assert margin_cfg.temperature == 1.0
+    assert margin_cfg.reduction == "mean"
+
+
 def test_valid_class_gated_branch_logit_margin_config_loads(
     tmp_path: Path,
 ) -> None:
@@ -1905,6 +2040,47 @@ def test_invalid_class_evidence_margin_config_is_rejected(
     }
     payload["train"]["loss"]["class_evidence_margin"][field] = value
     config_path = _write_json(tmp_path / "bad_class_evidence_margin.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("margin", -0.1, "class_evidence_margin.margin"),
+        ("temperature", 0.0, "class_evidence_margin.temperature"),
+        ("temperature", -1.0, "class_evidence_margin.temperature"),
+        ("temperature", "cold", "class_evidence_margin.temperature"),
+        (
+            "reduction",
+            "class_balanced_violating_mean",
+            "class_evidence_margin.reduction",
+        ),
+    ],
+)
+def test_invalid_softplus_class_evidence_margin_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_evidence_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "margin": 0.0,
+        "target": "class_evidence_logits",
+        "mode": "softplus_true_vs_hardest_negative",
+        "class_weighted": False,
+        "reduction": "mean",
+        "temperature": 1.0,
+    }
+    payload["train"]["loss"]["class_evidence_margin"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_softplus_class_evidence_margin.json",
+        payload,
+    )
 
     with pytest.raises((TypeError, ValueError), match=error):
         JsonConfigLoader.load_training(config_path)
@@ -3355,12 +3531,15 @@ def test_invalid_branch_binary_label_maps_are_rejected(
         ("type", "inverse", "class_weighting.type"),
         ("normalize", "sum_one", "class_weighting.normalize"),
         ("source", "val", "class_weighting.source"),
+        ("power", 0.0, "class_weighting.power"),
+        ("power", -0.75, "class_weighting.power"),
+        ("power", "strong", "class_weighting.power"),
     ],
 )
 def test_invalid_class_weighting_config_is_rejected(
     tmp_path: Path,
     field: str,
-    value: str,
+    value: object,
     error: str,
 ) -> None:
     payload = _fourclass_branch_binary_payload()

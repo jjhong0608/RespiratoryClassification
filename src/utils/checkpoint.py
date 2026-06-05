@@ -19,6 +19,7 @@ from src.models.model import (
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
+    FusionProjectorConfig,
     MilConfig,
     MultiScaleRdtArchitectureConfig,
     MultiScaleRdtAstModelConfig,
@@ -241,6 +242,14 @@ def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
         **token_augmentation
     )
 
+    classifier_kwargs = dict(classifier_raw)
+    fusion_projector_raw = classifier_kwargs.get("fusion_projector", {})
+    if not isinstance(fusion_projector_raw, Mapping):
+        raise TypeError("model_cfg.classifier.fusion_projector must be a dict")
+    classifier_kwargs["fusion_projector"] = FusionProjectorConfig(
+        **dict(fusion_projector_raw)
+    )
+
     return MultiScaleRdtAstModelConfig(
         encoder=MultiScaleRdtEncoderConfig(
             feature_dims=AstFeatureDims(**dict(feature_dims_raw)),
@@ -248,6 +257,6 @@ def parse_model_cfg(raw: object) -> MultiScaleRdtAstModelConfig:
             adaptation=EncoderAdaptationConfig(**dict(adaptation_raw)),
             architecture=MultiScaleRdtArchitectureConfig(**architecture_kwargs),
         ),
-        classifier=ClassifierConfig(**dict(classifier_raw)),
+        classifier=ClassifierConfig(**classifier_kwargs),
         num_classes=num_classes_raw,
     )

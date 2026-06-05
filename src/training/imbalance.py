@@ -73,7 +73,7 @@ def compute_class_counts_by_index(
     return counts
 
 
-def compute_sqrt_inverse_class_weights(class_counts: torch.Tensor) -> torch.Tensor:
+def _validate_class_counts_for_weights(class_counts: torch.Tensor) -> None:
     if class_counts.ndim != 1:
         raise ValueError(
             f"class_counts must be a 1D tensor, got {tuple(class_counts.shape)}"
@@ -82,8 +82,23 @@ def compute_sqrt_inverse_class_weights(class_counts: torch.Tensor) -> torch.Tens
         raise ValueError("class_counts must not be empty")
     if torch.any(class_counts < 0):
         raise ValueError("class_counts must be non-negative")
-    weights = torch.rsqrt(class_counts.to(dtype=torch.float32).clamp_min(1.0))
+
+
+def compute_power_inverse_class_weights(
+    class_counts: torch.Tensor,
+    *,
+    power: float,
+) -> torch.Tensor:
+    _validate_class_counts_for_weights(class_counts)
+    if power <= 0:
+        raise ValueError("power must be greater than zero")
+    counts = class_counts.to(dtype=torch.float32).clamp_min(1.0)
+    weights = counts.pow(-float(power))
     return weights / weights.mean().clamp_min(1e-12)
+
+
+def compute_sqrt_inverse_class_weights(class_counts: torch.Tensor) -> torch.Tensor:
+    return compute_power_inverse_class_weights(class_counts, power=0.5)
 
 
 def build_main_index_to_binary_target(
@@ -161,7 +176,19 @@ def resolve_loss_weights(
     class_counts_tuple = tuple(int(value.item()) for value in class_counts_tensor)
     class_weights: tuple[float, ...] | None = None
     if loss_cfg.class_weighting.enabled:
-        class_weights_tensor = compute_sqrt_inverse_class_weights(class_counts_tensor)
+        if loss_cfg.class_weighting.type == "sqrt_inverse_frequency":
+            class_weights_tensor = compute_sqrt_inverse_class_weights(
+                class_counts_tensor
+            )
+        elif loss_cfg.class_weighting.type == "power_inverse_frequency":
+            class_weights_tensor = compute_power_inverse_class_weights(
+                class_counts_tensor,
+                power=float(loss_cfg.class_weighting.power),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported class_weighting.type: {loss_cfg.class_weighting.type}"
+            )
         class_weights = tuple(float(value.item()) for value in class_weights_tensor)
 
     main_index_to_binary_target: tuple[int, ...] | None = None

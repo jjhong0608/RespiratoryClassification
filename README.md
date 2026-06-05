@@ -136,6 +136,11 @@ final_logits = class_evidence_logits + effective_residual_scale * residual_term
 
 The global residual path reuses `model.classifier`. Its input combines
 class-aware gated evidence features and class-gated branch-logit features.
+`model.classifier.fusion_projector` controls the projection immediately before
+that residual classifier. The default `type="linear"` keeps the original single
+projection, while `type="mlp"` adds a LayerNorm-equipped two-layer projector to
+increase residual-path capacity without changing the final classifier input
+dimension.
 
 ### Class Gate Options
 
@@ -201,6 +206,10 @@ The class-aware CNUH config uses a deeper adapter than shared stem so branch
 specialization can develop after a small common frontend. `classifier.pooling`
 remains `latent_mean`; in class-aware mode this classifier is the residual
 classifier rather than the only logits source.
+`classifier.fusion_projector.type="mlp"` can be used when the residual path
+needs more capacity after class-aware evidence fusion. Bounded residual and
+anti-veto losses should remain enabled in these experiments so the larger
+residual classifier cannot become a shortcut that overrides class evidence.
 
 ### `train`
 
@@ -254,7 +263,9 @@ uses `mode="teacher_distribution_kl"` because both objectives provide
 CE-like supervision to the evidence scorer.
 
 `class_gate.evidence_scorer.type="two_tower_mlp"` converts class-aware evidence
-embeddings into `class_evidence_logits` with independent per-class towers:
+embeddings into `class_evidence_logits` with independent per-class towers. The
+capacity is controlled by `embedding_hidden_size`, `branch_hidden_size`,
+`fusion_hidden_size`, and `dropout`:
 
 ```text
 embedding_tower: class_evidence_embeddings -> LayerNorm -> Linear -> GELU -> Dropout
@@ -290,7 +301,26 @@ Both regularizers can be bounded by `start_epoch` and `end_epoch`.
 
 ### Margin Losses
 
-`class_evidence_margin` applies margin ranking to `class_evidence_logits`.
+`class_weighting.type="sqrt_inverse_frequency"` builds mean-one normalized loss
+weights from train-set class counts with `count ** -0.5`.
+`class_weighting.type="power_inverse_frequency"` uses the same mean-one
+normalization with `count ** -power`; `power=0.75` is a more aggressive
+minority-class weighting than the square-root setting. These weights affect
+loss components that opt into `class_weighted=true`; the
+`sqrt_inverse_class` sampler is separate and unchanged.
+
+`class_evidence_margin` anchors `class_evidence_logits` to the true label. The
+hard modes, `minority_vs_major` and `true_vs_hardest_negative`, apply
+ReLU-style margin violations and require `margin > 0`. The soft anchor mode
+`softplus_true_vs_hardest_negative` uses no explicit margin:
+
+```text
+gap = class_evidence_logits[true] - max(class_evidence_logits[negative])
+loss = temperature * softplus(-gap / temperature)
+```
+
+Softplus mode should use `reduction="mean"` because every sample contributes a
+smooth ranking penalty instead of only hard violations.
 
 `class_gated_branch_logit_margin` applies margin ranking to
 `class_gated_branch_logits`.

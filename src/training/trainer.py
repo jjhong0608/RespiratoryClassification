@@ -1261,10 +1261,24 @@ class Trainer(LoggingMixin):
                 class_weights,
                 reduction=self.cfg.class_evidence_margin.reduction,
             )
+        elif mode == "softplus_true_vs_hardest_negative":
+            margin_gap, _ = self._true_vs_hardest_negative_gap(
+                logits,
+                label_indices,
+            )
+            temperature = float(self.cfg.class_evidence_margin.temperature)
+            penalties = temperature * F.softplus(-margin_gap / temperature)
+            raw_loss = self._reduce_class_margin_penalties(
+                penalties,
+                label_indices,
+                class_weights,
+                reduction=self.cfg.class_evidence_margin.reduction,
+            )
         else:
             raise ValueError(
-                "class evidence margin mode must be 'minority_vs_major' or "
-                "'true_vs_hardest_negative'"
+                "class evidence margin mode must be 'minority_vs_major', "
+                "'true_vs_hardest_negative', or "
+                "'softplus_true_vs_hardest_negative'"
             )
         weighted_loss = float(self.cfg.class_evidence_margin.weight) * raw_loss
         return raw_loss, weighted_loss
@@ -2871,7 +2885,10 @@ class Trainer(LoggingMixin):
                 margin_gap: Tensor | None = None
                 margin_negative: Tensor | None = None
                 eligible = torch.ones_like(label_indices, dtype=torch.bool)
-                if margin_cfg.mode == "true_vs_hardest_negative":
+                if margin_cfg.mode in {
+                    "true_vs_hardest_negative",
+                    "softplus_true_vs_hardest_negative",
+                }:
                     margin_gap, margin_negative = self._true_vs_hardest_negative_gap(
                         evidence_logits,
                         label_indices,
@@ -2890,18 +2907,24 @@ class Trainer(LoggingMixin):
                         margin_negative = torch.full_like(label_indices, major_index)
                         eligible = label_indices != major_index
                 if margin_gap is not None and margin_negative is not None:
-                    support_weight, support_gap = self._margin_support_weights(
-                        output,
-                        labels,
-                        label_indices,
-                        margin_gap,
-                        margin_cfg.support_weighting,
-                        loss_name="class_evidence_margin",
-                    )
-                    penalties = (
-                        torch.relu(float(margin_cfg.margin) - margin_gap)
-                        * support_weight
-                    )
+                    if margin_cfg.mode == "softplus_true_vs_hardest_negative":
+                        support_weight = torch.ones_like(margin_gap)
+                        support_gap = torch.zeros_like(margin_gap)
+                        temperature = float(margin_cfg.temperature)
+                        penalties = temperature * F.softplus(-margin_gap / temperature)
+                    else:
+                        support_weight, support_gap = self._margin_support_weights(
+                            output,
+                            labels,
+                            label_indices,
+                            margin_gap,
+                            margin_cfg.support_weighting,
+                            loss_name="class_evidence_margin",
+                        )
+                        penalties = (
+                            torch.relu(float(margin_cfg.margin) - margin_gap)
+                            * support_weight
+                        )
                     penalties = torch.where(
                         eligible,
                         penalties,
@@ -2922,6 +2945,10 @@ class Trainer(LoggingMixin):
                         )
                         row["class_evidence_margin_penalty"] = float(
                             penalties[index].detach().cpu().item()
+                        )
+                        row["class_evidence_margin_mode"] = str(margin_cfg.mode)
+                        row["class_evidence_margin_temperature"] = float(
+                            margin_cfg.temperature
                         )
                         row["class_evidence_margin_eligible"] = bool(
                             eligible[index].detach().cpu().item()

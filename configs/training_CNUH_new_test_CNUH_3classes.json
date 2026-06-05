@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "new_test_CNUH_3classes_ver18",
+    "name": "new_test_CNUH_3classes_ver20",
     "task": "normal_crackle_wheeze_rhonchi_pretrain",
     "mode": "clip",
     "seed": 1337,
@@ -147,8 +147,8 @@
             "evidence_scorer": {
               "type": "two_tower_mlp",
               "embedding_hidden_size": 512,
-              "branch_hidden_size": 64,
-              "fusion_hidden_size": 512,
+              "branch_hidden_size": 128,
+              "fusion_hidden_size": 768,
               "dropout": 0.05,
               "branch_feature_transform": {
                 "mode": "tanh",
@@ -226,9 +226,14 @@
     },
     "classifier": {
       "type": "mlp",
-      "hidden_dim": 512,
+      "hidden_dim": 1024,
       "dropout": 0.15,
-      "pooling": "latent_mean"
+      "pooling": "latent_mean",
+      "fusion_projector": {
+        "type": "mlp",
+        "hidden_dim": 640,
+        "layer_norm": true
+      }
     }
   },
   "train": {
@@ -250,9 +255,10 @@
       "gamma": 2.0,
       "class_weighting": {
         "enabled": true,
-        "type": "sqrt_inverse_frequency",
+        "type": "power_inverse_frequency",
         "normalize": "mean_one",
-        "source": "train"
+        "source": "train",
+        "power": 0.75
       },
       "label_smoothing": {
         "enabled": false,
@@ -276,12 +282,13 @@
       "class_evidence_margin": {
         "enabled": true,
         "weight": 0.05,
-        "margin": 0.5,
+        "margin": 0.0,
         "target": "class_evidence_logits",
-        "mode": "true_vs_hardest_negative",
-        "major_class": "normal",
+        "mode": "softplus_true_vs_hardest_negative",
+        "major_class": null,
         "class_weighted": true,
-        "reduction": "class_balanced_violating_mean",
+        "reduction": "mean",
+        "temperature": 1.0,
         "support_weighting": {
           "enabled": false,
           "source": "top_branch_margin",

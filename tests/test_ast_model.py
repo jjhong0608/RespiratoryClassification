@@ -24,6 +24,7 @@ from src.models.model import (
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
+    FusionProjectorConfig,
     MeanEvidencePooling,
     MilConfig,
     MultiScaleRdtArchitectureConfig,
@@ -95,6 +96,7 @@ def _small_model_config(
     attention_temperature: float = 1.0,
     evidence_pooling: EvidencePoolingConfig | None = None,
     token_augmentation: TokenAugmentationConfig | None = None,
+    classifier: ClassifierConfig | None = None,
 ) -> MultiScaleRdtAstModelConfig:
     return MultiScaleRdtAstModelConfig(
         encoder=MultiScaleRdtEncoderConfig(
@@ -112,7 +114,8 @@ def _small_model_config(
                 token_augmentation=token_augmentation,
             ),
         ),
-        classifier=ClassifierConfig(
+        classifier=classifier
+        or ClassifierConfig(
             type="mlp",
             hidden_dim=24,
             dropout=0.1,
@@ -769,6 +772,44 @@ def test_model_forward_uses_class_aware_branch_gated_evidence_pooling(
         torch.ones(2, num_classes),
         atol=1e-5,
     )
+
+
+def test_model_uses_configured_mlp_fusion_projector() -> None:
+    model = MultiScaleRdtAstModel(
+        _small_model_config(
+            num_classes=3,
+            classifier=ClassifierConfig(
+                type="mlp",
+                hidden_dim=48,
+                dropout=0.0,
+                pooling="latent_mean",
+                fusion_projector=FusionProjectorConfig(
+                    type="mlp",
+                    hidden_dim=40,
+                    layer_norm=True,
+                ),
+            ),
+            evidence_pooling=EvidencePoolingConfig(
+                type="class_aware_branch_gated",
+                dropout=0.0,
+            ),
+        )
+    )
+
+    assert isinstance(model.fusion_projector[0], torch.nn.LayerNorm)
+    first_linear = model.fusion_projector[1]
+    second_linear = model.fusion_projector[4]
+    assert isinstance(first_linear, torch.nn.Linear)
+    assert isinstance(second_linear, torch.nn.Linear)
+    assert first_linear.in_features == (3 * 32) + 3
+    assert first_linear.out_features == 40
+    assert second_linear.in_features == 40
+    assert second_linear.out_features == 32
+
+    output = model(torch.randn(2, 32, 32))
+
+    assert output.pooled_embedding.shape == (2, 32)
+    assert output.logits.shape == (2, 3)
 
 
 def test_class_aware_model_can_disable_global_residual() -> None:

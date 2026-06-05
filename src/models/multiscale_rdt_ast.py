@@ -242,11 +242,21 @@ class MultiScaleRdtEncoderConfig:
 
 
 @dataclass(frozen=True)
+class FusionProjectorConfig:
+    type: Literal["linear", "mlp"] = "linear"
+    hidden_dim: int = 640
+    layer_norm: bool = False
+
+
+@dataclass(frozen=True)
 class ClassifierConfig:
     type: Literal["linear", "mlp"] = "linear"
     hidden_dim: int = 256
     dropout: float = 0.0
     pooling: Literal["latent_mean"] = "latent_mean"
+    fusion_projector: FusionProjectorConfig = field(
+        default_factory=FusionProjectorConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -1427,10 +1437,11 @@ class MultiScaleRdtAstModel(nn.Module):
             fusion_input_dim = (2 * architecture.hidden_size) + (
                 num_branches * output_dim
             )
-        self.fusion_projector = nn.Sequential(
-            nn.Linear(fusion_input_dim, architecture.hidden_size),
-            nn.GELU(),
-            nn.Dropout(cfg.classifier.dropout),
+        self.fusion_projector = self._build_fusion_projector(
+            input_dim=fusion_input_dim,
+            output_dim=architecture.hidden_size,
+            cfg=cfg.classifier.fusion_projector,
+            dropout=cfg.classifier.dropout,
         )
         classifier_dims = ClassifierDims(
             in_dim=architecture.hidden_size,
@@ -1450,6 +1461,37 @@ class MultiScaleRdtAstModel(nn.Module):
         set_runtime_epoch = getattr(self.evidence_pooler, "set_runtime_epoch", None)
         if callable(set_runtime_epoch):
             set_runtime_epoch(self._runtime_epoch)
+
+    @staticmethod
+    def _build_fusion_projector(
+        *,
+        input_dim: int,
+        output_dim: int,
+        cfg: FusionProjectorConfig,
+        dropout: float,
+    ) -> nn.Sequential:
+        if cfg.type == "linear":
+            return nn.Sequential(
+                nn.Linear(input_dim, output_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            )
+        if cfg.type == "mlp":
+            layers: list[nn.Module] = []
+            if cfg.layer_norm:
+                layers.append(nn.LayerNorm(input_dim))
+            layers.extend(
+                [
+                    nn.Linear(input_dim, cfg.hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(cfg.hidden_dim, output_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                ]
+            )
+            return nn.Sequential(*layers)
+        raise ValueError(f"Unsupported fusion projector type: {cfg.type}")
 
     def encoder_side_modules(self) -> tuple[nn.Module, ...]:
         return (self.encoder, self.branch_mil_heads, self.branch_binary_head)
