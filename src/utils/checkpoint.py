@@ -14,6 +14,7 @@ from src.models.model import (
     ClassGateEvidenceScorerConfig,
     ClassGateGlobalResidualBoundingConfig,
     ClassGateGlobalResidualConfig,
+    ClassGateGlobalResidualCorrectionConfig,
     ClassGateGlobalResidualWarmupConfig,
     ClassGateMixingConfig,
     ClassifierConfig,
@@ -131,6 +132,15 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
     )
     global_residual_kwargs["bounding"] = ClassGateGlobalResidualBoundingConfig(
         **dict(bounding_raw)
+    )
+    correction_raw = global_residual_kwargs.get("correction", {})
+    if not isinstance(correction_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "global_residual.correction must be a dict"
+        )
+    global_residual_kwargs["correction"] = ClassGateGlobalResidualCorrectionConfig(
+        **dict(correction_raw)
     )
     class_gate_kwargs["global_residual"] = ClassGateGlobalResidualConfig(
         **global_residual_kwargs

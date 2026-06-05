@@ -244,7 +244,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver20"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver21"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.train.loss.type == "cross_entropy"
@@ -255,10 +255,14 @@ def test_retained_repo_configs_load() -> None:
     current_class_gate = (
         current_training_cfg.model.encoder.architecture.evidence_pooling.class_gate
     )
-    assert current_class_gate.evidence_scorer.type == "two_tower_mlp"
+    assert current_class_gate.evidence_scorer.type == "class_axis_attention"
     assert current_class_gate.evidence_scorer.embedding_hidden_size == 512
     assert current_class_gate.evidence_scorer.branch_hidden_size == 128
     assert current_class_gate.evidence_scorer.fusion_hidden_size == 768
+    assert current_class_gate.evidence_scorer.num_attention_heads == 4
+    assert current_class_gate.evidence_scorer.num_attention_layers == 1
+    assert current_class_gate.evidence_scorer.use_class_embedding is True
+    assert current_class_gate.evidence_scorer.logit_centering is True
     assert current_class_gate.evidence_scorer.dropout == pytest.approx(0.05)
     assert current_class_gate.evidence_scorer.branch_feature_transform.mode == "tanh"
     assert (
@@ -271,11 +275,11 @@ def test_retained_repo_configs_load() -> None:
     )
     assert (
         current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.mode
-        == "teacher_distribution_kl"
+        == "true_label_anchored_softplus"
     )
     assert (
         current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.source
-        == "class_top_branch_margin_features"
+        == "class_top_branch_margin_relative_features"
     )
     assert (
         current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.weight
@@ -299,18 +303,18 @@ def test_retained_repo_configs_load() -> None:
     assert current_training_cfg.model.classifier.fusion_projector.type == "mlp"
     assert current_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
     assert current_training_cfg.model.classifier.fusion_projector.layer_norm is True
-    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER4"
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER5"
     assert disease_training_cfg.model.classifier.hidden_dim == 1024
     assert disease_training_cfg.model.classifier.fusion_projector.type == "mlp"
     assert disease_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
     assert disease_training_cfg.model.classifier.fusion_projector.layer_norm is True
     assert (
         disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.mode
-        == "teacher_distribution_kl"
+        == "true_label_anchored_softplus"
     )
     assert (
         disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.source
-        == "class_top_branch_margin_features"
+        == "class_top_branch_margin_relative_features"
     )
     assert (
         disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.weight
@@ -668,6 +672,55 @@ def test_class_aware_two_tower_evidence_scorer_config_loads(
     assert loaded.gate_mixing.mode == "uniform_to_learned"
     assert loaded.gate_mixing.start_alpha == 1.0
     assert loaded.gate_mixing.end_alpha == 0.0
+
+
+def test_class_aware_class_axis_attention_evidence_scorer_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "dropout": 0.2,
+        "use_class_embedding": True,
+        "logit_centering": True,
+        "branch_feature_transform": {
+            "mode": "tanh",
+            "temperature": 0.75,
+        },
+    }
+    class_gate["global_residual"]["correction"] = {
+        "mode": "gated_zero_mean",
+        "gate_hidden_size": 16,
+        "dropout": 0.1,
+        "zero_mean": True,
+        "rebound": True,
+    }
+    config_path = _write_json(tmp_path / "class_axis_attention_scorer.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    loaded = cfg.model.encoder.architecture.evidence_pooling.class_gate
+    assert loaded.evidence_scorer.type == "class_axis_attention"
+    assert loaded.evidence_scorer.embedding_hidden_size == 32
+    assert loaded.evidence_scorer.branch_hidden_size == 8
+    assert loaded.evidence_scorer.fusion_hidden_size == 24
+    assert loaded.evidence_scorer.num_attention_heads == 4
+    assert loaded.evidence_scorer.num_attention_layers == 1
+    assert loaded.evidence_scorer.use_class_embedding is True
+    assert loaded.evidence_scorer.logit_centering is True
+    assert loaded.global_residual.correction.mode == "gated_zero_mean"
+    assert loaded.global_residual.correction.gate_hidden_size == 16
+    assert loaded.global_residual.correction.dropout == pytest.approx(0.1)
+    assert loaded.global_residual.correction.zero_mean is True
+    assert loaded.global_residual.correction.rebound is True
 
 
 def test_class_aware_two_tower_evidence_scorer_and_bounding_load(
@@ -1569,6 +1622,50 @@ def test_valid_teacher_distribution_kl_branch_to_evidence_config_loads(
     assert consistency_cfg.teacher_temperature == pytest.approx(0.7)
     assert consistency_cfg.student_temperature == pytest.approx(1.0)
     assert consistency_cfg.teacher_detach is True
+    assert consistency_cfg.class_weighted is True
+    assert consistency_cfg.reduction == "mean"
+
+
+def test_valid_true_label_anchored_softplus_branch_to_evidence_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "sqrt_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+    }
+    payload["train"]["loss"]["branch_to_evidence_ranking_consistency"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_evidence_logits",
+        "source": "class_top_branch_margin_relative_features",
+        "mode": "true_label_anchored_softplus",
+        "teacher_detach": True,
+        "temperature": 1.0,
+        "support_weighting": {
+            "enabled": True,
+            "source": "same_as_source",
+            "mode": "positive_linear",
+            "gain": 1.0,
+            "cap": 2.0,
+        },
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "true_label_anchored_b2e.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    consistency_cfg = cfg.train.loss.branch_to_evidence_ranking_consistency
+    assert consistency_cfg.source == "class_top_branch_margin_relative_features"
+    assert consistency_cfg.mode == "true_label_anchored_softplus"
+    assert consistency_cfg.temperature == pytest.approx(1.0)
+    assert consistency_cfg.support_weighting.enabled is True
+    assert consistency_cfg.support_weighting.source == "same_as_source"
+    assert consistency_cfg.support_weighting.mode == "positive_linear"
     assert consistency_cfg.class_weighted is True
     assert consistency_cfg.reduction == "mean"
 

@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "CNUH_DISEASE_VER4",
+    "name": "CNUH_DISEASE_VER5",
     "task": "Normal_vs_LungParenchymal_vs_Airway",
     "mode": "clip",
     "seed": 1337,
@@ -125,7 +125,7 @@
         "mlp_ratio": 2.0,
         "hidden_dropout_prob": 0.1,
         "attention_probs_dropout_prob": 0.1,
-        "layer_norm_eps": 1e-6,
+        "layer_norm_eps": 1e-06,
         "shared_stem_depth": 1,
         "adapter_depth": 4,
         "rdt": {
@@ -145,11 +145,15 @@
           "class_gate": {
             "mode": "query",
             "evidence_scorer": {
-              "type": "two_tower_mlp",
+              "type": "class_axis_attention",
               "embedding_hidden_size": 512,
               "branch_hidden_size": 128,
               "fusion_hidden_size": 768,
+              "num_attention_heads": 4,
+              "num_attention_layers": 1,
               "dropout": 0.05,
+              "use_class_embedding": true,
+              "logit_centering": true,
               "branch_feature_transform": {
                 "mode": "tanh",
                 "temperature": 1.0
@@ -171,6 +175,13 @@
                 "enabled": true,
                 "bound": 1.0,
                 "temperature": 1.0
+              },
+              "correction": {
+                "mode": "gated_zero_mean",
+                "gate_hidden_size": 128,
+                "dropout": 0.05,
+                "zero_mean": true,
+                "rebound": true
               }
             },
             "evidence_auxiliary": {
@@ -206,20 +217,44 @@
         },
         "patch_branches": [
           {
-            "patch_size": [16, 16],
-            "stride": [8, 16]
+            "patch_size": [
+              16,
+              16
+            ],
+            "stride": [
+              8,
+              16
+            ]
           },
           {
-            "patch_size": [8, 32],
-            "stride": [4, 32]
+            "patch_size": [
+              8,
+              32
+            ],
+            "stride": [
+              4,
+              32
+            ]
           },
           {
-            "patch_size": [4, 64],
-            "stride": [2, 64]
+            "patch_size": [
+              4,
+              64
+            ],
+            "stride": [
+              2,
+              64
+            ]
           },
           {
-            "patch_size": [2, 128],
-            "stride": [1, 128]
+            "patch_size": [
+              2,
+              128
+            ],
+            "stride": [
+              1,
+              128
+            ]
           }
         ]
       }
@@ -310,12 +345,19 @@
         "enabled": true,
         "weight": 0.1,
         "target": "class_evidence_logits",
-        "source": "class_top_branch_margin_features",
-        "mode": "teacher_distribution_kl",
+        "source": "class_top_branch_margin_relative_features",
+        "mode": "true_label_anchored_softplus",
         "teacher_detach": true,
-        "teacher_temperature": 0.7,
-        "student_temperature": 1.0,
+        "temperature": 1.0,
+        "support_weighting": {
+          "enabled": true,
+          "source": "same_as_source",
+          "mode": "positive_linear",
+          "gain": 1.0,
+          "cap": 2.0
+        },
         "class_weighted": true,
+        "reduction": "mean",
         "warmup_epochs": 10
       },
       "global_residual_anti_veto": {

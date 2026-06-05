@@ -262,25 +262,41 @@ experiments keep it disabled when `branch_to_evidence_ranking_consistency`
 uses `mode="teacher_distribution_kl"` because both objectives provide
 CE-like supervision to the evidence scorer.
 
-`class_gate.evidence_scorer.type="two_tower_mlp"` converts class-aware evidence
-embeddings into `class_evidence_logits` with independent per-class towers. The
-capacity is controlled by `embedding_hidden_size`, `branch_hidden_size`,
-`fusion_hidden_size`, and `dropout`:
+`class_gate.evidence_scorer.type="class_axis_attention"` converts class-aware
+evidence embeddings into `class_evidence_logits` with shared towers and
+self-attention over the class axis. This scorer is intended for class-aware
+runs where branch support should compete across labels before evidence logits
+are produced. The capacity is controlled by `embedding_hidden_size`,
+`branch_hidden_size`, `fusion_hidden_size`, `num_attention_heads`,
+`num_attention_layers`, and `dropout`:
 
 ```text
 embedding_tower: class_evidence_embeddings -> LayerNorm -> Linear -> GELU -> Dropout
 branch_feature_tower: tanh(branch_features / temperature) -> Linear -> GELU -> Dropout
-fusion: concat(embedding_hidden, branch_hidden) -> LayerNorm -> Linear -> GELU -> Dropout -> Linear
+token_projector: concat(embedding_hidden, branch_hidden) -> LayerNorm -> Linear -> GELU -> Dropout
+class_axis_attention: class tokens -> TransformerEncoder over C labels
+logit_head: LayerNorm -> Linear -> class_evidence_logits
 ```
 
-The branch tower always receives two label-free features:
+When `use_class_embedding=true`, a learned class embedding is added to each
+class token. When `logit_centering=true`, the row mean is subtracted from
+`class_evidence_logits` so the evidence scorer expresses class competition
+rather than a shared offset.
 
-- `class_gated_branch_logit_features`: the same class-wise branch-logit feature used by the residual path.
-- `top_branch_margin_style`: class-wise `max_r(branch_logit[c] - max_{j != c} branch_logit[j])`.
+The class-axis scorer receives four label-free branch features:
+
+- `class_gated_branch_logit_features`: the class-wise branch-logit feature used by the residual path.
+- `class_gated_branch_logit_relative_features`: the same feature minus the strongest non-self class value.
+- `class_top_branch_margin_features`: class-wise `max_r(branch_logit[c] - max_{j != c} branch_logit[j])`.
+- `class_top_branch_margin_relative_features`: top-branch support minus the strongest non-self top-branch support.
 
 This path is inference-safe because it does not use true labels. It does not
 class-wise normalize branch features; `branch_feature_transform.mode="tanh"`
 keeps absolute branch support information while bounding the feature scale.
+
+`class_gate.evidence_scorer.type="two_tower_mlp"` remains available as an older
+independent per-class scorer, but the current disease/new-test configs use
+`class_axis_attention`.
 
 ### Gate Regularization
 
@@ -326,21 +342,22 @@ smooth ranking penalty instead of only hard violations.
 `class_gated_branch_logits`.
 
 `branch_to_evidence_ranking_consistency` is the main branch-to-evidence
-transfer objective. In the recommended `mode="teacher_distribution_kl"` setup,
-the detached `class_top_branch_margin_features` are converted into a teacher
-distribution:
+transfer objective. The current class-axis configs use
+`mode="true_label_anchored_softplus"` with
+`source="class_top_branch_margin_relative_features"`:
 
 ```text
-teacher_probs = softmax(class_top_branch_margin_features / teacher_temperature)
-student_log_probs = log_softmax(class_evidence_logits / student_temperature)
-loss = KL(teacher_probs || student_log_probs)
+evidence_gap = class_evidence_logits[true] - max(class_evidence_logits[negative])
+support = class_top_branch_margin_relative_features[true]
+support_weight = 1 + gain * clamp(relu(support), max=cap)
+loss = support_weight * temperature * softplus(-evidence_gap / temperature)
 ```
 
-This passes the branch-side class ranking distribution into
-`class_evidence_logits` instead of forcing only a single hard true-vs-negative
-gap. The legacy `mode="true_vs_hardest_negative"` path remains available for
-older configs and compares a detached branch-side teacher gap against the same
-gap from `class_evidence_logits`.
+This keeps the objective true-label anchored while making supported samples
+matter more. The legacy `mode="teacher_distribution_kl"` path remains available
+for older configs and converts detached `class_top_branch_margin_features` into
+a teacher distribution. The legacy `mode="true_vs_hardest_negative"` path also
+remains available for older hard-margin configs.
 
 `class_evidence_margin.support_weighting` applies the same detached branch
 support multiplier to the class evidence margin. This makes evidence ranking
@@ -356,6 +373,22 @@ it uses `support_source="top_branch_margin"` to select supported samples and
 penalizes `final_logits` when the final true-vs-hardest-negative gap drops more
 than `allowed_gap_drop` below the detached `class_evidence_logits` reference
 gap.
+
+`class_gate.global_residual.correction.mode="gated_zero_mean"` changes the
+final combiner from always adding the residual logits to applying an
+evidence-first gated correction:
+
+```text
+bounded = bound * tanh(global_residual_logits / temperature)
+centered = bounded - mean(bounded, dim=-1, keepdim=True)
+centered = clamp(centered, -bound, bound)
+gate = sigmoid(MLP([class_evidence_logits, gated_raw, gated_relative, top_raw, top_relative]))
+final_logits = class_evidence_logits + effective_scale * gate * centered
+```
+
+The zero-mean step prevents the residual path from adding a shared class offset,
+and the gate lets the residual act as a class-wise correction only where the
+evidence and branch features support using it.
 
 `gate_weighted_branch_margin` improves branch logits selected by the true-class
 gate. The gate is detached, so this loss updates branch heads rather than
@@ -448,6 +481,14 @@ Important class-aware fields include:
 - `class_evidence_logits`: direct evidence logits.
 - `class_gated_branch_logits`: raw class-gated branch logits.
 - `class_gated_branch_logit_features`: branch-logit features fed to the residual classifier.
+- `class_gated_branch_logit_relative_features`: relative class-gated branch support.
+- `class_top_branch_margin_features`: class-wise top branch support.
+- `class_top_branch_margin_relative_features`: relative top branch support.
+- `class_evidence_scorer_branch_raw_features`: raw branch features before transform.
+- `class_evidence_scorer_branch_features`: transformed branch features used by the evidence scorer.
+- `global_residual_gate`: class-wise residual correction gate.
+- `centered_bounded_global_residual_logits`: zero-mean bounded residual logits.
+- `global_residual_contribution`: actual residual contribution added to evidence logits.
 - `global_residual_logits`: residual classifier logits.
 - `global_residual_scale`: raw residual scale.
 - `global_residual_schedule_multiplier`: epoch schedule multiplier.

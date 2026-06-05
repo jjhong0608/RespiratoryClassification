@@ -119,9 +119,24 @@ def build_diagnostic_rows(
         if output.class_gated_branch_logit_features is not None
         else None
     )
+    class_gated_branch_logit_relative_features = (
+        output.class_gated_branch_logit_relative_features.detach().cpu()
+        if output.class_gated_branch_logit_relative_features is not None
+        else None
+    )
     class_top_branch_margin_features = (
         output.class_top_branch_margin_features.detach().cpu()
         if output.class_top_branch_margin_features is not None
+        else None
+    )
+    class_top_branch_margin_relative_features = (
+        output.class_top_branch_margin_relative_features.detach().cpu()
+        if output.class_top_branch_margin_relative_features is not None
+        else None
+    )
+    class_evidence_scorer_branch_raw_features = (
+        output.class_evidence_scorer_branch_raw_features.detach().cpu()
+        if output.class_evidence_scorer_branch_raw_features is not None
         else None
     )
     class_evidence_scorer_branch_features = (
@@ -152,6 +167,21 @@ def build_diagnostic_rows(
     bounded_global_residual_logits = (
         output.bounded_global_residual_logits.detach().cpu()
         if output.bounded_global_residual_logits is not None
+        else None
+    )
+    centered_bounded_global_residual_logits = (
+        output.centered_bounded_global_residual_logits.detach().cpu()
+        if output.centered_bounded_global_residual_logits is not None
+        else None
+    )
+    global_residual_gate = (
+        output.global_residual_gate.detach().cpu()
+        if output.global_residual_gate is not None
+        else None
+    )
+    global_residual_contribution = (
+        output.global_residual_contribution.detach().cpu()
+        if output.global_residual_contribution is not None
         else None
     )
     global_residual_bound = (
@@ -216,6 +246,16 @@ def build_diagnostic_rows(
                 row["bounded_global_residual_logits"] = bounded_global_residual_logits[
                     index
                 ].tolist()
+            if centered_bounded_global_residual_logits is not None:
+                row["centered_bounded_global_residual_logits"] = (
+                    centered_bounded_global_residual_logits[index].tolist()
+                )
+            if global_residual_gate is not None:
+                row["global_residual_gate"] = global_residual_gate[index].tolist()
+            if global_residual_contribution is not None:
+                row["global_residual_contribution"] = global_residual_contribution[
+                    index
+                ].tolist()
             if class_gated_branch_logits is not None:
                 row["class_gated_branch_logits"] = class_gated_branch_logits[
                     index
@@ -224,9 +264,21 @@ def build_diagnostic_rows(
                 row["class_gated_branch_logit_features"] = (
                     class_gated_branch_logit_features[index].tolist()
                 )
+            if class_gated_branch_logit_relative_features is not None:
+                row["class_gated_branch_logit_relative_features"] = (
+                    class_gated_branch_logit_relative_features[index].tolist()
+                )
             if class_top_branch_margin_features is not None:
                 row["class_top_branch_margin_features"] = (
                     class_top_branch_margin_features[index].tolist()
+                )
+            if class_top_branch_margin_relative_features is not None:
+                row["class_top_branch_margin_relative_features"] = (
+                    class_top_branch_margin_relative_features[index].tolist()
+                )
+            if class_evidence_scorer_branch_raw_features is not None:
+                row["class_evidence_scorer_branch_raw_features"] = (
+                    class_evidence_scorer_branch_raw_features[index].tolist()
                 )
             if class_evidence_scorer_branch_features is not None:
                 row["class_evidence_scorer_branch_features"] = (
@@ -247,6 +299,14 @@ def build_diagnostic_rows(
             if output.class_gated_branch_logit_feature_mode is not None:
                 row["class_gated_branch_logit_feature_mode"] = (
                     output.class_gated_branch_logit_feature_mode
+                )
+            if output.global_residual_zero_mean_enabled is not None:
+                row["global_residual_zero_mean_enabled"] = (
+                    output.global_residual_zero_mean_enabled
+                )
+            if output.global_residual_rebound_enabled is not None:
+                row["global_residual_rebound_enabled"] = (
+                    output.global_residual_rebound_enabled
                 )
             if binary_auxiliary_targets_cpu is not None:
                 row["binary_auxiliary_target"] = int(

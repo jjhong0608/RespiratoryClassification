@@ -17,6 +17,7 @@ from src.models.model import (
     ClassGateEvidenceScorerConfig,
     ClassGateGlobalResidualBoundingConfig,
     ClassGateGlobalResidualConfig,
+    ClassGateGlobalResidualCorrectionConfig,
     ClassGateGlobalResidualWarmupConfig,
     ClassGateMixingConfig,
     ClassifierConfig,
@@ -239,8 +240,11 @@ class ClassGateDiversityRegularizationConfig:
 @dataclass(frozen=True)
 class MarginSupportWeightingConfig:
     enabled: bool = False
-    source: Literal["top_branch_margin"] = "top_branch_margin"
-    mode: Literal["linear"] = "linear"
+    source: Literal[
+        "top_branch_margin",
+        "same_as_source",
+    ] = "top_branch_margin"
+    mode: Literal["linear", "positive_linear"] = "linear"
     gain: float = 1.0
     cap: float = 2.0
 
@@ -294,14 +298,17 @@ class BranchToEvidenceRankingConsistencyConfig:
         "class_gated_branch_logits",
         "top_branch_margin",
         "class_top_branch_margin_features",
+        "class_top_branch_margin_relative_features",
     ] = "class_gated_branch_logits"
     mode: Literal[
         "true_vs_hardest_negative",
         "teacher_distribution_kl",
+        "true_label_anchored_softplus",
     ] = "true_vs_hardest_negative"
     teacher_detach: bool = True
     teacher_temperature: float = 1.0
     student_temperature: float = 1.0
+    temperature: float = 1.0
     teacher_gap_cap: float | None = None
     teacher_floor_by_label: Mapping[str, float] = field(default_factory=dict)
     tolerance: float = 0.0
@@ -728,13 +735,18 @@ class JsonConfigLoader:
     _EVIDENCE_POOLING_TYPES = {"mean", "branch_gated", "class_aware_branch_gated"}
     _CLASS_GATE_MODES = {"query"}
     _CLASS_GATE_SCORERS = {"diagonal", "normalized_mlp"}
-    _CLASS_GATE_EVIDENCE_SCORER_TYPES = {"embedding_mlp", "two_tower_mlp"}
+    _CLASS_GATE_EVIDENCE_SCORER_TYPES = {
+        "embedding_mlp",
+        "two_tower_mlp",
+        "class_axis_attention",
+    }
     _CLASS_GATE_BRANCH_FEATURE_TRANSFORM_MODES = {"tanh"}
     _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
     _CLASS_GATE_MIXING_MODES = {"uniform_to_learned"}
     _GLOBAL_RESIDUAL_WARMUP_MODES = {"zero_to_learned"}
-    _MARGIN_SUPPORT_WEIGHTING_SOURCES = {"top_branch_margin"}
-    _MARGIN_SUPPORT_WEIGHTING_MODES = {"linear"}
+    _GLOBAL_RESIDUAL_CORRECTION_MODES = {"additive", "gated_zero_mean"}
+    _MARGIN_SUPPORT_WEIGHTING_SOURCES = {"top_branch_margin", "same_as_source"}
+    _MARGIN_SUPPORT_WEIGHTING_MODES = {"linear", "positive_linear"}
     _MARGIN_HARDNESS_WEIGHTING_SOURCES = {"evidence_gap"}
     _MARGIN_HARDNESS_WEIGHTING_MODES = {"negative_gap"}
     _GATE_ENTROPY_TARGETS = {
@@ -762,10 +774,12 @@ class JsonConfigLoader:
         "class_gated_branch_logits",
         "top_branch_margin",
         "class_top_branch_margin_features",
+        "class_top_branch_margin_relative_features",
     }
     _BRANCH_TO_EVIDENCE_RANKING_CONSISTENCY_MODES = {
         "true_vs_hardest_negative",
         "teacher_distribution_kl",
+        "true_label_anchored_softplus",
     }
     _GLOBAL_RESIDUAL_ANTI_VETO_TARGETS = {
         "global_residual_logits",
@@ -1177,9 +1191,15 @@ class JsonConfigLoader:
         if not isinstance(cfg.enabled, bool):
             raise TypeError(f"{field_name}.enabled must be a boolean")
         if cfg.source not in JsonConfigLoader._MARGIN_SUPPORT_WEIGHTING_SOURCES:
-            raise ValueError(f"{field_name}.source must be 'top_branch_margin'")
+            raise ValueError(
+                f"{field_name}.source must be one of "
+                f"{sorted(JsonConfigLoader._MARGIN_SUPPORT_WEIGHTING_SOURCES)}"
+            )
         if cfg.mode not in JsonConfigLoader._MARGIN_SUPPORT_WEIGHTING_MODES:
-            raise ValueError(f"{field_name}.mode must be 'linear'")
+            raise ValueError(
+                f"{field_name}.mode must be one of "
+                f"{sorted(JsonConfigLoader._MARGIN_SUPPORT_WEIGHTING_MODES)}"
+            )
         for value, suffix in ((cfg.gain, "gain"), (cfg.cap, "cap")):
             if not isinstance(value, int | float) or isinstance(value, bool):
                 raise TypeError(f"{field_name}.{suffix} must be numeric")
@@ -1597,6 +1617,8 @@ class JsonConfigLoader:
             "embedding_hidden_size",
             "branch_hidden_size",
             "fusion_hidden_size",
+            "num_attention_heads",
+            "num_attention_layers",
         ):
             value = getattr(evidence_scorer, field_name)
             if isinstance(value, bool) or not isinstance(value, int):
@@ -1609,6 +1631,26 @@ class JsonConfigLoader:
                     "model.encoder.architecture.evidence_pooling.class_gate."
                     f"evidence_scorer.{field_name} must be greater than zero"
                 )
+        if (
+            evidence_scorer.type == "class_axis_attention"
+            and evidence_scorer.fusion_hidden_size % evidence_scorer.num_attention_heads
+            != 0
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.fusion_hidden_size must be divisible by "
+                "num_attention_heads when type='class_axis_attention'"
+            )
+        if not isinstance(evidence_scorer.use_class_embedding, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.use_class_embedding must be a boolean"
+            )
+        if not isinstance(evidence_scorer.logit_centering, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.logit_centering must be a boolean"
+            )
         if isinstance(evidence_scorer.dropout, bool) or not isinstance(
             evidence_scorer.dropout,
             int | float,
@@ -1747,6 +1789,50 @@ class JsonConfigLoader:
                     f"global_residual.bounding.{field_name} must be greater "
                     "than zero"
                 )
+        correction = class_gate.global_residual.correction
+        if correction.mode not in JsonConfigLoader._GLOBAL_RESIDUAL_CORRECTION_MODES:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.mode must be one of "
+                f"{sorted(JsonConfigLoader._GLOBAL_RESIDUAL_CORRECTION_MODES)}"
+            )
+        if isinstance(correction.gate_hidden_size, bool) or not isinstance(
+            correction.gate_hidden_size,
+            int,
+        ):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.gate_hidden_size must be an integer"
+            )
+        if correction.gate_hidden_size <= 0:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.gate_hidden_size must be greater "
+                "than zero"
+            )
+        if not isinstance(correction.dropout, int | float) or isinstance(
+            correction.dropout,
+            bool,
+        ):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.dropout must be numeric"
+            )
+        if not (0.0 <= float(correction.dropout) < 1.0):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.dropout must be within [0, 1)"
+            )
+        if not isinstance(correction.zero_mean, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.zero_mean must be a boolean"
+            )
+        if not isinstance(correction.rebound, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.rebound must be a boolean"
+            )
         if not isinstance(class_gate.evidence_auxiliary.enabled, bool):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
@@ -2081,6 +2167,15 @@ class JsonConfigLoader:
             cfg.loss.class_evidence_margin.support_weighting,
             field_name="train.loss.class_evidence_margin.support_weighting",
         )
+        if cfg.loss.class_evidence_margin.support_weighting.enabled and (
+            cfg.loss.class_evidence_margin.support_weighting.source
+            != "top_branch_margin"
+            or cfg.loss.class_evidence_margin.support_weighting.mode != "linear"
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_margin.support_weighting supports only "
+                "source='top_branch_margin' and mode='linear'"
+            )
         if (
             not isinstance(cfg.loss.class_evidence_margin.temperature, (int, float))
             or isinstance(cfg.loss.class_evidence_margin.temperature, bool)
@@ -2278,6 +2373,19 @@ class JsonConfigLoader:
                 "train.loss.branch_to_evidence_ranking_consistency."
                 "student_temperature must be greater than zero"
             )
+        if not isinstance(b2e_cfg.temperature, int | float) or isinstance(
+            b2e_cfg.temperature,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.branch_to_evidence_ranking_consistency."
+                "temperature must be numeric"
+            )
+        if b2e_cfg.temperature <= 0:
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency."
+                "temperature must be greater than zero"
+            )
         if b2e_cfg.mode == "teacher_distribution_kl":
             if b2e_cfg.source != "class_top_branch_margin_features":
                 raise ValueError(
@@ -2320,11 +2428,73 @@ class JsonConfigLoader:
                     "reduction must be 'mean' when "
                     "mode='teacher_distribution_kl'"
                 )
+        elif b2e_cfg.mode == "true_label_anchored_softplus":
+            if b2e_cfg.source != "class_top_branch_margin_relative_features":
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency.source "
+                    "must be 'class_top_branch_margin_relative_features' when "
+                    "mode='true_label_anchored_softplus'"
+                )
+            if not b2e_cfg.teacher_detach:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "teacher_detach must be true when "
+                    "mode='true_label_anchored_softplus'"
+                )
+            if b2e_cfg.teacher_gap_cap is not None:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "teacher_gap_cap is not used when "
+                    "mode='true_label_anchored_softplus'"
+                )
+            if b2e_cfg.teacher_floor_by_label:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "teacher_floor_by_label is not used when "
+                    "mode='true_label_anchored_softplus'"
+                )
+            if b2e_cfg.hardness_weighting.enabled:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "hardness_weighting is not used when "
+                    "mode='true_label_anchored_softplus'"
+                )
+            if b2e_cfg.tolerance != 0:
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "tolerance is not used when "
+                    "mode='true_label_anchored_softplus'"
+                )
+            if b2e_cfg.reduction != "mean":
+                raise ValueError(
+                    "train.loss.branch_to_evidence_ranking_consistency."
+                    "reduction must be 'mean' when "
+                    "mode='true_label_anchored_softplus'"
+                )
+            if b2e_cfg.support_weighting.enabled:
+                if b2e_cfg.support_weighting.source != "same_as_source":
+                    raise ValueError(
+                        "train.loss.branch_to_evidence_ranking_consistency."
+                        "support_weighting.source must be 'same_as_source' "
+                        "when mode='true_label_anchored_softplus'"
+                    )
+                if b2e_cfg.support_weighting.mode != "positive_linear":
+                    raise ValueError(
+                        "train.loss.branch_to_evidence_ranking_consistency."
+                        "support_weighting.mode must be 'positive_linear' "
+                        "when mode='true_label_anchored_softplus'"
+                    )
         elif b2e_cfg.source == "class_top_branch_margin_features":
             raise ValueError(
                 "train.loss.branch_to_evidence_ranking_consistency.source "
                 "'class_top_branch_margin_features' requires "
                 "mode='teacher_distribution_kl'"
+            )
+        elif b2e_cfg.source == "class_top_branch_margin_relative_features":
+            raise ValueError(
+                "train.loss.branch_to_evidence_ranking_consistency.source "
+                "'class_top_branch_margin_relative_features' requires "
+                "mode='true_label_anchored_softplus'"
             )
         JsonConfigLoader._validate_margin_support_weighting(
             b2e_cfg.support_weighting,
@@ -3501,6 +3671,9 @@ class JsonConfigLoader:
         )
         global_residual["bounding"] = ClassGateGlobalResidualBoundingConfig(
             **dict(global_residual.get("bounding", {}))
+        )
+        global_residual["correction"] = ClassGateGlobalResidualCorrectionConfig(
+            **dict(global_residual.get("correction", {}))
         )
         class_gate["global_residual"] = ClassGateGlobalResidualConfig(**global_residual)
         evidence_scorer = dict(class_gate.get("evidence_scorer", {}))

@@ -58,16 +58,38 @@ def _class_aware_output() -> AstModelOutput:
         class_evidence_logits=torch.tensor([[0.2, 0.8, -0.1]]),
         global_residual_logits=torch.tensor([[0.01, 0.02, 0.03]]),
         bounded_global_residual_logits=torch.tensor([[0.01, 0.02, 0.03]]),
+        centered_bounded_global_residual_logits=torch.tensor([[-0.01, 0.0, 0.01]]),
+        global_residual_gate=torch.tensor([[0.2, 0.5, 0.8]]),
+        global_residual_contribution=torch.tensor([[-0.001, 0.0, 0.004]]),
+        global_residual_zero_mean_enabled=True,
+        global_residual_rebound_enabled=True,
         global_residual_bound=torch.tensor(1.0),
         global_residual_temperature=torch.tensor(1.0),
         class_gated_branch_logits=torch.tensor([[0.12, 0.34, 0.56]]),
         class_gated_branch_logit_features=torch.tensor([[-0.44, -0.22, 0.22]]),
+        class_gated_branch_logit_relative_features=torch.tensor([[-0.66, -0.44, 0.44]]),
         class_gated_branch_logit_feature_mode="hardest_negative_margin",
         class_top_branch_margin_features=torch.tensor([[0.2, 0.4, 0.6]]),
-        class_evidence_scorer_branch_features=torch.tensor(
-            [[[-0.44, 0.2], [-0.22, 0.4], [0.22, 0.6]]]
+        class_top_branch_margin_relative_features=torch.tensor([[-0.4, -0.2, 0.2]]),
+        class_evidence_scorer_branch_raw_features=torch.tensor(
+            [
+                [
+                    [-0.44, -0.66, 0.2, -0.4],
+                    [-0.22, -0.44, 0.4, -0.2],
+                    [0.22, 0.44, 0.6, 0.2],
+                ]
+            ]
         ),
-        class_evidence_scorer_type="two_tower_mlp",
+        class_evidence_scorer_branch_features=torch.tensor(
+            [
+                [
+                    [-0.44, -0.66, 0.2, -0.4],
+                    [-0.22, -0.44, 0.4, -0.2],
+                    [0.22, 0.44, 0.6, 0.2],
+                ]
+            ]
+        ),
+        class_evidence_scorer_type="class_axis_attention",
         class_evidence_scorer_branch_feature_transform_mode="tanh",
         class_evidence_scorer_branch_feature_transform_temperature=torch.tensor(1.0),
         class_evidence_gate_weights=torch.tensor(
@@ -218,6 +240,23 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
     ]
     assert row["global_residual_bound"] == pytest.approx(1.0)
     assert row["global_residual_temperature"] == pytest.approx(1.0)
+    assert row["centered_bounded_global_residual_logits"] == [
+        -0.009999999776482582,
+        0.0,
+        0.009999999776482582,
+    ]
+    assert row["global_residual_gate"] == [
+        0.20000000298023224,
+        0.5,
+        0.800000011920929,
+    ]
+    assert row["global_residual_contribution"] == [
+        -0.0010000000474974513,
+        0.0,
+        0.004000000189989805,
+    ]
+    assert row["global_residual_zero_mean_enabled"] is True
+    assert row["global_residual_rebound_enabled"] is True
     assert row["class_gated_branch_logits"] == [
         0.11999999731779099,
         0.3400000035762787,
@@ -228,17 +267,37 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
         -0.2199999988079071,
         0.2199999988079071,
     ]
+    assert row["class_gated_branch_logit_relative_features"] == [
+        -0.6600000262260437,
+        -0.4399999976158142,
+        0.4399999976158142,
+    ]
     assert row["class_gated_branch_logit_feature_mode"] == ("hardest_negative_margin")
     assert row["class_top_branch_margin_features"] == [
         0.20000000298023224,
         0.4000000059604645,
         0.6000000238418579,
     ]
+    assert row["class_top_branch_margin_relative_features"] == pytest.approx(
+        [
+            -0.4000000059604645,
+            -0.20000000298023224,
+            0.20000000298023224,
+        ]
+    )
+    assert row["class_evidence_scorer_branch_raw_features"][1] == [
+        -0.2199999988079071,
+        -0.4399999976158142,
+        0.4000000059604645,
+        -0.20000000298023224,
+    ]
     assert row["class_evidence_scorer_branch_features"][1] == [
         -0.2199999988079071,
+        -0.4399999976158142,
         0.4000000059604645,
+        -0.20000000298023224,
     ]
-    assert row["class_evidence_scorer_type"] == "two_tower_mlp"
+    assert row["class_evidence_scorer_type"] == "class_axis_attention"
     assert row["class_evidence_scorer_branch_feature_transform_mode"] == "tanh"
     assert row["class_evidence_scorer_branch_feature_transform_temperature"] == 1.0
     assert row["class_evidence_gate_weights"][1] == [

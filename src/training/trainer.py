@@ -1390,6 +1390,73 @@ class Trainer(LoggingMixin):
         weighted_loss = float(cfg.weight) * raw_loss
         return raw_loss, weighted_loss
 
+    def _compute_branch_to_evidence_true_label_anchored_softplus_loss(
+        self,
+        output: AstModelOutput,
+        evidence_logits: Tensor,
+        label_indices: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        cfg = self.cfg.branch_to_evidence_ranking_consistency
+        if cfg.source != "class_top_branch_margin_relative_features":
+            raise ValueError(
+                "branch-to-evidence true-label anchored softplus supports only "
+                "source='class_top_branch_margin_relative_features'"
+            )
+        if output.class_top_branch_margin_relative_features is None:
+            raise ValueError(
+                "branch-to-evidence true-label anchored softplus enabled but "
+                "model did not return class_top_branch_margin_relative_features"
+            )
+        support_logits = output.class_top_branch_margin_relative_features
+        if tuple(support_logits.shape) != tuple(evidence_logits.shape):
+            raise ValueError(
+                "class_top_branch_margin_relative_features must match "
+                "class_evidence_logits shape for branch-to-evidence true-label "
+                "anchored softplus"
+            )
+        support_logits = support_logits.detach()
+        evidence_gap, _ = self._true_vs_hardest_negative_gap(
+            evidence_logits,
+            label_indices,
+        )
+        true_support = support_logits.gather(1, label_indices.unsqueeze(1)).squeeze(1)
+        if cfg.support_weighting.enabled:
+            if (
+                cfg.support_weighting.source != "same_as_source"
+                or cfg.support_weighting.mode != "positive_linear"
+            ):
+                raise ValueError(
+                    "branch_to_evidence_ranking_consistency.support_weighting "
+                    "must use source='same_as_source' and mode='positive_linear' "
+                    "for true_label_anchored_softplus"
+                )
+            support = torch.clamp(
+                torch.relu(true_support),
+                min=0.0,
+                max=float(cfg.support_weighting.cap),
+            )
+            support_weight = 1.0 + (float(cfg.support_weighting.gain) * support)
+        else:
+            support_weight = torch.ones_like(evidence_gap)
+        temperature = float(cfg.temperature)
+        penalties = (
+            temperature * F.softplus(-evidence_gap / temperature) * support_weight
+        )
+        class_weights = self._class_margin_weights(
+            label_indices,
+            evidence_logits,
+            enabled=cfg.class_weighted,
+            loss_name="branch_to_evidence_ranking_consistency",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss
+
     def _compute_branch_to_evidence_ranking_consistency_loss(
         self,
         output: AstModelOutput,
@@ -1407,17 +1474,24 @@ class Trainer(LoggingMixin):
             "class_gated_branch_logits",
             "top_branch_margin",
             "class_top_branch_margin_features",
+            "class_top_branch_margin_relative_features",
         }:
             raise ValueError(
                 "branch-to-evidence ranking consistency supports only "
                 "source='class_gated_branch_logits', source='top_branch_margin', "
-                "or source='class_top_branch_margin_features'"
+                "source='class_top_branch_margin_features', or "
+                "source='class_top_branch_margin_relative_features'"
             )
-        if cfg.mode not in {"true_vs_hardest_negative", "teacher_distribution_kl"}:
+        if cfg.mode not in {
+            "true_vs_hardest_negative",
+            "teacher_distribution_kl",
+            "true_label_anchored_softplus",
+        }:
             raise ValueError(
                 "branch-to-evidence ranking consistency supports only "
-                "mode='true_vs_hardest_negative' or "
-                "mode='teacher_distribution_kl'"
+                "mode='true_vs_hardest_negative', "
+                "mode='teacher_distribution_kl', or "
+                "mode='true_label_anchored_softplus'"
             )
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = output.logits.sum() * 0.0
@@ -1442,6 +1516,12 @@ class Trainer(LoggingMixin):
             return self._compute_branch_to_evidence_teacher_distribution_kl_loss(
                 output,
                 labels,
+                evidence_logits,
+                label_indices,
+            )
+        if cfg.mode == "true_label_anchored_softplus":
+            return self._compute_branch_to_evidence_true_label_anchored_softplus_loss(
+                output,
                 evidence_logits,
                 label_indices,
             )
@@ -3123,6 +3203,64 @@ class Trainer(LoggingMixin):
                             )
                             row["branch_to_evidence_kl"] = float(
                                 kl_values[index].detach().cpu().item()
+                            )
+                if (
+                    cfg.mode == "true_label_anchored_softplus"
+                    and output.class_top_branch_margin_relative_features is not None
+                ):
+                    support_logits = (
+                        output.class_top_branch_margin_relative_features.detach()
+                    )
+                    if tuple(support_logits.shape) == tuple(evidence_logits.shape):
+                        evidence_gap, evidence_negative = (
+                            self._true_vs_hardest_negative_gap(
+                                evidence_logits,
+                                label_indices,
+                            )
+                        )
+                        true_support = support_logits.gather(
+                            1,
+                            label_indices.unsqueeze(1),
+                        ).squeeze(1)
+                        if cfg.support_weighting.enabled:
+                            support = torch.clamp(
+                                torch.relu(true_support),
+                                min=0.0,
+                                max=float(cfg.support_weighting.cap),
+                            )
+                            support_weight = 1.0 + (
+                                float(cfg.support_weighting.gain) * support
+                            )
+                        else:
+                            support_weight = torch.ones_like(evidence_gap)
+                        temperature = float(cfg.temperature)
+                        penalties = temperature * F.softplus(
+                            -evidence_gap / temperature
+                        )
+                        weighted_penalties = penalties * support_weight
+                        for index, row in enumerate(rows):
+                            row["branch_to_evidence_mode"] = cfg.mode
+                            row["branch_to_evidence_source"] = cfg.source
+                            row["branch_to_evidence_temperature"] = float(
+                                cfg.temperature
+                            )
+                            row["branch_to_evidence_evidence_gap"] = float(
+                                evidence_gap[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_evidence_negative_class"] = int(
+                                evidence_negative[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_support_relative"] = float(
+                                true_support[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_support_weight"] = float(
+                                support_weight[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_penalty"] = float(
+                                penalties[index].detach().cpu().item()
+                            )
+                            row["branch_to_evidence_weighted_penalty"] = float(
+                                weighted_penalties[index].detach().cpu().item()
                             )
                 teacher_floor = self._branch_to_evidence_teacher_floors(
                     label_indices,

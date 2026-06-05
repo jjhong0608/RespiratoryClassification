@@ -291,14 +291,17 @@ def _trainer_cfg(
         "class_gated_branch_logits",
         "top_branch_margin",
         "class_top_branch_margin_features",
+        "class_top_branch_margin_relative_features",
     ] = "class_gated_branch_logits",
     branch_to_evidence_mode: Literal[
         "true_vs_hardest_negative",
         "teacher_distribution_kl",
+        "true_label_anchored_softplus",
     ] = "true_vs_hardest_negative",
     branch_to_evidence_teacher_detach: bool = True,
     branch_to_evidence_teacher_temperature: float = 1.0,
     branch_to_evidence_student_temperature: float = 1.0,
+    branch_to_evidence_temperature: float = 1.0,
     branch_to_evidence_teacher_gap_cap: float | None = None,
     branch_to_evidence_teacher_floor_by_class: tuple[float, ...] | None = None,
     branch_to_evidence_tolerance: float = 0.0,
@@ -498,6 +501,7 @@ def _trainer_cfg(
                 teacher_detach=branch_to_evidence_teacher_detach,
                 teacher_temperature=branch_to_evidence_teacher_temperature,
                 student_temperature=branch_to_evidence_student_temperature,
+                temperature=branch_to_evidence_temperature,
                 teacher_gap_cap=branch_to_evidence_teacher_gap_cap,
                 tolerance=branch_to_evidence_tolerance,
                 class_weighted=branch_to_evidence_class_weighted,
@@ -2516,6 +2520,65 @@ def test_trainer_branch_to_evidence_teacher_distribution_kl_requires_teacher() -
             labels,
             epoch=1,
         )
+
+
+def test_trainer_branch_to_evidence_true_label_anchored_softplus() -> None:
+    support_features = torch.tensor(
+        [[0.8, -0.2, 0.1], [-0.1, 0.5, 0.2]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    evidence_logits = torch.tensor(
+        [[0.5, 0.3, -0.2], [0.4, 0.2, 0.8]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.0, 2.0, 3.0),
+            branch_to_evidence_enabled=True,
+            branch_to_evidence_weight=0.1,
+            branch_to_evidence_source="class_top_branch_margin_relative_features",
+            branch_to_evidence_mode="true_label_anchored_softplus",
+            branch_to_evidence_temperature=1.0,
+            branch_to_evidence_class_weighted=True,
+            branch_to_evidence_support_weighting=MarginSupportWeightingConfig(
+                enabled=True,
+                source="same_as_source",
+                mode="positive_linear",
+                gain=1.0,
+                cap=2.0,
+            ),
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=evidence_logits,
+        class_top_branch_margin_relative_features=support_features,
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_loss, weighted_loss = (
+        trainer._compute_branch_to_evidence_ranking_consistency_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+
+    gap = torch.tensor([0.2, -0.6])
+    support_weight = torch.tensor([1.8, 1.5])
+    class_weights = torch.tensor([1.0, 2.0])
+    expected_raw = (F.softplus(-gap) * support_weight * class_weights).mean()
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.1 * expected_raw)
+    weighted_loss.backward()
+    assert support_features.grad is None
+    assert evidence_logits.grad is not None
 
 
 def test_trainer_global_residual_anti_veto_filters_by_evidence_confidence() -> None:
