@@ -258,6 +258,25 @@ def main() -> None:
         overrides=cfg.train.loss.top_branch_margin.margin_by_label,
         label_to_index=cfg.data.label_to_index,
     )
+    top_branch_margin_phase_start_multiplier_by_class = resolve_label_float_overrides(
+        default=1.0,
+        overrides=(
+            cfg.train.loss.top_branch_margin.phase_weight_schedule.start_multiplier_by_label
+        ),
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_branch_margin_phase_label_multiplier_by_class = resolve_label_float_overrides(
+        default=1.0,
+        overrides=(
+            cfg.train.loss.top_branch_margin.phase_weight_schedule.label_multiplier_by_label
+        ),
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_support_score_margin_label_weight_by_class = resolve_label_float_overrides(
+        default=1.0,
+        overrides=cfg.train.loss.top_support_score_margin.label_weight_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
     branch_to_evidence_teacher_floor_by_class = resolve_label_float_overrides(
         default=0.0,
         overrides=(
@@ -312,6 +331,15 @@ def main() -> None:
             ),
             class_evidence_margin=cfg.train.loss.class_evidence_margin,
             class_evidence_margin_major_index=class_evidence_margin_major_index,
+            class_evidence_gap_cap_regularization=(
+                cfg.train.loss.class_evidence_gap_cap_regularization
+            ),
+            top_support_score_margin=cfg.train.loss.top_support_score_margin,
+            top_support_score_margin_label_weight_by_class=(
+                top_support_score_margin_label_weight_by_class
+            ),
+            branch_direct_score_margin=cfg.train.loss.branch_direct_score_margin,
+            branch_support_score_margin=(cfg.train.loss.branch_support_score_margin),
             class_gated_branch_logit_margin=(
                 cfg.train.loss.class_gated_branch_logit_margin
             ),
@@ -336,6 +364,12 @@ def main() -> None:
             ),
             top_branch_margin=cfg.train.loss.top_branch_margin,
             top_branch_margin_by_class=top_branch_margin_by_class,
+            top_branch_margin_phase_start_multiplier_by_class=(
+                top_branch_margin_phase_start_multiplier_by_class
+            ),
+            top_branch_margin_phase_label_multiplier_by_class=(
+                top_branch_margin_phase_label_multiplier_by_class
+            ),
             analysis=cfg.analysis,
             early_stopping=cfg.train.early_stopping,
             checkpointing=cfg.checkpointing,

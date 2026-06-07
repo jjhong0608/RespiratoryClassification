@@ -275,13 +275,68 @@ embedding_tower: class_evidence_embeddings -> LayerNorm -> Linear -> GELU -> Dro
 branch_feature_tower: tanh(branch_features / temperature) -> Linear -> GELU -> Dropout
 token_projector: concat(embedding_hidden, branch_hidden) -> LayerNorm -> Linear -> GELU -> Dropout
 class_axis_attention: class tokens -> TransformerEncoder over C labels
-logit_head: LayerNorm -> Linear -> class_evidence_logits
+interaction_head: LayerNorm -> Linear -> interaction_score
+embedding_head: embedding_hidden -> embedding_score
+branch_direct_score: top support + reliability-gated support -> direct branch score
+branch_residual_score: bounded residual MLP over branch features
+branch_support_score = branch_direct_score + residual_scale * branch_residual_score
+class_evidence_logits = embedding_score + branch_scale * branch_support_score + interaction_effective_scale * interaction_score
 ```
 
 When `use_class_embedding=true`, a learned class embedding is added to each
 class token. When `logit_centering=true`, the row mean is subtracted from
 `class_evidence_logits` so the evidence scorer expresses class competition
 rather than a shared offset.
+
+When `score_decomposition.enabled=true`, the class-axis scorer writes evidence
+as three interpretable score terms:
+
+- `class_evidence_embedding_scores`: class evidence embedding-only score.
+- `class_evidence_branch_support_scores`: direct branch score plus bounded residual branch correction.
+- `class_evidence_interaction_scores`: class-axis attention interaction score.
+
+The final evidence logit uses bounded learnable scalars:
+
+```text
+sigmoid_max:
+  scale = sigmoid(parameter) * scale_max
+
+bounded_sigmoid:
+  scale = scale_min + sigmoid(parameter) * (scale_max - scale_min)
+
+interaction_effective_scale = interaction_scale * interaction_scale_multiplier
+class_evidence_logits = embedding_score + branch_scale * branch_support_score + interaction_effective_scale * interaction_score
+```
+
+When `branch_direct_score.enabled=true`, the branch-support term is split again:
+
+```text
+top_support_score = top_raw_existential_score + small_relative_correction
+gated_support_score = positive_weight(gated_raw, gated_relative) + class_bias
+gate_regret = relu(top_margin - gated_margin - tolerance)
+gate_reliability = exp(-gate_regret / temperature).detach()
+branch_direct_score = top_scale * top_support_score + gated_scale * gate_reliability * gated_support_score
+branch_residual_score = residual_bound * tanh(residual_mlp(branch_features) / residual_temperature)
+branch_support_score = branch_direct_score + residual_scale * branch_residual_score
+```
+
+The top path is gate-independent, so it can preserve branch evidence when the
+class gate selects the wrong branch. In
+`top_support_mode="raw_existential_plus_relative_correction"`, the top raw
+support is the primary existential signal and top-relative support is only a
+small correction; negative relative support is clipped and scaled separately so
+it cannot dominate the top path. The gated path remains useful when the gate is
+reliable, but reliability attenuates it when top support is stronger than the
+gate-selected support. The positive weights are class-shared, while top/gated
+biases are class-specific. Diagnostics should be read in this order:
+`top_support_score_gap -> gated_support_score_gap -> branch_direct_score_gap ->
+branch_support_score_gap -> class_evidence_gap -> final_gap`.
+
+This keeps class-axis attention as the interaction scorer while making direct
+branch-support contribution visible in diagnostics.
+`interaction_scale_schedule` can keep the interaction contribution small during
+early epochs and linearly ramp it later. If no runtime epoch is set, the
+multiplier is `1.0`, so standalone inference uses final-phase behavior.
 
 The class-axis scorer receives four label-free branch features:
 
@@ -362,8 +417,36 @@ remains available for older hard-margin configs.
 `class_evidence_margin.support_weighting` applies the same detached branch
 support multiplier to the class evidence margin. This makes evidence ranking
 errors matter more when at least one branch already provides a strong signal.
-The current KL-based configs keep this support multiplier disabled and use
+Current configs keep this support multiplier disabled and use
 `class_evidence_margin` only as a weak true-label anchor.
+
+`branch_support_score_margin` directly supervises the branch-support component
+of the decomposed evidence scorer. It applies a true-label anchored softplus
+true-vs-hardest-negative ranking loss to
+`class_evidence_branch_support_scores`, not to the total
+`class_evidence_logits`. This prevents embedding and interaction scores from
+absorbing the evidence-ranking objective while the branch-support score remains
+uninformative.
+
+`top_support_score_margin` applies the same true-label anchored softplus ranking
+loss to `class_evidence_top_support_scores`. It anchors the gate-independent top
+support path so branch evidence can reach the evidence scorer even when class
+gate reliability is low. It can also use label-specific multipliers and a
+top-branch support-conditioned multiplier; these are task-priority weights on
+the top-support anchor and are separate from the global class weighting scheme.
+`top_support_score_margin.hardness_weighting` can further increase that anchor
+when the top-support true-vs-hardest-negative gap is negative, making hard
+top-support errors contribute more without changing the branch/gate losses.
+
+`class_evidence_gap_cap_regularization` limits overconfident wrong evidence
+rankings with a label-agnostic hinge on `class_evidence_logits`: `relu(-gap -
+negative_gap_cap)`. It is intended as a stabilizer for large negative evidence
+gaps, not as a replacement for the true-label evidence anchors.
+
+`branch_direct_score_margin` applies the same true-label anchored softplus
+ranking loss to `class_evidence_branch_direct_scores`. Use it when branch/gate
+diagnostics show the right class but the monotonic direct branch path has not
+converted that support into a positive true-vs-hardest-negative score.
 
 `global_residual_anti_veto` limits label-agnostic residual veto behavior. In
 the original `target="global_residual_logits"` mode, it applies only when the
@@ -390,6 +473,20 @@ The zero-mean step prevents the residual path from adding a shared class offset,
 and the gate lets the residual act as a class-wise correction only where the
 evidence and branch features support using it.
 
+`class_gate.global_residual.correction.confidence_aware_gate` can damp that
+learned gate when the evidence scorer already strongly supports a class:
+
+```text
+evidence_gap[c] = evidence_logits[c] - max(evidence_logits[j != c])
+evidence_confidence[c] = sigmoid(evidence_gap[c] / temperature)
+confidence_factor[c] = 1 - damping * evidence_confidence[c]
+final_gate[c] = learned_gate[c] * confidence_factor[c]
+```
+
+Diagnostics keep both `global_residual_learned_gate` and the final
+`global_residual_gate`, so residual suppression from evidence confidence can be
+separated from the learned gate itself.
+
 `gate_weighted_branch_margin` improves branch logits selected by the true-class
 gate. The gate is detached, so this loss updates branch heads rather than
 directly moving the gate.
@@ -397,6 +494,10 @@ directly moving the gate.
 `top_branch_margin` asks at least one branch to produce a strong true-vs-hardest
 negative margin for each sample. `margin_by_label` can override the scalar
 `margin` per label; labels not listed use the scalar value.
+`top_branch_margin.phase_weight_schedule` can optionally ramp label-specific
+multipliers from `start_multiplier_by_label` to `label_multiplier_by_label`
+between `start_epoch` and `end_epoch`; omitting `end_epoch` keeps the legacy
+step behavior at `start_epoch`.
 
 `gate_branch_regret` penalizes the gate when it gives too much mass to branches
 whose branch margin is worse than the best available branch margin.
@@ -486,7 +587,33 @@ Important class-aware fields include:
 - `class_top_branch_margin_relative_features`: relative top branch support.
 - `class_evidence_scorer_branch_raw_features`: raw branch features before transform.
 - `class_evidence_scorer_branch_features`: transformed branch features used by the evidence scorer.
+- `class_evidence_embedding_scores`: embedding-only component of decomposed evidence logits.
+- `class_evidence_top_support_scores`: gate-independent direct score from top branch support features.
+- `class_evidence_top_raw_existential_scores`: primary top raw support score before relative correction.
+- `class_evidence_top_relative_correction_scores`: small correction from top-relative support.
+- `class_evidence_top_relative_positive`, `class_evidence_top_relative_negative`: split relative support features used for diagnostics.
+- `class_evidence_gated_support_scores`: gate-conditioned direct score from class-gated branch support features.
+- `class_evidence_gate_reliability`: reliability multiplier applied to gated support.
+- `class_evidence_gate_reliability_regret`: top-vs-gated support regret used to compute reliability.
+- `class_evidence_top_margin`, `class_evidence_gated_margin`: class-wise margin inputs for reliability.
+- `class_evidence_branch_existential_scores`, `class_evidence_branch_competitive_scores`: legacy aliases for top/gated support scores.
+- `class_evidence_branch_direct_scores`: scaled monotonic direct branch score.
+- `class_evidence_branch_residual_scores`: bounded residual correction for branch support.
+- `class_evidence_branch_support_scores`: branch-support component of decomposed evidence logits.
+- `class_evidence_interaction_scores`: class-axis attention interaction component of decomposed evidence logits.
+- `class_evidence_branch_scale`: learnable bounded scale applied to branch-support score.
+- `class_evidence_branch_direct_top_scale`, `class_evidence_branch_direct_gated_scale`, `class_evidence_branch_direct_residual_scale`: scales used inside the branch-support score.
+- `class_evidence_branch_direct_raw_scale`, `class_evidence_branch_direct_relative_scale`: legacy aliases for top/gated scales.
+- `class_evidence_branch_direct_top_weights`, `class_evidence_branch_direct_gated_weights`: positive class-shared direct branch weights.
+- `class_evidence_branch_direct_existential_weights`, `class_evidence_branch_direct_competitive_weights`: legacy aliases for top/gated weights.
+- `class_evidence_interaction_scale`: learnable bounded scale before epoch scheduling.
+- `class_evidence_interaction_scale_multiplier`: epoch schedule multiplier applied to interaction score.
+- `class_evidence_interaction_effective_scale`: scheduled scale actually applied to interaction score.
+- `class_evidence_embedding_score_gap`, `class_evidence_branch_support_score_gap`, `class_evidence_interaction_score_gap`: true-vs-hardest-negative component gaps.
 - `global_residual_gate`: class-wise residual correction gate.
+- `global_residual_learned_gate`: learned correction gate before evidence-confidence damping.
+- `global_residual_evidence_confidence`: class-wise confidence computed from evidence gaps.
+- `global_residual_confidence_factor`: multiplicative confidence damping factor.
 - `centered_bounded_global_residual_logits`: zero-mean bounded residual logits.
 - `global_residual_contribution`: actual residual contribution added to evidence logits.
 - `global_residual_logits`: residual classifier logits.

@@ -13,6 +13,7 @@ from src.models.model import (
     BranchMilHead,
     BranchMilOutput,
     ClassAwareBranchGatedEvidencePooling,
+    ClassGateBranchDirectScoreConfig,
     ClassGateBranchFeatureTransformConfig,
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
@@ -21,7 +22,12 @@ from src.models.model import (
     ClassGateGlobalResidualConfig,
     ClassGateGlobalResidualCorrectionConfig,
     ClassGateGlobalResidualWarmupConfig,
+    ClassGateInteractionScaleScheduleConfig,
     ClassGateMixingConfig,
+    ClassGateReliabilityMixtureConfig,
+    ClassGateResidualConfidenceAwareGateConfig,
+    ClassGateScoreDecompositionConfig,
+    ClassGateTopRelativeCorrectionConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -1003,6 +1009,62 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
                         dropout=0.0,
                         use_class_embedding=True,
                         logit_centering=True,
+                        score_decomposition=ClassGateScoreDecompositionConfig(
+                            enabled=True,
+                            branch_scale_mode="bounded_sigmoid",
+                            branch_scale_min=0.5,
+                            branch_scale_init=0.7,
+                            branch_scale_max=1.5,
+                            interaction_scale_mode="bounded_sigmoid",
+                            interaction_scale_min=0.3,
+                            interaction_scale_init=0.7,
+                            interaction_scale_max=1.5,
+                            interaction_scale_schedule=(
+                                ClassGateInteractionScaleScheduleConfig(
+                                    enabled=True,
+                                    start_epoch=11,
+                                    end_epoch=30,
+                                    start_multiplier=0.2,
+                                    end_multiplier=1.0,
+                                )
+                            ),
+                        ),
+                        branch_direct_score=ClassGateBranchDirectScoreConfig(
+                            enabled=True,
+                            top_support_mode=(
+                                "raw_existential_plus_relative_correction"
+                            ),
+                            top_scale_mode="bounded_sigmoid",
+                            top_scale_min=0.7,
+                            top_scale_init=1.0,
+                            top_scale_max=2.0,
+                            gated_scale_mode="bounded_sigmoid",
+                            gated_scale_min=0.0,
+                            gated_scale_init=0.5,
+                            gated_scale_max=1.5,
+                            residual_hidden_size=8,
+                            residual_scale_mode="sigmoid_max",
+                            residual_scale_init=0.2,
+                            residual_scale_max=0.5,
+                            residual_bound=1.0,
+                            residual_temperature=1.0,
+                            top_relative_correction=(
+                                ClassGateTopRelativeCorrectionConfig(
+                                    enabled=True,
+                                    positive_scale=0.2,
+                                    negative_scale=0.05,
+                                    negative_clip=1.0,
+                                )
+                            ),
+                            gate_reliability_mixture=(
+                                ClassGateReliabilityMixtureConfig(
+                                    enabled=True,
+                                    temperature=1.0,
+                                    tolerance=0.05,
+                                    detach=True,
+                                )
+                            ),
+                        ),
                         branch_feature_transform=(
                             ClassGateBranchFeatureTransformConfig(
                                 mode="tanh",
@@ -1025,6 +1087,13 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
                             dropout=0.0,
                             zero_mean=True,
                             rebound=True,
+                            confidence_aware_gate=(
+                                ClassGateResidualConfidenceAwareGateConfig(
+                                    enabled=True,
+                                    temperature=1.0,
+                                    damping=0.7,
+                                )
+                            ),
                         ),
                     ),
                 ),
@@ -1032,10 +1101,132 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
         )
     )
     model.eval()
+    model.set_runtime_epoch(10)
 
     output = model(torch.randn(2, 32, 32))
 
     assert output.class_evidence_logits is not None
+    assert output.class_evidence_embedding_scores is not None
+    assert output.class_evidence_top_support_scores is not None
+    assert output.class_evidence_gated_support_scores is not None
+    assert output.class_evidence_top_raw_existential_scores is not None
+    assert output.class_evidence_top_relative_correction_scores is not None
+    assert output.class_evidence_top_relative_positive is not None
+    assert output.class_evidence_top_relative_negative is not None
+    assert output.class_evidence_gate_reliability is not None
+    assert output.class_evidence_gate_reliability_regret is not None
+    assert output.class_evidence_top_margin is not None
+    assert output.class_evidence_gated_margin is not None
+    assert output.class_evidence_branch_existential_scores is not None
+    assert output.class_evidence_branch_competitive_scores is not None
+    assert output.class_evidence_branch_direct_scores is not None
+    assert output.class_evidence_branch_residual_scores is not None
+    assert output.class_evidence_branch_support_scores is not None
+    assert output.class_evidence_interaction_scores is not None
+    assert output.class_evidence_branch_scale is not None
+    assert output.class_evidence_branch_direct_top_scale is not None
+    assert output.class_evidence_branch_direct_gated_scale is not None
+    assert output.class_evidence_branch_direct_raw_scale is not None
+    assert output.class_evidence_branch_direct_relative_scale is not None
+    assert output.class_evidence_branch_direct_residual_scale is not None
+    assert output.class_evidence_branch_direct_top_weights is not None
+    assert output.class_evidence_branch_direct_gated_weights is not None
+    assert output.class_evidence_branch_direct_existential_weights is not None
+    assert output.class_evidence_branch_direct_competitive_weights is not None
+    assert output.class_evidence_interaction_scale is not None
+    assert output.class_evidence_interaction_scale_multiplier is not None
+    assert output.class_evidence_interaction_effective_scale is not None
+    assert 0.5 <= float(output.class_evidence_branch_scale.item()) <= 1.5
+    assert 0.7 <= float(output.class_evidence_branch_direct_top_scale.item()) <= 2.0
+    assert 0.0 <= float(output.class_evidence_branch_direct_gated_scale.item()) <= 1.5
+    assert (
+        0.0 <= float(output.class_evidence_branch_direct_residual_scale.item()) <= 0.5
+    )
+    assert torch.all(output.class_evidence_gate_reliability >= 0)
+    assert torch.all(output.class_evidence_gate_reliability <= 1)
+    assert torch.all(output.class_evidence_gate_reliability_regret >= 0)
+    expected_regret = torch.relu(
+        output.class_evidence_top_margin - output.class_evidence_gated_margin - 0.05
+    )
+    assert torch.allclose(
+        output.class_evidence_gate_reliability_regret,
+        expected_regret,
+    )
+    assert torch.allclose(
+        output.class_evidence_gate_reliability,
+        torch.exp(-expected_regret),
+    )
+    assert torch.allclose(
+        output.class_evidence_branch_existential_scores,
+        output.class_evidence_top_support_scores,
+    )
+    assert torch.allclose(
+        output.class_evidence_top_support_scores,
+        output.class_evidence_top_raw_existential_scores
+        + output.class_evidence_top_relative_correction_scores,
+        atol=1e-5,
+    )
+    assert torch.all(output.class_evidence_top_relative_positive >= 0)
+    assert torch.all(output.class_evidence_top_relative_negative <= 0)
+    assert torch.all(output.class_evidence_top_relative_negative >= -1.0)
+    assert torch.allclose(
+        output.class_evidence_branch_competitive_scores,
+        output.class_evidence_gated_support_scores,
+    )
+    assert torch.allclose(
+        output.class_evidence_branch_direct_raw_scale,
+        output.class_evidence_branch_direct_top_scale,
+    )
+    assert torch.allclose(
+        output.class_evidence_branch_direct_relative_scale,
+        output.class_evidence_branch_direct_gated_scale,
+    )
+    assert torch.all(output.class_evidence_branch_direct_existential_weights > 0)
+    assert torch.all(output.class_evidence_branch_direct_competitive_weights > 0)
+    assert 0.3 <= float(output.class_evidence_interaction_scale.item()) <= 1.5
+    assert output.class_evidence_interaction_scale_multiplier.item() == pytest.approx(
+        0.2
+    )
+    assert output.class_evidence_interaction_effective_scale.item() == pytest.approx(
+        output.class_evidence_interaction_scale.item() * 0.2
+    )
+    expected_evidence_logits = (
+        output.class_evidence_embedding_scores
+        + (
+            output.class_evidence_branch_scale
+            * output.class_evidence_branch_support_scores
+        )
+        + (
+            output.class_evidence_interaction_effective_scale
+            * output.class_evidence_interaction_scores
+        )
+    )
+    expected_evidence_logits = expected_evidence_logits - expected_evidence_logits.mean(
+        dim=-1,
+        keepdim=True,
+    )
+    assert torch.allclose(output.class_evidence_logits, expected_evidence_logits)
+    expected_branch_direct_scores = (
+        output.class_evidence_branch_direct_top_scale
+        * output.class_evidence_top_support_scores
+    ) + (
+        output.class_evidence_branch_direct_gated_scale
+        * output.class_evidence_gate_reliability
+        * output.class_evidence_gated_support_scores
+    )
+    expected_branch_support_scores = expected_branch_direct_scores + (
+        output.class_evidence_branch_direct_residual_scale
+        * output.class_evidence_branch_residual_scores
+    )
+    assert torch.allclose(
+        output.class_evidence_branch_direct_scores,
+        expected_branch_direct_scores,
+    )
+    assert torch.allclose(
+        output.class_evidence_branch_support_scores,
+        expected_branch_support_scores,
+    )
+    assert torch.max(torch.abs(output.class_evidence_branch_residual_scores)) <= 1.0
     assert torch.allclose(
         output.class_evidence_logits.mean(dim=-1),
         torch.zeros(2),
@@ -1083,6 +1274,9 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
     assert output.global_residual_logits is not None
     assert output.bounded_global_residual_logits is not None
     assert output.centered_bounded_global_residual_logits is not None
+    assert output.global_residual_learned_gate is not None
+    assert output.global_residual_evidence_confidence is not None
+    assert output.global_residual_confidence_factor is not None
     assert output.global_residual_gate is not None
     assert output.global_residual_contribution is not None
     expected_bounded = 0.5 * torch.tanh(output.global_residual_logits / 2.0)
@@ -1096,6 +1290,26 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
         output.centered_bounded_global_residual_logits,
         expected_centered,
     )
+    expected_confidence = torch.sigmoid(
+        model._class_relative_features(output.class_evidence_logits)
+    )
+    expected_factor = 1.0 - (0.7 * expected_confidence)
+    assert torch.allclose(
+        output.global_residual_evidence_confidence,
+        expected_confidence,
+        atol=1e-5,
+    )
+    assert torch.allclose(
+        output.global_residual_confidence_factor,
+        expected_factor,
+        atol=1e-5,
+    )
+    assert torch.allclose(
+        output.global_residual_gate,
+        output.global_residual_learned_gate * expected_factor,
+        atol=1e-5,
+    )
+    assert torch.all(output.global_residual_gate <= output.global_residual_learned_gate)
     assert torch.all(output.global_residual_gate >= 0.0)
     assert torch.all(output.global_residual_gate <= 1.0)
     assert torch.allclose(

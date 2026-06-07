@@ -244,9 +244,11 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver21"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver27"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
+    assert current_training_cfg.model.encoder.architecture.hidden_size == 384
+    assert current_training_cfg.model.encoder.architecture.adapter_depth == 6
     assert current_training_cfg.train.loss.type == "cross_entropy"
     assert (
         current_training_cfg.model.encoder.architecture.evidence_pooling.type
@@ -256,14 +258,135 @@ def test_retained_repo_configs_load() -> None:
         current_training_cfg.model.encoder.architecture.evidence_pooling.class_gate
     )
     assert current_class_gate.evidence_scorer.type == "class_axis_attention"
-    assert current_class_gate.evidence_scorer.embedding_hidden_size == 512
+    assert current_class_gate.evidence_scorer.embedding_hidden_size == 768
     assert current_class_gate.evidence_scorer.branch_hidden_size == 128
-    assert current_class_gate.evidence_scorer.fusion_hidden_size == 768
+    assert current_class_gate.evidence_scorer.fusion_hidden_size == 1024
     assert current_class_gate.evidence_scorer.num_attention_heads == 4
-    assert current_class_gate.evidence_scorer.num_attention_layers == 1
+    assert current_class_gate.evidence_scorer.num_attention_layers == 2
     assert current_class_gate.evidence_scorer.use_class_embedding is True
     assert current_class_gate.evidence_scorer.logit_centering is True
     assert current_class_gate.evidence_scorer.dropout == pytest.approx(0.05)
+    assert current_class_gate.evidence_scorer.score_decomposition.enabled is True
+    assert (
+        current_class_gate.evidence_scorer.score_decomposition.branch_scale_mode
+        == "bounded_sigmoid"
+    )
+    assert (
+        current_class_gate.evidence_scorer.score_decomposition.branch_scale_min
+        == pytest.approx(0.7)
+    )
+    assert (
+        current_class_gate.evidence_scorer.score_decomposition.branch_scale_init
+        == pytest.approx(1.0)
+    )
+    assert (
+        current_class_gate.evidence_scorer.score_decomposition.branch_scale_max
+        == pytest.approx(2.0)
+    )
+    assert (
+        current_class_gate.evidence_scorer.score_decomposition.interaction_scale_mode
+        == "bounded_sigmoid"
+    )
+    assert (
+        current_class_gate.evidence_scorer.score_decomposition.interaction_scale_min
+        == pytest.approx(0.3)
+    )
+    assert (
+        current_class_gate.evidence_scorer.score_decomposition.interaction_scale_init
+        == pytest.approx(0.7)
+    )
+    schedule = current_class_gate.evidence_scorer.score_decomposition.interaction_scale_schedule
+    assert schedule.enabled is True
+    assert schedule.start_epoch == 11
+    assert schedule.end_epoch == 30
+    assert schedule.start_multiplier == pytest.approx(0.2)
+    assert schedule.end_multiplier == pytest.approx(1.0)
+    assert current_class_gate.evidence_scorer.branch_direct_score.enabled is True
+    assert (
+        current_class_gate.evidence_scorer.branch_direct_score.top_support_mode
+        == "raw_existential_plus_relative_correction"
+    )
+    correction = (
+        current_class_gate.evidence_scorer.branch_direct_score.top_relative_correction
+    )
+    assert correction.enabled is True
+    assert correction.positive_scale == pytest.approx(0.2)
+    assert correction.negative_scale == pytest.approx(0.05)
+    assert correction.negative_clip == pytest.approx(1.0)
+    assert (
+        current_class_gate.evidence_scorer.branch_direct_score.top_scale_init
+        == pytest.approx(1.0)
+    )
+    assert (
+        current_class_gate.evidence_scorer.branch_direct_score.gated_scale_init
+        == pytest.approx(0.5)
+    )
+    reliability = (
+        current_class_gate.evidence_scorer.branch_direct_score.gate_reliability_mixture
+    )
+    assert reliability.enabled is True
+    assert reliability.source == "top_vs_gated_margin_regret"
+    assert reliability.mode == "exp_neg_regret"
+    assert reliability.temperature == pytest.approx(1.0)
+    assert reliability.tolerance == pytest.approx(0.05)
+    assert reliability.detach is True
+    assert (
+        current_class_gate.evidence_scorer.branch_direct_score.residual_scale_init
+        == pytest.approx(0.2)
+    )
+    assert current_training_cfg.train.loss.top_support_score_margin.enabled is True
+    assert (
+        current_training_cfg.train.loss.top_support_score_margin.weight
+        == pytest.approx(0.05)
+    )
+    assert (
+        current_training_cfg.train.loss.top_support_score_margin.label_weight_by_label
+        == {
+            "normal": 1.0,
+            "crackle": 1.0,
+            "wheeze": 2.0,
+        }
+    )
+    hardness = (
+        current_training_cfg.train.loss.top_support_score_margin.hardness_weighting
+    )
+    assert hardness.enabled is True
+    assert hardness.source == "top_support_gap"
+    assert hardness.mode == "negative_gap"
+    assert hardness.gain == pytest.approx(1.0)
+    assert hardness.cap == pytest.approx(3.0)
+    support_multiplier = current_training_cfg.train.loss.top_support_score_margin.support_conditioned_multiplier
+    assert support_multiplier.enabled is True
+    assert support_multiplier.source == "top_branch_margin"
+    assert support_multiplier.mode == "linear"
+    assert support_multiplier.gain == pytest.approx(1.0)
+    assert support_multiplier.cap == pytest.approx(2.0)
+    phase_schedule = (
+        current_training_cfg.train.loss.top_branch_margin.phase_weight_schedule
+    )
+    assert phase_schedule.enabled is True
+    assert phase_schedule.start_epoch == 21
+    assert phase_schedule.end_epoch == 31
+    assert phase_schedule.start_multiplier_by_label == {
+        "normal": 1.0,
+        "crackle": 1.0,
+        "wheeze": 1.0,
+    }
+    assert phase_schedule.label_multiplier_by_label == {
+        "normal": 1.0,
+        "crackle": 1.0,
+        "wheeze": 2.0,
+    }
+    assert current_training_cfg.train.loss.branch_direct_score_margin.enabled is True
+    assert (
+        current_training_cfg.train.loss.branch_direct_score_margin.weight
+        == pytest.approx(0.05)
+    )
+    assert current_training_cfg.train.loss.branch_support_score_margin.enabled is True
+    assert (
+        current_training_cfg.train.loss.branch_support_score_margin.weight
+        == pytest.approx(0.05)
+    )
     assert current_class_gate.evidence_scorer.branch_feature_transform.mode == "tanh"
     assert (
         current_class_gate.evidence_scorer.branch_feature_transform.temperature
@@ -299,11 +422,30 @@ def test_retained_repo_configs_load() -> None:
     )
     assert current_training_cfg.train.loss.class_evidence_margin.margin == 0.0
     assert current_training_cfg.train.loss.class_evidence_margin.reduction == "mean"
+    assert (
+        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.enabled
+        is True
+    )
+    assert (
+        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.weight
+        == pytest.approx(0.02)
+    )
+    assert (
+        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap
+        == pytest.approx(3.0)
+    )
     assert current_training_cfg.model.classifier.hidden_dim == 1024
     assert current_training_cfg.model.classifier.fusion_projector.type == "mlp"
     assert current_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
     assert current_training_cfg.model.classifier.fusion_projector.layer_norm is True
-    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER5"
+    assert current_class_gate.global_residual.correction.confidence_aware_gate.enabled
+    assert (
+        current_class_gate.global_residual.correction.confidence_aware_gate.damping
+        == pytest.approx(0.7)
+    )
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER11"
+    assert disease_training_cfg.model.encoder.architecture.hidden_size == 384
+    assert disease_training_cfg.model.encoder.architecture.adapter_depth == 6
     assert disease_training_cfg.model.classifier.hidden_dim == 1024
     assert disease_training_cfg.model.classifier.fusion_projector.type == "mlp"
     assert disease_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
@@ -328,6 +470,58 @@ def test_retained_repo_configs_load() -> None:
     assert (
         disease_training_cfg.train.loss.class_evidence_margin.mode
         == "softplus_true_vs_hardest_negative"
+    )
+    assert disease_training_cfg.train.loss.branch_support_score_margin.enabled is True
+    assert disease_training_cfg.train.loss.branch_support_score_margin.weight == (
+        pytest.approx(0.05)
+    )
+    assert disease_training_cfg.train.loss.top_support_score_margin.enabled is True
+    assert disease_training_cfg.train.loss.top_support_score_margin.weight == (
+        pytest.approx(0.05)
+    )
+    assert (
+        disease_training_cfg.train.loss.top_support_score_margin.label_weight_by_label
+        == {
+            "Normal": 1.0,
+            "Lung_Parenchymal": 1.0,
+            "Airway": 2.0,
+        }
+    )
+    disease_hardness = (
+        disease_training_cfg.train.loss.top_support_score_margin.hardness_weighting
+    )
+    assert disease_hardness.enabled is True
+    assert disease_hardness.source == "top_support_gap"
+    assert disease_hardness.mode == "negative_gap"
+    assert disease_hardness.gain == pytest.approx(1.0)
+    assert disease_hardness.cap == pytest.approx(3.0)
+    assert (
+        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.label_multiplier_by_label
+        == {
+            "Normal": 1.0,
+            "Lung_Parenchymal": 1.0,
+            "Airway": 2.0,
+        }
+    )
+    assert (
+        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.start_epoch
+        == 21
+    )
+    assert (
+        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.end_epoch
+        == 31
+    )
+    assert (
+        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.start_multiplier_by_label
+        == {
+            "Normal": 1.0,
+            "Lung_Parenchymal": 1.0,
+            "Airway": 1.0,
+        }
+    )
+    assert disease_training_cfg.train.loss.branch_direct_score_margin.enabled is True
+    assert disease_training_cfg.train.loss.branch_direct_score_margin.weight == (
+        pytest.approx(0.05)
     )
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
     assert baseline_training_cfg.experiment.logging.terminal_width is None
@@ -691,6 +885,24 @@ def test_class_aware_class_axis_attention_evidence_scorer_config_loads(
         "dropout": 0.2,
         "use_class_embedding": True,
         "logit_centering": True,
+        "score_decomposition": {
+            "enabled": True,
+            "branch_scale_mode": "bounded_sigmoid",
+            "branch_scale_min": 0.2,
+            "branch_scale_init": 0.5,
+            "branch_scale_max": 1.0,
+            "interaction_scale_mode": "bounded_sigmoid",
+            "interaction_scale_min": 0.1,
+            "interaction_scale_init": 0.8,
+            "interaction_scale_max": 1.5,
+            "interaction_scale_schedule": {
+                "enabled": True,
+                "start_epoch": 11,
+                "end_epoch": 30,
+                "start_multiplier": 0.2,
+                "end_multiplier": 1.0,
+            },
+        },
         "branch_feature_transform": {
             "mode": "tanh",
             "temperature": 0.75,
@@ -702,6 +914,13 @@ def test_class_aware_class_axis_attention_evidence_scorer_config_loads(
         "dropout": 0.1,
         "zero_mean": True,
         "rebound": True,
+        "confidence_aware_gate": {
+            "enabled": True,
+            "source": "evidence_gap",
+            "mode": "damped_sigmoid",
+            "temperature": 1.25,
+            "damping": 0.6,
+        },
     }
     config_path = _write_json(tmp_path / "class_axis_attention_scorer.json", payload)
 
@@ -716,11 +935,48 @@ def test_class_aware_class_axis_attention_evidence_scorer_config_loads(
     assert loaded.evidence_scorer.num_attention_layers == 1
     assert loaded.evidence_scorer.use_class_embedding is True
     assert loaded.evidence_scorer.logit_centering is True
+    assert loaded.evidence_scorer.score_decomposition.enabled is True
+    assert loaded.evidence_scorer.score_decomposition.branch_scale_mode == (
+        "bounded_sigmoid"
+    )
+    assert loaded.evidence_scorer.score_decomposition.branch_scale_min == (
+        pytest.approx(0.2)
+    )
+    assert loaded.evidence_scorer.score_decomposition.branch_scale_init == (
+        pytest.approx(0.5)
+    )
+    assert loaded.evidence_scorer.score_decomposition.branch_scale_max == (
+        pytest.approx(1.0)
+    )
+    assert loaded.evidence_scorer.score_decomposition.interaction_scale_mode == (
+        "bounded_sigmoid"
+    )
+    assert loaded.evidence_scorer.score_decomposition.interaction_scale_min == (
+        pytest.approx(0.1)
+    )
+    assert loaded.evidence_scorer.score_decomposition.interaction_scale_init == (
+        pytest.approx(0.8)
+    )
+    assert loaded.evidence_scorer.score_decomposition.interaction_scale_max == (
+        pytest.approx(1.5)
+    )
+    schedule = loaded.evidence_scorer.score_decomposition.interaction_scale_schedule
+    assert schedule.enabled is True
+    assert schedule.start_epoch == 11
+    assert schedule.end_epoch == 30
+    assert schedule.start_multiplier == pytest.approx(0.2)
+    assert schedule.end_multiplier == pytest.approx(1.0)
     assert loaded.global_residual.correction.mode == "gated_zero_mean"
     assert loaded.global_residual.correction.gate_hidden_size == 16
     assert loaded.global_residual.correction.dropout == pytest.approx(0.1)
     assert loaded.global_residual.correction.zero_mean is True
     assert loaded.global_residual.correction.rebound is True
+    confidence_gate = loaded.global_residual.correction.confidence_aware_gate
+    assert confidence_gate.enabled is True
+    assert confidence_gate.source == "evidence_gap"
+    assert confidence_gate.mode == "damped_sigmoid"
+    assert confidence_gate.temperature == pytest.approx(1.25)
+    assert confidence_gate.damping == pytest.approx(0.6)
 
 
 def test_class_aware_two_tower_evidence_scorer_and_bounding_load(
@@ -1423,6 +1679,273 @@ def test_valid_class_evidence_margin_softplus_config_loads(
     assert margin_cfg.margin == 0.0
     assert margin_cfg.temperature == 1.0
     assert margin_cfg.reduction == "mean"
+
+
+def test_valid_branch_support_score_margin_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "dropout": 0.1,
+        "use_class_embedding": True,
+        "logit_centering": True,
+        "score_decomposition": {
+            "enabled": True,
+            "branch_scale_mode": "bounded_sigmoid",
+            "branch_scale_min": 0.5,
+            "branch_scale_init": 0.7,
+            "branch_scale_max": 1.5,
+            "interaction_scale_mode": "bounded_sigmoid",
+            "interaction_scale_min": 0.3,
+            "interaction_scale_init": 0.7,
+            "interaction_scale_max": 1.5,
+        },
+    }
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["branch_support_score_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_evidence_branch_support_scores",
+        "mode": "softplus_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "branch_support_score_margin.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    margin_cfg = cfg.train.loss.branch_support_score_margin
+    assert margin_cfg.enabled is True
+    assert margin_cfg.weight == pytest.approx(0.05)
+    assert margin_cfg.class_weighted is True
+    assert margin_cfg.warmup_epochs == 10
+
+
+def test_valid_top_support_score_margin_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "dropout": 0.1,
+        "use_class_embedding": True,
+        "logit_centering": True,
+        "score_decomposition": {"enabled": True},
+        "branch_direct_score": {
+            "enabled": True,
+            "top_support_mode": "raw_existential_plus_relative_correction",
+            "top_scale_mode": "bounded_sigmoid",
+            "top_scale_min": 0.7,
+            "top_scale_init": 1.0,
+            "top_scale_max": 2.0,
+            "gated_scale_mode": "bounded_sigmoid",
+            "gated_scale_min": 0.0,
+            "gated_scale_init": 0.5,
+            "gated_scale_max": 1.5,
+            "gate_reliability_mixture": {
+                "enabled": True,
+                "source": "top_vs_gated_margin_regret",
+                "mode": "exp_neg_regret",
+                "temperature": 1.0,
+                "tolerance": 0.05,
+                "detach": True,
+            },
+            "top_relative_correction": {
+                "enabled": True,
+                "positive_scale": 0.2,
+                "negative_scale": 0.05,
+                "negative_clip": 1.0,
+            },
+        },
+    }
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["top_support_score_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_evidence_top_support_scores",
+        "mode": "softplus_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+        "label_weight_by_label": {
+            "normal": 1.0,
+            "crackle": 1.5,
+            "wheeze": 2.0,
+        },
+        "support_conditioned_multiplier": {
+            "enabled": True,
+            "source": "top_branch_margin",
+            "mode": "linear",
+            "gain": 1.0,
+            "cap": 2.0,
+        },
+        "hardness_weighting": {
+            "enabled": True,
+            "source": "top_support_gap",
+            "mode": "negative_gap",
+            "gain": 1.0,
+            "cap": 3.0,
+        },
+    }
+    config_path = _write_json(tmp_path / "top_support_score_margin.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    direct_cfg = cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_direct_score
+    margin_cfg = cfg.train.loss.top_support_score_margin
+    assert direct_cfg.gate_reliability_mixture.enabled is True
+    assert direct_cfg.top_support_mode == "raw_existential_plus_relative_correction"
+    assert direct_cfg.top_relative_correction.enabled is True
+    assert margin_cfg.enabled is True
+    assert margin_cfg.target == "class_evidence_top_support_scores"
+    assert margin_cfg.weight == pytest.approx(0.05)
+    assert margin_cfg.class_weighted is True
+    assert margin_cfg.warmup_epochs == 10
+    assert margin_cfg.label_weight_by_label["wheeze"] == pytest.approx(2.0)
+    assert margin_cfg.support_conditioned_multiplier.enabled is True
+    assert margin_cfg.hardness_weighting.enabled is True
+    assert margin_cfg.hardness_weighting.source == "top_support_gap"
+
+
+def test_valid_class_evidence_gap_cap_regularization_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["class_evidence_gap_cap_regularization"] = {
+        "enabled": True,
+        "weight": 0.02,
+        "target": "class_evidence_logits",
+        "mode": "negative_gap_hinge",
+        "negative_gap_cap": 3.0,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "evidence_gap_cap.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    gap_cap_cfg = cfg.train.loss.class_evidence_gap_cap_regularization
+    assert gap_cap_cfg.enabled is True
+    assert gap_cap_cfg.weight == pytest.approx(0.02)
+    assert gap_cap_cfg.target == "class_evidence_logits"
+    assert gap_cap_cfg.mode == "negative_gap_hinge"
+    assert gap_cap_cfg.negative_gap_cap == pytest.approx(3.0)
+    assert gap_cap_cfg.class_weighted is True
+    assert gap_cap_cfg.reduction == "mean"
+    assert gap_cap_cfg.warmup_epochs == 10
+
+
+def test_valid_branch_direct_score_margin_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "dropout": 0.1,
+        "use_class_embedding": True,
+        "logit_centering": True,
+        "score_decomposition": {"enabled": True},
+        "branch_direct_score": {
+            "enabled": True,
+            "positive_weight_mode": "softplus",
+            "top_scale_mode": "bounded_sigmoid",
+            "top_scale_min": 0.7,
+            "top_scale_init": 1.0,
+            "top_scale_max": 2.0,
+            "gated_scale_mode": "bounded_sigmoid",
+            "gated_scale_min": 0.0,
+            "gated_scale_init": 0.5,
+            "gated_scale_max": 1.5,
+            "residual_hidden_size": 128,
+            "residual_scale_mode": "sigmoid_max",
+            "residual_scale_init": 0.2,
+            "residual_scale_max": 0.5,
+            "residual_bound": 1.0,
+            "residual_temperature": 1.0,
+            "gate_reliability_mixture": {
+                "enabled": True,
+                "source": "top_vs_gated_margin_regret",
+                "mode": "exp_neg_regret",
+                "temperature": 1.0,
+                "tolerance": 0.05,
+                "detach": True,
+            },
+        },
+    }
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["branch_direct_score_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_evidence_branch_direct_scores",
+        "mode": "softplus_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "branch_direct_score_margin.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    direct_cfg = cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_direct_score
+    margin_cfg = cfg.train.loss.branch_direct_score_margin
+    assert direct_cfg.enabled is True
+    assert direct_cfg.top_scale_init == pytest.approx(1.0)
+    assert direct_cfg.gated_scale_init == pytest.approx(0.5)
+    assert direct_cfg.gate_reliability_mixture.enabled is True
+    assert margin_cfg.enabled is True
+    assert margin_cfg.target == "class_evidence_branch_direct_scores"
+    assert margin_cfg.weight == pytest.approx(0.05)
+    assert margin_cfg.class_weighted is True
+    assert margin_cfg.warmup_epochs == 10
 
 
 def test_valid_class_gated_branch_logit_margin_config_loads(
@@ -2176,6 +2699,119 @@ def test_invalid_softplus_class_evidence_margin_config_is_rejected(
     payload["train"]["loss"]["class_evidence_margin"][field] = value
     config_path = _write_json(
         tmp_path / "bad_softplus_class_evidence_margin.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "branch_support_score_margin.enabled"),
+        ("weight", 0.0, "branch_support_score_margin.weight"),
+        ("target", "class_evidence_logits", "branch_support_score_margin.target"),
+        ("mode", "true_vs_hardest_negative", "branch_support_score_margin.mode"),
+        ("temperature", 0.0, "branch_support_score_margin.temperature"),
+        ("class_weighted", "yes", "branch_support_score_margin.class_weighted"),
+        (
+            "reduction",
+            "class_balanced_violating_mean",
+            "branch_support_score_margin.reduction",
+        ),
+        ("warmup_epochs", -1, "branch_support_score_margin.warmup_epochs"),
+    ],
+)
+def test_invalid_branch_support_score_margin_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "score_decomposition": {"enabled": True},
+    }
+    payload["train"]["loss"]["branch_support_score_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_evidence_branch_support_scores",
+        "mode": "softplus_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "class_weighted": False,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["branch_support_score_margin"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_branch_support_score_margin.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("enabled", "yes", "branch_direct_score_margin.enabled"),
+        ("weight", 0.0, "branch_direct_score_margin.weight"),
+        ("target", "class_evidence_logits", "branch_direct_score_margin.target"),
+        ("mode", "true_vs_hardest_negative", "branch_direct_score_margin.mode"),
+        ("temperature", 0.0, "branch_direct_score_margin.temperature"),
+        ("class_weighted", "yes", "branch_direct_score_margin.class_weighted"),
+        (
+            "reduction",
+            "class_balanced_violating_mean",
+            "branch_direct_score_margin.reduction",
+        ),
+        ("warmup_epochs", -1, "branch_direct_score_margin.warmup_epochs"),
+    ],
+)
+def test_invalid_branch_direct_score_margin_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "score_decomposition": {"enabled": True},
+        "branch_direct_score": {"enabled": True},
+    }
+    payload["train"]["loss"]["branch_direct_score_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_evidence_branch_direct_scores",
+        "mode": "softplus_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "class_weighted": False,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["branch_direct_score_margin"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_branch_direct_score_margin.json",
         payload,
     )
 

@@ -248,6 +248,56 @@ def _format_component_line(
     )
     _append_raw_loss_pair(
         parts,
+        "evidence_gap_cap",
+        components,
+        raw_key="class_evidence_gap_cap_regularization",
+        loss_key="class_evidence_gap_cap_regularization_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
+        "top_support",
+        components,
+        raw_key="top_support_score_margin",
+        loss_key="top_support_score_margin_loss",
+    )
+    top_support_label_mult = _component_float(
+        components,
+        "top_support_score_margin_label_multiplier",
+        0.0,
+    )
+    top_support_support_mult = _component_float(
+        components,
+        "top_support_score_margin_support_multiplier",
+        0.0,
+    )
+    top_support_hardness_mult = _component_float(
+        components,
+        "top_support_score_margin_hardness_multiplier",
+        0.0,
+    )
+    if top_support_label_mult or top_support_support_mult or top_support_hardness_mult:
+        parts.append(
+            "top_support_mult="
+            f"{top_support_label_mult:.4f}/"
+            f"{top_support_support_mult:.4f}/"
+            f"{top_support_hardness_mult:.4f}"
+        )
+    _append_raw_loss_pair(
+        parts,
+        "branch_direct",
+        components,
+        raw_key="branch_direct_score_margin",
+        loss_key="branch_direct_score_margin_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
+        "branch_support",
+        components,
+        raw_key="branch_support_score_margin",
+        loss_key="branch_support_score_margin_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
         "branch_logit_margin",
         components,
         raw_key="class_gated_branch_logit_margin",
@@ -288,6 +338,13 @@ def _format_component_line(
         raw_key="top_branch_margin",
         loss_key="top_branch_margin_loss",
     )
+    top_branch_effective_weight = _component_float(
+        components,
+        "top_branch_margin_effective_weight",
+        0.0,
+    )
+    if top_branch_effective_weight:
+        parts.append(f"top_branch_eff_w={top_branch_effective_weight:.4f}")
     parts.append(
         f"scheduled={_component_float(components, 'total_scheduled', fallback_loss):.4f}"
     )

@@ -11,6 +11,18 @@ from src.models.model import AstModelOutput
 from src.utils.config import AnalysisOutputConfig
 
 
+def _true_vs_hardest_gap(
+    values: torch.Tensor,
+    label: int,
+) -> tuple[float, int] | None:
+    if values.ndim != 1 or values.numel() < 2 or not (0 <= label < values.numel()):
+        return None
+    mask = torch.ones_like(values, dtype=torch.bool)
+    mask[label] = False
+    negative_value, negative_index = values.masked_fill(~mask, float("-inf")).max(dim=0)
+    return float((values[label] - negative_value).item()), int(negative_index.item())
+
+
 def build_diagnostic_rows(
     batch: ClipBatch,
     output: AstModelOutput,
@@ -144,6 +156,156 @@ def build_diagnostic_rows(
         if output.class_evidence_scorer_branch_features is not None
         else None
     )
+    class_evidence_embedding_scores = (
+        output.class_evidence_embedding_scores.detach().cpu()
+        if output.class_evidence_embedding_scores is not None
+        else None
+    )
+    class_evidence_top_support_scores = (
+        output.class_evidence_top_support_scores.detach().cpu()
+        if output.class_evidence_top_support_scores is not None
+        else None
+    )
+    class_evidence_gated_support_scores = (
+        output.class_evidence_gated_support_scores.detach().cpu()
+        if output.class_evidence_gated_support_scores is not None
+        else None
+    )
+    class_evidence_top_raw_existential_scores = (
+        output.class_evidence_top_raw_existential_scores.detach().cpu()
+        if output.class_evidence_top_raw_existential_scores is not None
+        else None
+    )
+    class_evidence_top_relative_correction_scores = (
+        output.class_evidence_top_relative_correction_scores.detach().cpu()
+        if output.class_evidence_top_relative_correction_scores is not None
+        else None
+    )
+    class_evidence_top_relative_positive = (
+        output.class_evidence_top_relative_positive.detach().cpu()
+        if output.class_evidence_top_relative_positive is not None
+        else None
+    )
+    class_evidence_top_relative_negative = (
+        output.class_evidence_top_relative_negative.detach().cpu()
+        if output.class_evidence_top_relative_negative is not None
+        else None
+    )
+    class_evidence_gate_reliability = (
+        output.class_evidence_gate_reliability.detach().cpu()
+        if output.class_evidence_gate_reliability is not None
+        else None
+    )
+    class_evidence_gate_reliability_regret = (
+        output.class_evidence_gate_reliability_regret.detach().cpu()
+        if output.class_evidence_gate_reliability_regret is not None
+        else None
+    )
+    class_evidence_top_margin = (
+        output.class_evidence_top_margin.detach().cpu()
+        if output.class_evidence_top_margin is not None
+        else None
+    )
+    class_evidence_gated_margin = (
+        output.class_evidence_gated_margin.detach().cpu()
+        if output.class_evidence_gated_margin is not None
+        else None
+    )
+    class_evidence_branch_existential_scores = (
+        output.class_evidence_branch_existential_scores.detach().cpu()
+        if output.class_evidence_branch_existential_scores is not None
+        else None
+    )
+    class_evidence_branch_competitive_scores = (
+        output.class_evidence_branch_competitive_scores.detach().cpu()
+        if output.class_evidence_branch_competitive_scores is not None
+        else None
+    )
+    class_evidence_branch_direct_scores = (
+        output.class_evidence_branch_direct_scores.detach().cpu()
+        if output.class_evidence_branch_direct_scores is not None
+        else None
+    )
+    class_evidence_branch_residual_scores = (
+        output.class_evidence_branch_residual_scores.detach().cpu()
+        if output.class_evidence_branch_residual_scores is not None
+        else None
+    )
+    class_evidence_branch_support_scores = (
+        output.class_evidence_branch_support_scores.detach().cpu()
+        if output.class_evidence_branch_support_scores is not None
+        else None
+    )
+    class_evidence_interaction_scores = (
+        output.class_evidence_interaction_scores.detach().cpu()
+        if output.class_evidence_interaction_scores is not None
+        else None
+    )
+    class_evidence_branch_scale = (
+        output.class_evidence_branch_scale.detach().cpu()
+        if output.class_evidence_branch_scale is not None
+        else None
+    )
+    class_evidence_branch_direct_top_scale = (
+        output.class_evidence_branch_direct_top_scale.detach().cpu()
+        if output.class_evidence_branch_direct_top_scale is not None
+        else None
+    )
+    class_evidence_branch_direct_gated_scale = (
+        output.class_evidence_branch_direct_gated_scale.detach().cpu()
+        if output.class_evidence_branch_direct_gated_scale is not None
+        else None
+    )
+    class_evidence_branch_direct_raw_scale = (
+        output.class_evidence_branch_direct_raw_scale.detach().cpu()
+        if output.class_evidence_branch_direct_raw_scale is not None
+        else None
+    )
+    class_evidence_branch_direct_relative_scale = (
+        output.class_evidence_branch_direct_relative_scale.detach().cpu()
+        if output.class_evidence_branch_direct_relative_scale is not None
+        else None
+    )
+    class_evidence_branch_direct_residual_scale = (
+        output.class_evidence_branch_direct_residual_scale.detach().cpu()
+        if output.class_evidence_branch_direct_residual_scale is not None
+        else None
+    )
+    class_evidence_branch_direct_top_weights = (
+        output.class_evidence_branch_direct_top_weights.detach().cpu()
+        if output.class_evidence_branch_direct_top_weights is not None
+        else None
+    )
+    class_evidence_branch_direct_gated_weights = (
+        output.class_evidence_branch_direct_gated_weights.detach().cpu()
+        if output.class_evidence_branch_direct_gated_weights is not None
+        else None
+    )
+    class_evidence_branch_direct_existential_weights = (
+        output.class_evidence_branch_direct_existential_weights.detach().cpu()
+        if output.class_evidence_branch_direct_existential_weights is not None
+        else None
+    )
+    class_evidence_branch_direct_competitive_weights = (
+        output.class_evidence_branch_direct_competitive_weights.detach().cpu()
+        if output.class_evidence_branch_direct_competitive_weights is not None
+        else None
+    )
+    class_evidence_interaction_scale = (
+        output.class_evidence_interaction_scale.detach().cpu()
+        if output.class_evidence_interaction_scale is not None
+        else None
+    )
+    class_evidence_interaction_scale_multiplier = (
+        output.class_evidence_interaction_scale_multiplier.detach().cpu()
+        if output.class_evidence_interaction_scale_multiplier is not None
+        else None
+    )
+    class_evidence_interaction_effective_scale = (
+        output.class_evidence_interaction_effective_scale.detach().cpu()
+        if output.class_evidence_interaction_effective_scale is not None
+        else None
+    )
     class_evidence_scorer_branch_feature_transform_temperature = (
         output.class_evidence_scorer_branch_feature_transform_temperature.detach().cpu()
         if output.class_evidence_scorer_branch_feature_transform_temperature is not None
@@ -177,6 +339,21 @@ def build_diagnostic_rows(
     global_residual_gate = (
         output.global_residual_gate.detach().cpu()
         if output.global_residual_gate is not None
+        else None
+    )
+    global_residual_learned_gate = (
+        output.global_residual_learned_gate.detach().cpu()
+        if output.global_residual_learned_gate is not None
+        else None
+    )
+    global_residual_evidence_confidence = (
+        output.global_residual_evidence_confidence.detach().cpu()
+        if output.global_residual_evidence_confidence is not None
+        else None
+    )
+    global_residual_confidence_factor = (
+        output.global_residual_confidence_factor.detach().cpu()
+        if output.global_residual_confidence_factor is not None
         else None
     )
     global_residual_contribution = (
@@ -250,6 +427,18 @@ def build_diagnostic_rows(
                 row["centered_bounded_global_residual_logits"] = (
                     centered_bounded_global_residual_logits[index].tolist()
                 )
+            if global_residual_learned_gate is not None:
+                row["global_residual_learned_gate"] = global_residual_learned_gate[
+                    index
+                ].tolist()
+            if global_residual_evidence_confidence is not None:
+                row["global_residual_evidence_confidence"] = (
+                    global_residual_evidence_confidence[index].tolist()
+                )
+            if global_residual_confidence_factor is not None:
+                row["global_residual_confidence_factor"] = (
+                    global_residual_confidence_factor[index].tolist()
+                )
             if global_residual_gate is not None:
                 row["global_residual_gate"] = global_residual_gate[index].tolist()
             if global_residual_contribution is not None:
@@ -283,6 +472,246 @@ def build_diagnostic_rows(
             if class_evidence_scorer_branch_features is not None:
                 row["class_evidence_scorer_branch_features"] = (
                     class_evidence_scorer_branch_features[index].tolist()
+                )
+            true_label = int(batch.labels[index].item())
+            if class_evidence_embedding_scores is not None:
+                row["class_evidence_embedding_scores"] = (
+                    class_evidence_embedding_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_embedding_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_embedding_score_gap"] = gap
+                    row["class_evidence_embedding_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_top_support_scores is not None:
+                row["class_evidence_top_support_scores"] = (
+                    class_evidence_top_support_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_top_support_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_top_support_score_gap"] = gap
+                    row["class_evidence_top_support_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_gated_support_scores is not None:
+                row["class_evidence_gated_support_scores"] = (
+                    class_evidence_gated_support_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_gated_support_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_gated_support_score_gap"] = gap
+                    row["class_evidence_gated_support_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_top_raw_existential_scores is not None:
+                row["class_evidence_top_raw_existential_scores"] = (
+                    class_evidence_top_raw_existential_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_top_raw_existential_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_top_raw_existential_score_gap"] = gap
+                    row["class_evidence_top_raw_existential_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_top_relative_correction_scores is not None:
+                row["class_evidence_top_relative_correction_scores"] = (
+                    class_evidence_top_relative_correction_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_top_relative_correction_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_top_relative_correction_score_gap"] = gap
+                    row[
+                        "class_evidence_top_relative_correction_score_negative_class"
+                    ] = negative_class
+            if class_evidence_top_relative_positive is not None:
+                row["class_evidence_top_relative_positive"] = (
+                    class_evidence_top_relative_positive[index].tolist()
+                )
+            if class_evidence_top_relative_negative is not None:
+                row["class_evidence_top_relative_negative"] = (
+                    class_evidence_top_relative_negative[index].tolist()
+                )
+            if class_evidence_gate_reliability is not None:
+                row["class_evidence_gate_reliability"] = (
+                    class_evidence_gate_reliability[index].tolist()
+                )
+            if class_evidence_gate_reliability_regret is not None:
+                row["class_evidence_gate_reliability_regret"] = (
+                    class_evidence_gate_reliability_regret[index].tolist()
+                )
+            if class_evidence_top_margin is not None:
+                row["class_evidence_top_margin"] = class_evidence_top_margin[
+                    index
+                ].tolist()
+            if class_evidence_gated_margin is not None:
+                row["class_evidence_gated_margin"] = class_evidence_gated_margin[
+                    index
+                ].tolist()
+            if class_evidence_branch_existential_scores is not None:
+                row["class_evidence_branch_existential_scores"] = (
+                    class_evidence_branch_existential_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_branch_existential_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_branch_existential_score_gap"] = gap
+                    row["class_evidence_branch_existential_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_branch_competitive_scores is not None:
+                row["class_evidence_branch_competitive_scores"] = (
+                    class_evidence_branch_competitive_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_branch_competitive_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_branch_competitive_score_gap"] = gap
+                    row["class_evidence_branch_competitive_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_branch_direct_scores is not None:
+                row["class_evidence_branch_direct_scores"] = (
+                    class_evidence_branch_direct_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_branch_direct_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_branch_direct_score_gap"] = gap
+                    row["class_evidence_branch_direct_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_branch_residual_scores is not None:
+                row["class_evidence_branch_residual_scores"] = (
+                    class_evidence_branch_residual_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_branch_residual_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_branch_residual_score_gap"] = gap
+                    row["class_evidence_branch_residual_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_branch_support_scores is not None:
+                row["class_evidence_branch_support_scores"] = (
+                    class_evidence_branch_support_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_branch_support_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_branch_support_score_gap"] = gap
+                    row["class_evidence_branch_support_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_interaction_scores is not None:
+                row["class_evidence_interaction_scores"] = (
+                    class_evidence_interaction_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_interaction_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_interaction_score_gap"] = gap
+                    row["class_evidence_interaction_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_logits is not None:
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_logits[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_total_gap"] = gap
+                    row["class_evidence_total_negative_class"] = negative_class
+            if class_evidence_branch_scale is not None:
+                row["class_evidence_branch_scale"] = float(
+                    class_evidence_branch_scale.item()
+                )
+            if class_evidence_branch_direct_top_scale is not None:
+                row["class_evidence_branch_direct_top_scale"] = float(
+                    class_evidence_branch_direct_top_scale.item()
+                )
+            if class_evidence_branch_direct_gated_scale is not None:
+                row["class_evidence_branch_direct_gated_scale"] = float(
+                    class_evidence_branch_direct_gated_scale.item()
+                )
+            if class_evidence_branch_direct_raw_scale is not None:
+                row["class_evidence_branch_direct_raw_scale"] = float(
+                    class_evidence_branch_direct_raw_scale.item()
+                )
+            if class_evidence_branch_direct_relative_scale is not None:
+                row["class_evidence_branch_direct_relative_scale"] = float(
+                    class_evidence_branch_direct_relative_scale.item()
+                )
+            if class_evidence_branch_direct_residual_scale is not None:
+                row["class_evidence_branch_direct_residual_scale"] = float(
+                    class_evidence_branch_direct_residual_scale.item()
+                )
+            if class_evidence_branch_direct_top_weights is not None:
+                row["class_evidence_branch_direct_top_weights"] = (
+                    class_evidence_branch_direct_top_weights.tolist()
+                )
+            if class_evidence_branch_direct_gated_weights is not None:
+                row["class_evidence_branch_direct_gated_weights"] = (
+                    class_evidence_branch_direct_gated_weights.tolist()
+                )
+            if class_evidence_branch_direct_existential_weights is not None:
+                row["class_evidence_branch_direct_existential_weights"] = (
+                    class_evidence_branch_direct_existential_weights.tolist()
+                )
+            if class_evidence_branch_direct_competitive_weights is not None:
+                row["class_evidence_branch_direct_competitive_weights"] = (
+                    class_evidence_branch_direct_competitive_weights.tolist()
+                )
+            if class_evidence_interaction_scale is not None:
+                row["class_evidence_interaction_scale"] = float(
+                    class_evidence_interaction_scale.item()
+                )
+            if class_evidence_interaction_scale_multiplier is not None:
+                row["class_evidence_interaction_scale_multiplier"] = float(
+                    class_evidence_interaction_scale_multiplier.item()
+                )
+            if class_evidence_interaction_effective_scale is not None:
+                row["class_evidence_interaction_effective_scale"] = float(
+                    class_evidence_interaction_effective_scale.item()
                 )
             if output.class_evidence_scorer_type is not None:
                 row["class_evidence_scorer_type"] = output.class_evidence_scorer_type

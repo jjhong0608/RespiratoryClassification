@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "new_test_CNUH_3classes_ver21",
+    "name": "new_test_CNUH_3classes_ver27",
     "task": "normal_crackle_wheeze_rhonchi_pretrain",
     "mode": "clip",
     "seed": 1337,
@@ -120,14 +120,14 @@
         "num_layers": 0
       },
       "architecture": {
-        "hidden_size": 320,
+        "hidden_size": 384,
         "num_attention_heads": 8,
         "mlp_ratio": 2.0,
         "hidden_dropout_prob": 0.1,
         "attention_probs_dropout_prob": 0.1,
         "layer_norm_eps": 1e-06,
         "shared_stem_depth": 1,
-        "adapter_depth": 4,
+        "adapter_depth": 6,
         "rdt": {
           "enabled": true,
           "steps": 3,
@@ -146,14 +146,65 @@
             "mode": "query",
             "evidence_scorer": {
               "type": "class_axis_attention",
-              "embedding_hidden_size": 512,
+              "embedding_hidden_size": 768,
               "branch_hidden_size": 128,
-              "fusion_hidden_size": 768,
+              "fusion_hidden_size": 1024,
               "num_attention_heads": 4,
-              "num_attention_layers": 1,
+              "num_attention_layers": 2,
               "dropout": 0.05,
               "use_class_embedding": true,
               "logit_centering": true,
+              "score_decomposition": {
+                "enabled": true,
+                "branch_scale_mode": "bounded_sigmoid",
+                "branch_scale_min": 0.7,
+                "branch_scale_init": 1.0,
+                "branch_scale_max": 2.0,
+                "interaction_scale_mode": "bounded_sigmoid",
+                "interaction_scale_min": 0.3,
+                "interaction_scale_init": 0.7,
+                "interaction_scale_max": 1.5,
+                "interaction_scale_schedule": {
+                  "enabled": true,
+                  "start_epoch": 11,
+                  "end_epoch": 30,
+                  "start_multiplier": 0.2,
+                  "end_multiplier": 1.0
+                }
+              },
+              "branch_direct_score": {
+                "enabled": true,
+                "positive_weight_mode": "softplus",
+                "top_support_mode": "raw_existential_plus_relative_correction",
+                "top_scale_mode": "bounded_sigmoid",
+                "top_scale_min": 0.7,
+                "top_scale_init": 1.0,
+                "top_scale_max": 2.0,
+                "gated_scale_mode": "bounded_sigmoid",
+                "gated_scale_min": 0.0,
+                "gated_scale_init": 0.5,
+                "gated_scale_max": 1.5,
+                "residual_hidden_size": 128,
+                "residual_scale_mode": "sigmoid_max",
+                "residual_scale_init": 0.2,
+                "residual_scale_max": 0.5,
+                "residual_bound": 1.0,
+                "residual_temperature": 1.0,
+                "top_relative_correction": {
+                  "enabled": true,
+                  "positive_scale": 0.2,
+                  "negative_scale": 0.05,
+                  "negative_clip": 1.0
+                },
+                "gate_reliability_mixture": {
+                  "enabled": true,
+                  "source": "top_vs_gated_margin_regret",
+                  "mode": "exp_neg_regret",
+                  "temperature": 1.0,
+                  "tolerance": 0.05,
+                  "detach": true
+                }
+              },
               "branch_feature_transform": {
                 "mode": "tanh",
                 "temperature": 1.0
@@ -181,7 +232,14 @@
                 "gate_hidden_size": 128,
                 "dropout": 0.05,
                 "zero_mean": true,
-                "rebound": true
+                "rebound": true,
+                "confidence_aware_gate": {
+                  "enabled": true,
+                  "source": "evidence_gap",
+                  "mode": "damped_sigmoid",
+                  "temperature": 1.0,
+                  "damping": 0.7
+                }
               }
             },
             "evidence_auxiliary": {
@@ -331,6 +389,65 @@
           "gain": 1.0,
           "cap": 2.0
         }
+      },
+      "class_evidence_gap_cap_regularization": {
+        "enabled": true,
+        "weight": 0.02,
+        "target": "class_evidence_logits",
+        "mode": "negative_gap_hinge",
+        "negative_gap_cap": 3.0,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
+      "branch_support_score_margin": {
+        "enabled": true,
+        "weight": 0.05,
+        "target": "class_evidence_branch_support_scores",
+        "mode": "softplus_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
+      "top_support_score_margin": {
+        "enabled": true,
+        "weight": 0.05,
+        "target": "class_evidence_top_support_scores",
+        "mode": "softplus_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+        "label_weight_by_label": {
+          "normal": 1.0,
+          "crackle": 1.0,
+          "wheeze": 2.0
+        },
+        "support_conditioned_multiplier": {
+          "enabled": true,
+          "source": "top_branch_margin",
+          "mode": "linear",
+          "gain": 1.0,
+          "cap": 2.0
+        },
+        "hardness_weighting": {
+          "enabled": true,
+          "source": "top_support_gap",
+          "mode": "negative_gap",
+          "gain": 1.0,
+          "cap": 3.0
+        }
+      },
+      "branch_direct_score_margin": {
+        "enabled": true,
+        "weight": 0.05,
+        "target": "class_evidence_branch_direct_scores",
+        "mode": "softplus_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
       },
       "class_gated_branch_logit_margin": {
         "enabled": false,
@@ -526,6 +643,21 @@
             "normal": 0.3,
             "crackle": 0.5,
             "wheeze": 0.8
+          }
+        },
+        "phase_weight_schedule": {
+          "enabled": true,
+          "start_epoch": 21,
+          "end_epoch": 31,
+          "start_multiplier_by_label": {
+            "normal": 1.0,
+            "crackle": 1.0,
+            "wheeze": 1.0
+          },
+          "label_multiplier_by_label": {
+            "normal": 1.0,
+            "crackle": 1.0,
+            "wheeze": 2.0
           }
         }
       },

@@ -17,6 +17,8 @@ from src.models.model import (
     ClassGateGlobalResidualCorrectionConfig,
     ClassGateGlobalResidualWarmupConfig,
     ClassGateMixingConfig,
+    ClassGateResidualConfidenceAwareGateConfig,
+    ClassGateScoreDecompositionConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -139,13 +141,32 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
             "model_cfg.encoder.architecture.evidence_pooling.class_gate."
             "global_residual.correction must be a dict"
         )
+    correction_kwargs = dict(correction_raw)
+    confidence_gate_raw = correction_kwargs.get("confidence_aware_gate", {})
+    if not isinstance(confidence_gate_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "global_residual.correction.confidence_aware_gate must be a dict"
+        )
+    correction_kwargs["confidence_aware_gate"] = (
+        ClassGateResidualConfidenceAwareGateConfig(**dict(confidence_gate_raw))
+    )
     global_residual_kwargs["correction"] = ClassGateGlobalResidualCorrectionConfig(
-        **dict(correction_raw)
+        **correction_kwargs
     )
     class_gate_kwargs["global_residual"] = ClassGateGlobalResidualConfig(
         **global_residual_kwargs
     )
     evidence_scorer_kwargs = dict(evidence_scorer_raw)
+    score_decomposition_raw = evidence_scorer_kwargs.get("score_decomposition", {})
+    if not isinstance(score_decomposition_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "evidence_scorer.score_decomposition must be a dict"
+        )
+    evidence_scorer_kwargs["score_decomposition"] = ClassGateScoreDecompositionConfig(
+        **dict(score_decomposition_raw)
+    )
     branch_feature_transform_raw = evidence_scorer_kwargs.get(
         "branch_feature_transform",
         {},

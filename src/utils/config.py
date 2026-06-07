@@ -10,6 +10,7 @@ from src.evaluation.thresholds import ThresholdOptimizationConfig
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassGateBranchDirectScoreConfig,
     ClassGateBranchFeatureTransformConfig,
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
@@ -19,7 +20,12 @@ from src.models.model import (
     ClassGateGlobalResidualConfig,
     ClassGateGlobalResidualCorrectionConfig,
     ClassGateGlobalResidualWarmupConfig,
+    ClassGateInteractionScaleScheduleConfig,
     ClassGateMixingConfig,
+    ClassGateReliabilityMixtureConfig,
+    ClassGateResidualConfidenceAwareGateConfig,
+    ClassGateScoreDecompositionConfig,
+    ClassGateTopRelativeCorrectionConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -252,7 +258,7 @@ class MarginSupportWeightingConfig:
 @dataclass(frozen=True)
 class MarginHardnessWeightingConfig:
     enabled: bool = False
-    source: Literal["evidence_gap"] = "evidence_gap"
+    source: Literal["evidence_gap", "top_support_gap"] = "evidence_gap"
     mode: Literal["negative_gap"] = "negative_gap"
     gain: float = 1.0
     cap: float = 3.0
@@ -276,6 +282,73 @@ class ClassEvidenceMarginConfig:
     support_weighting: MarginSupportWeightingConfig = field(
         default_factory=MarginSupportWeightingConfig
     )
+
+
+@dataclass(frozen=True)
+class ClassEvidenceGapCapRegularizationConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_logits"] = "class_evidence_logits"
+    mode: Literal["negative_gap_hinge"] = "negative_gap_hinge"
+    negative_gap_cap: float = 3.0
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class TopSupportScoreMarginConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_top_support_scores"] = (
+        "class_evidence_top_support_scores"
+    )
+    mode: Literal["softplus_true_vs_hardest_negative"] = (
+        "softplus_true_vs_hardest_negative"
+    )
+    temperature: float = 1.0
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+    label_weight_by_label: Mapping[str, float] = field(default_factory=dict)
+    support_conditioned_multiplier: MarginSupportWeightingConfig = field(
+        default_factory=MarginSupportWeightingConfig
+    )
+    hardness_weighting: MarginHardnessWeightingConfig = field(
+        default_factory=MarginHardnessWeightingConfig
+    )
+
+
+@dataclass(frozen=True)
+class BranchSupportScoreMarginConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_branch_support_scores"] = (
+        "class_evidence_branch_support_scores"
+    )
+    mode: Literal["softplus_true_vs_hardest_negative"] = (
+        "softplus_true_vs_hardest_negative"
+    )
+    temperature: float = 1.0
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class BranchDirectScoreMarginConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_branch_direct_scores"] = (
+        "class_evidence_branch_direct_scores"
+    )
+    mode: Literal["softplus_true_vs_hardest_negative"] = (
+        "softplus_true_vs_hardest_negative"
+    )
+    temperature: float = 1.0
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
 
 
 @dataclass(frozen=True)
@@ -422,6 +495,15 @@ class GateBranchRegretWeightScheduleConfig:
 
 
 @dataclass(frozen=True)
+class TopBranchMarginPhaseWeightScheduleConfig:
+    enabled: bool = False
+    start_epoch: int = 1
+    end_epoch: int | None = None
+    start_multiplier_by_label: Mapping[str, float] = field(default_factory=dict)
+    label_multiplier_by_label: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GateBranchRegretConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -474,6 +556,9 @@ class TopBranchMarginConfig:
     margin_by_label: Mapping[str, float] = field(default_factory=dict)
     auto_margin_by_train_stats: AutoMarginByTrainStatsConfig = field(
         default_factory=AutoMarginByTrainStatsConfig
+    )
+    phase_weight_schedule: TopBranchMarginPhaseWeightScheduleConfig = field(
+        default_factory=TopBranchMarginPhaseWeightScheduleConfig
     )
 
 
@@ -558,6 +643,18 @@ class LossConfig:
     )
     class_evidence_margin: ClassEvidenceMarginConfig = field(
         default_factory=ClassEvidenceMarginConfig
+    )
+    class_evidence_gap_cap_regularization: ClassEvidenceGapCapRegularizationConfig = (
+        field(default_factory=ClassEvidenceGapCapRegularizationConfig)
+    )
+    top_support_score_margin: TopSupportScoreMarginConfig = field(
+        default_factory=TopSupportScoreMarginConfig
+    )
+    branch_support_score_margin: BranchSupportScoreMarginConfig = field(
+        default_factory=BranchSupportScoreMarginConfig
+    )
+    branch_direct_score_margin: BranchDirectScoreMarginConfig = field(
+        default_factory=BranchDirectScoreMarginConfig
     )
     class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
         default_factory=ClassGatedBranchLogitMarginConfig
@@ -740,14 +837,25 @@ class JsonConfigLoader:
         "two_tower_mlp",
         "class_axis_attention",
     }
+    _CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES = {
+        "sigmoid_max",
+        "bounded_sigmoid",
+    }
+    _CLASS_GATE_BRANCH_DIRECT_SCORE_TOP_SUPPORT_MODES = {
+        "learned_weighted_sum",
+        "raw_existential_plus_relative_correction",
+    }
+    _CLASS_GATE_BRANCH_DIRECT_SCORE_POSITIVE_WEIGHT_MODES = {"softplus"}
     _CLASS_GATE_BRANCH_FEATURE_TRANSFORM_MODES = {"tanh"}
     _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
     _CLASS_GATE_MIXING_MODES = {"uniform_to_learned"}
     _GLOBAL_RESIDUAL_WARMUP_MODES = {"zero_to_learned"}
     _GLOBAL_RESIDUAL_CORRECTION_MODES = {"additive", "gated_zero_mean"}
+    _GLOBAL_RESIDUAL_CONFIDENCE_GATE_SOURCES = {"evidence_gap"}
+    _GLOBAL_RESIDUAL_CONFIDENCE_GATE_MODES = {"damped_sigmoid"}
     _MARGIN_SUPPORT_WEIGHTING_SOURCES = {"top_branch_margin", "same_as_source"}
     _MARGIN_SUPPORT_WEIGHTING_MODES = {"linear", "positive_linear"}
-    _MARGIN_HARDNESS_WEIGHTING_SOURCES = {"evidence_gap"}
+    _MARGIN_HARDNESS_WEIGHTING_SOURCES = {"evidence_gap", "top_support_gap"}
     _MARGIN_HARDNESS_WEIGHTING_MODES = {"negative_gap"}
     _GATE_ENTROPY_TARGETS = {
         "evidence_gate",
@@ -766,6 +874,18 @@ class JsonConfigLoader:
         "true_vs_hardest_negative",
         "softplus_true_vs_hardest_negative",
     }
+    _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_TARGETS = {"class_evidence_logits"}
+    _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_MODES = {"negative_gap_hinge"}
+    _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_REDUCTIONS = {"mean"}
+    _TOP_SUPPORT_SCORE_MARGIN_TARGETS = {"class_evidence_top_support_scores"}
+    _TOP_SUPPORT_SCORE_MARGIN_MODES = {"softplus_true_vs_hardest_negative"}
+    _TOP_SUPPORT_SCORE_MARGIN_REDUCTIONS = {"mean"}
+    _BRANCH_SUPPORT_SCORE_MARGIN_TARGETS = {"class_evidence_branch_support_scores"}
+    _BRANCH_SUPPORT_SCORE_MARGIN_MODES = {"softplus_true_vs_hardest_negative"}
+    _BRANCH_SUPPORT_SCORE_MARGIN_REDUCTIONS = {"mean"}
+    _BRANCH_DIRECT_SCORE_MARGIN_TARGETS = {"class_evidence_branch_direct_scores"}
+    _BRANCH_DIRECT_SCORE_MARGIN_MODES = {"softplus_true_vs_hardest_negative"}
+    _BRANCH_DIRECT_SCORE_MARGIN_REDUCTIONS = {"mean"}
     _MARGIN_REDUCTIONS = {"mean", "class_balanced_violating_mean"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_TARGETS = {"class_gated_branch_logits"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_MODES = {"true_vs_hardest_negative"}
@@ -1217,9 +1337,15 @@ class JsonConfigLoader:
         if not isinstance(cfg.enabled, bool):
             raise TypeError(f"{field_name}.enabled must be a boolean")
         if cfg.source not in JsonConfigLoader._MARGIN_HARDNESS_WEIGHTING_SOURCES:
-            raise ValueError(f"{field_name}.source must be 'evidence_gap'")
+            raise ValueError(
+                f"{field_name}.source must be one of "
+                f"{sorted(JsonConfigLoader._MARGIN_HARDNESS_WEIGHTING_SOURCES)}"
+            )
         if cfg.mode not in JsonConfigLoader._MARGIN_HARDNESS_WEIGHTING_MODES:
-            raise ValueError(f"{field_name}.mode must be 'negative_gap'")
+            raise ValueError(
+                f"{field_name}.mode must be one of "
+                f"{sorted(JsonConfigLoader._MARGIN_HARDNESS_WEIGHTING_MODES)}"
+            )
         for value, suffix in ((cfg.gain, "gain"), (cfg.cap, "cap")):
             if not isinstance(value, int | float) or isinstance(value, bool):
                 raise TypeError(f"{field_name}.{suffix} must be numeric")
@@ -1651,6 +1777,360 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "evidence_scorer.logit_centering must be a boolean"
             )
+        score_decomposition = evidence_scorer.score_decomposition
+        if not isinstance(score_decomposition.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.enabled must be a boolean"
+            )
+        if (
+            score_decomposition.branch_scale_mode
+            not in JsonConfigLoader._CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.branch_scale_mode must be "
+                "one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES)}"
+            )
+        if (
+            score_decomposition.interaction_scale_mode
+            not in JsonConfigLoader._CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.interaction_scale_mode must be "
+                "one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES)}"
+            )
+        for prefix, mode, min_value, init_value, max_value in (
+            (
+                "branch_scale",
+                score_decomposition.branch_scale_mode,
+                score_decomposition.branch_scale_min,
+                score_decomposition.branch_scale_init,
+                score_decomposition.branch_scale_max,
+            ),
+            (
+                "interaction_scale",
+                score_decomposition.interaction_scale_mode,
+                score_decomposition.interaction_scale_min,
+                score_decomposition.interaction_scale_init,
+                score_decomposition.interaction_scale_max,
+            ),
+        ):
+            for value, suffix in (
+                (min_value, "min"),
+                (init_value, "init"),
+                (max_value, "max"),
+            ):
+                if not isinstance(value, int | float) or isinstance(value, bool):
+                    raise TypeError(
+                        "model.encoder.architecture.evidence_pooling.class_gate."
+                        f"evidence_scorer.score_decomposition.{prefix}_{suffix} "
+                        "must be numeric"
+                    )
+            if mode == "sigmoid_max" and float(max_value) <= 0.0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.score_decomposition.{prefix}_max must be "
+                    "greater than zero"
+                )
+            if mode == "sigmoid_max" and not (
+                0.0 <= float(init_value) <= float(max_value)
+            ):
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.score_decomposition.{prefix}_init must be "
+                    "within [0, max]"
+                )
+            if mode == "bounded_sigmoid":
+                if float(min_value) < 0.0:
+                    raise ValueError(
+                        "model.encoder.architecture.evidence_pooling.class_gate."
+                        f"evidence_scorer.score_decomposition.{prefix}_min must be "
+                        "non-negative when mode='bounded_sigmoid'"
+                    )
+                if float(max_value) <= float(min_value):
+                    raise ValueError(
+                        "model.encoder.architecture.evidence_pooling.class_gate."
+                        f"evidence_scorer.score_decomposition.{prefix}_max must be "
+                        "greater than min when mode='bounded_sigmoid'"
+                    )
+                if not (float(min_value) <= float(init_value) <= float(max_value)):
+                    raise ValueError(
+                        "model.encoder.architecture.evidence_pooling.class_gate."
+                        f"evidence_scorer.score_decomposition.{prefix}_init must be "
+                        "within [min, max] when mode='bounded_sigmoid'"
+                    )
+        interaction_schedule = score_decomposition.interaction_scale_schedule
+        if not isinstance(interaction_schedule.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.interaction_scale_schedule."
+                "enabled must be a boolean"
+            )
+        for field_name in ("start_epoch", "end_epoch"):
+            value = getattr(interaction_schedule, field_name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.score_decomposition.interaction_scale_schedule."
+                    f"{field_name} must be an integer"
+                )
+        if int(interaction_schedule.start_epoch) <= 0:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.interaction_scale_schedule."
+                "start_epoch must be greater than zero"
+            )
+        if int(interaction_schedule.end_epoch) < int(interaction_schedule.start_epoch):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.interaction_scale_schedule."
+                "end_epoch must be greater than or equal to start_epoch"
+            )
+        for field_name in ("start_multiplier", "end_multiplier"):
+            value = getattr(interaction_schedule, field_name)
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.score_decomposition.interaction_scale_schedule."
+                    f"{field_name} must be numeric"
+                )
+            if float(value) < 0.0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.score_decomposition.interaction_scale_schedule."
+                    f"{field_name} must be non-negative"
+                )
+        if (
+            score_decomposition.enabled
+            and evidence_scorer.type != "class_axis_attention"
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition requires "
+                "evidence_scorer.type='class_axis_attention'"
+            )
+        direct_score = evidence_scorer.branch_direct_score
+        if not isinstance(direct_score.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.enabled must be a boolean"
+            )
+        if (
+            direct_score.positive_weight_mode
+            not in JsonConfigLoader._CLASS_GATE_BRANCH_DIRECT_SCORE_POSITIVE_WEIGHT_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.positive_weight_mode must "
+                "be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_BRANCH_DIRECT_SCORE_POSITIVE_WEIGHT_MODES)}"
+            )
+        if (
+            direct_score.top_support_mode
+            not in JsonConfigLoader._CLASS_GATE_BRANCH_DIRECT_SCORE_TOP_SUPPORT_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_mode must be "
+                "one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_BRANCH_DIRECT_SCORE_TOP_SUPPORT_MODES)}"
+            )
+        top_relative_correction = direct_score.top_relative_correction
+        if not isinstance(top_relative_correction.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_relative_correction."
+                "enabled must be a boolean"
+            )
+        for field_name in ("positive_scale", "negative_scale"):
+            value = getattr(top_relative_correction, field_name)
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_direct_score.top_relative_correction."
+                    f"{field_name} must be numeric"
+                )
+            if float(value) < 0.0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_direct_score.top_relative_correction."
+                    f"{field_name} must be greater than or equal to zero"
+                )
+        if (
+            not isinstance(top_relative_correction.negative_clip, int | float)
+            or isinstance(top_relative_correction.negative_clip, bool)
+            or float(top_relative_correction.negative_clip) <= 0.0
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_relative_correction."
+                "negative_clip must be greater than zero"
+            )
+        for prefix, mode, min_value, init_value, max_value in (
+            (
+                "top_scale",
+                direct_score.top_scale_mode,
+                direct_score.top_scale_min,
+                direct_score.top_scale_init,
+                direct_score.top_scale_max,
+            ),
+            (
+                "gated_scale",
+                direct_score.gated_scale_mode,
+                direct_score.gated_scale_min,
+                direct_score.gated_scale_init,
+                direct_score.gated_scale_max,
+            ),
+            (
+                "residual_scale",
+                direct_score.residual_scale_mode,
+                direct_score.residual_scale_min,
+                direct_score.residual_scale_init,
+                direct_score.residual_scale_max,
+            ),
+        ):
+            if mode not in JsonConfigLoader._CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.branch_direct_score.{prefix}_mode must be "
+                    "one of "
+                    f"{sorted(JsonConfigLoader._CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES)}"
+                )
+            for value, suffix in (
+                (min_value, "min"),
+                (init_value, "init"),
+                (max_value, "max"),
+            ):
+                if not isinstance(value, int | float) or isinstance(value, bool):
+                    raise TypeError(
+                        "model.encoder.architecture.evidence_pooling.class_gate."
+                        f"evidence_scorer.branch_direct_score.{prefix}_{suffix} "
+                        "must be numeric"
+                    )
+            if mode == "sigmoid_max" and float(max_value) <= 0.0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.branch_direct_score.{prefix}_max must be "
+                    "greater than zero"
+                )
+            if mode == "sigmoid_max" and not (
+                0.0 <= float(init_value) <= float(max_value)
+            ):
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.branch_direct_score.{prefix}_init must be "
+                    "within [0, max]"
+                )
+            if mode == "bounded_sigmoid":
+                if float(min_value) < 0.0:
+                    raise ValueError(
+                        "model.encoder.architecture.evidence_pooling.class_gate."
+                        f"evidence_scorer.branch_direct_score.{prefix}_min must "
+                        "be non-negative when mode='bounded_sigmoid'"
+                    )
+                if float(max_value) <= float(min_value):
+                    raise ValueError(
+                        "model.encoder.architecture.evidence_pooling.class_gate."
+                        f"evidence_scorer.branch_direct_score.{prefix}_max must "
+                        "be greater than min when mode='bounded_sigmoid'"
+                    )
+                if not (float(min_value) <= float(init_value) <= float(max_value)):
+                    raise ValueError(
+                        "model.encoder.architecture.evidence_pooling.class_gate."
+                        f"evidence_scorer.branch_direct_score.{prefix}_init must "
+                        "be within [min, max] when mode='bounded_sigmoid'"
+                    )
+        if not isinstance(direct_score.residual_hidden_size, int) or isinstance(
+            direct_score.residual_hidden_size,
+            bool,
+        ):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.residual_hidden_size must "
+                "be an integer"
+            )
+        if int(direct_score.residual_hidden_size) <= 0:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.residual_hidden_size must "
+                "be greater than zero"
+            )
+        for field_name in ("residual_bound", "residual_temperature"):
+            value = getattr(direct_score, field_name)
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.branch_direct_score.{field_name} must be "
+                    "numeric"
+                )
+            if float(value) <= 0.0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.branch_direct_score.{field_name} must be "
+                    "greater than zero"
+                )
+        reliability = direct_score.gate_reliability_mixture
+        if not isinstance(reliability.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.gate_reliability_mixture."
+                "enabled must be a boolean"
+            )
+        if reliability.source != "top_vs_gated_margin_regret":
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.gate_reliability_mixture."
+                "source must be 'top_vs_gated_margin_regret'"
+            )
+        if reliability.mode != "exp_neg_regret":
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.gate_reliability_mixture."
+                "mode must be 'exp_neg_regret'"
+            )
+        if (
+            not isinstance(reliability.temperature, int | float)
+            or isinstance(reliability.temperature, bool)
+            or float(reliability.temperature) <= 0.0
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.gate_reliability_mixture."
+                "temperature must be greater than zero"
+            )
+        if (
+            not isinstance(reliability.tolerance, int | float)
+            or isinstance(reliability.tolerance, bool)
+            or float(reliability.tolerance) < 0.0
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.gate_reliability_mixture."
+                "tolerance must be non-negative"
+            )
+        if not isinstance(reliability.detach, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.gate_reliability_mixture."
+                "detach must be a boolean"
+            )
+        if direct_score.enabled:
+            if evidence_scorer.type != "class_axis_attention":
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_direct_score requires "
+                    "evidence_scorer.type='class_axis_attention'"
+                )
+            if not score_decomposition.enabled:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_direct_score requires "
+                    "evidence_scorer.score_decomposition.enabled=true"
+                )
         if isinstance(evidence_scorer.dropout, bool) or not isinstance(
             evidence_scorer.dropout,
             int | float,
@@ -1833,6 +2313,68 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "global_residual.correction.rebound must be a boolean"
             )
+        confidence_gate = correction.confidence_aware_gate
+        if not isinstance(confidence_gate.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.confidence_aware_gate.enabled "
+                "must be a boolean"
+            )
+        if (
+            confidence_gate.source
+            not in JsonConfigLoader._GLOBAL_RESIDUAL_CONFIDENCE_GATE_SOURCES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.confidence_aware_gate.source must be "
+                "'evidence_gap'"
+            )
+        if (
+            confidence_gate.mode
+            not in JsonConfigLoader._GLOBAL_RESIDUAL_CONFIDENCE_GATE_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.confidence_aware_gate.mode must be "
+                "'damped_sigmoid'"
+            )
+        if not isinstance(confidence_gate.temperature, int | float) or isinstance(
+            confidence_gate.temperature,
+            bool,
+        ):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.confidence_aware_gate.temperature "
+                "must be numeric"
+            )
+        if float(confidence_gate.temperature) <= 0.0:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.confidence_aware_gate.temperature "
+                "must be greater than zero"
+            )
+        if not isinstance(confidence_gate.damping, int | float) or isinstance(
+            confidence_gate.damping,
+            bool,
+        ):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.confidence_aware_gate.damping "
+                "must be numeric"
+            )
+        JsonConfigLoader._validate_probability(
+            float(confidence_gate.damping),
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.confidence_aware_gate.damping"
+            ),
+        )
+        if confidence_gate.enabled and correction.mode != "gated_zero_mean":
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "global_residual.correction.confidence_aware_gate requires "
+                "global_residual.correction.mode='gated_zero_mean'"
+            )
         if not isinstance(class_gate.evidence_auxiliary.enabled, bool):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
@@ -1992,6 +2534,9 @@ class JsonConfigLoader:
         num_branches: int,
         label_to_index: Mapping[str, int],
         evidence_pooling_type: str,
+        evidence_scorer_type: str,
+        score_decomposition_enabled: bool,
+        branch_direct_score_enabled: bool,
     ) -> None:
         if cfg.epochs <= 0:
             raise ValueError("train.epochs must be greater than zero")
@@ -2242,6 +2787,361 @@ class JsonConfigLoader:
                 raise ValueError(
                     "train.loss.class_evidence_margin.major_class is required "
                     "when mode='minority_vs_major'"
+                )
+        gap_cap_cfg = cfg.loss.class_evidence_gap_cap_regularization
+        if not isinstance(gap_cap_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.class_evidence_gap_cap_regularization.enabled "
+                "must be a boolean"
+            )
+        if not isinstance(gap_cap_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.class_evidence_gap_cap_regularization.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            gap_cap_cfg.target
+            not in JsonConfigLoader._CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_gap_cap_regularization.target must be "
+                "'class_evidence_logits'"
+            )
+        if (
+            gap_cap_cfg.mode
+            not in JsonConfigLoader._CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_MODES
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_gap_cap_regularization.mode must be "
+                "'negative_gap_hinge'"
+            )
+        if (
+            gap_cap_cfg.reduction
+            not in JsonConfigLoader._CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_gap_cap_regularization.reduction "
+                "must be 'mean'"
+            )
+        if (
+            not isinstance(gap_cap_cfg.negative_gap_cap, int | float)
+            or isinstance(gap_cap_cfg.negative_gap_cap, bool)
+            or float(gap_cap_cfg.negative_gap_cap) <= 0.0
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_gap_cap_regularization."
+                "negative_gap_cap must be greater than zero"
+            )
+        if not isinstance(gap_cap_cfg.warmup_epochs, int) or isinstance(
+            gap_cap_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.class_evidence_gap_cap_regularization.warmup_epochs "
+                "must be an integer"
+            )
+        if int(gap_cap_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.class_evidence_gap_cap_regularization.warmup_epochs "
+                "must be non-negative"
+            )
+        if gap_cap_cfg.enabled:
+            if gap_cap_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.class_evidence_gap_cap_regularization.weight "
+                    "must be greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.class_evidence_gap_cap_regularization is supported "
+                    "only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.class_evidence_gap_cap_regularization requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+        top_support_cfg = cfg.loss.top_support_score_margin
+        if not isinstance(top_support_cfg.enabled, bool):
+            raise ValueError(
+                "train.loss.top_support_score_margin.enabled must be a boolean"
+            )
+        if not isinstance(top_support_cfg.class_weighted, bool):
+            raise ValueError(
+                "train.loss.top_support_score_margin.class_weighted must be a boolean"
+            )
+        if (
+            top_support_cfg.target
+            not in JsonConfigLoader._TOP_SUPPORT_SCORE_MARGIN_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.top_support_score_margin.target must be "
+                "'class_evidence_top_support_scores'"
+            )
+        if top_support_cfg.mode not in JsonConfigLoader._TOP_SUPPORT_SCORE_MARGIN_MODES:
+            raise ValueError(
+                "train.loss.top_support_score_margin.mode must be "
+                "'softplus_true_vs_hardest_negative'"
+            )
+        if (
+            top_support_cfg.reduction
+            not in JsonConfigLoader._TOP_SUPPORT_SCORE_MARGIN_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.top_support_score_margin.reduction must be 'mean'"
+            )
+        if (
+            not isinstance(top_support_cfg.temperature, int | float)
+            or isinstance(top_support_cfg.temperature, bool)
+            or float(top_support_cfg.temperature) <= 0.0
+        ):
+            raise ValueError(
+                "train.loss.top_support_score_margin.temperature must be "
+                "greater than zero"
+            )
+        if not isinstance(top_support_cfg.warmup_epochs, int) or isinstance(
+            top_support_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.top_support_score_margin.warmup_epochs must be an integer"
+            )
+        if int(top_support_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.top_support_score_margin.warmup_epochs must be non-negative"
+            )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            top_support_cfg.label_weight_by_label,
+            field_name="train.loss.top_support_score_margin.label_weight_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_margin_support_weighting(
+            top_support_cfg.support_conditioned_multiplier,
+            field_name=(
+                "train.loss.top_support_score_margin.support_conditioned_multiplier"
+            ),
+        )
+        if top_support_cfg.support_conditioned_multiplier.enabled and (
+            top_support_cfg.support_conditioned_multiplier.source != "top_branch_margin"
+            or top_support_cfg.support_conditioned_multiplier.mode != "linear"
+        ):
+            raise ValueError(
+                "train.loss.top_support_score_margin."
+                "support_conditioned_multiplier supports only "
+                "source='top_branch_margin' and mode='linear'"
+            )
+        JsonConfigLoader._validate_margin_hardness_weighting(
+            top_support_cfg.hardness_weighting,
+            field_name="train.loss.top_support_score_margin.hardness_weighting",
+        )
+        if top_support_cfg.hardness_weighting.enabled and (
+            top_support_cfg.hardness_weighting.source != "top_support_gap"
+            or top_support_cfg.hardness_weighting.mode != "negative_gap"
+        ):
+            raise ValueError(
+                "train.loss.top_support_score_margin.hardness_weighting "
+                "supports only source='top_support_gap' and mode='negative_gap'"
+            )
+        if top_support_cfg.enabled:
+            if top_support_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.top_support_score_margin.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.top_support_score_margin is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.top_support_score_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if evidence_scorer_type != "class_axis_attention":
+                raise ValueError(
+                    "train.loss.top_support_score_margin requires "
+                    "class_gate.evidence_scorer.type='class_axis_attention'"
+                )
+            if not score_decomposition_enabled:
+                raise ValueError(
+                    "train.loss.top_support_score_margin requires "
+                    "class_gate.evidence_scorer.score_decomposition.enabled=true"
+                )
+            if not branch_direct_score_enabled:
+                raise ValueError(
+                    "train.loss.top_support_score_margin requires "
+                    "class_gate.evidence_scorer.branch_direct_score.enabled=true"
+                )
+        branch_support_cfg = cfg.loss.branch_support_score_margin
+        if not isinstance(branch_support_cfg.enabled, bool):
+            raise ValueError(
+                "train.loss.branch_support_score_margin.enabled must be a boolean"
+            )
+        if not isinstance(branch_support_cfg.class_weighted, bool):
+            raise ValueError(
+                "train.loss.branch_support_score_margin.class_weighted must be "
+                "a boolean"
+            )
+        if (
+            branch_support_cfg.target
+            not in JsonConfigLoader._BRANCH_SUPPORT_SCORE_MARGIN_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.branch_support_score_margin.target must be "
+                "'class_evidence_branch_support_scores'"
+            )
+        if (
+            branch_support_cfg.mode
+            not in JsonConfigLoader._BRANCH_SUPPORT_SCORE_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.branch_support_score_margin.mode must be "
+                "'softplus_true_vs_hardest_negative'"
+            )
+        if (
+            branch_support_cfg.reduction
+            not in JsonConfigLoader._BRANCH_SUPPORT_SCORE_MARGIN_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.branch_support_score_margin.reduction must be 'mean'"
+            )
+        if (
+            not isinstance(branch_support_cfg.temperature, int | float)
+            or isinstance(branch_support_cfg.temperature, bool)
+            or float(branch_support_cfg.temperature) <= 0.0
+        ):
+            raise ValueError(
+                "train.loss.branch_support_score_margin.temperature must be "
+                "greater than zero"
+            )
+        if not isinstance(branch_support_cfg.warmup_epochs, int) or isinstance(
+            branch_support_cfg.warmup_epochs, bool
+        ):
+            raise TypeError(
+                "train.loss.branch_support_score_margin.warmup_epochs must be "
+                "an integer"
+            )
+        if int(branch_support_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.branch_support_score_margin.warmup_epochs must be "
+                "non-negative"
+            )
+        if branch_support_cfg.enabled:
+            if branch_support_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.branch_support_score_margin.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.branch_support_score_margin is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.branch_support_score_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if evidence_scorer_type != "class_axis_attention":
+                raise ValueError(
+                    "train.loss.branch_support_score_margin requires "
+                    "class_gate.evidence_scorer.type='class_axis_attention'"
+                )
+            if not score_decomposition_enabled:
+                raise ValueError(
+                    "train.loss.branch_support_score_margin requires "
+                    "class_gate.evidence_scorer.score_decomposition.enabled=true"
+                )
+        branch_direct_cfg = cfg.loss.branch_direct_score_margin
+        if not isinstance(branch_direct_cfg.enabled, bool):
+            raise ValueError(
+                "train.loss.branch_direct_score_margin.enabled must be a boolean"
+            )
+        if not isinstance(branch_direct_cfg.class_weighted, bool):
+            raise ValueError(
+                "train.loss.branch_direct_score_margin.class_weighted must be a boolean"
+            )
+        if (
+            branch_direct_cfg.target
+            not in JsonConfigLoader._BRANCH_DIRECT_SCORE_MARGIN_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.branch_direct_score_margin.target must be "
+                "'class_evidence_branch_direct_scores'"
+            )
+        if (
+            branch_direct_cfg.mode
+            not in JsonConfigLoader._BRANCH_DIRECT_SCORE_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.branch_direct_score_margin.mode must be "
+                "'softplus_true_vs_hardest_negative'"
+            )
+        if (
+            branch_direct_cfg.reduction
+            not in JsonConfigLoader._BRANCH_DIRECT_SCORE_MARGIN_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.branch_direct_score_margin.reduction must be 'mean'"
+            )
+        if (
+            not isinstance(branch_direct_cfg.temperature, int | float)
+            or isinstance(branch_direct_cfg.temperature, bool)
+            or float(branch_direct_cfg.temperature) <= 0.0
+        ):
+            raise ValueError(
+                "train.loss.branch_direct_score_margin.temperature must be "
+                "greater than zero"
+            )
+        if not isinstance(branch_direct_cfg.warmup_epochs, int) or isinstance(
+            branch_direct_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.branch_direct_score_margin.warmup_epochs must be an integer"
+            )
+        if int(branch_direct_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.branch_direct_score_margin.warmup_epochs must be "
+                "non-negative"
+            )
+        if branch_direct_cfg.enabled:
+            if branch_direct_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.branch_direct_score_margin.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.branch_direct_score_margin is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.branch_direct_score_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if evidence_scorer_type != "class_axis_attention":
+                raise ValueError(
+                    "train.loss.branch_direct_score_margin requires "
+                    "class_gate.evidence_scorer.type='class_axis_attention'"
+                )
+            if not score_decomposition_enabled:
+                raise ValueError(
+                    "train.loss.branch_direct_score_margin requires "
+                    "class_gate.evidence_scorer.score_decomposition.enabled=true"
+                )
+            if not branch_direct_score_enabled:
+                raise ValueError(
+                    "train.loss.branch_direct_score_margin requires "
+                    "class_gate.evidence_scorer.branch_direct_score.enabled=true"
                 )
         if not isinstance(cfg.loss.class_gated_branch_logit_margin.enabled, bool):
             raise ValueError(
@@ -3172,6 +4072,59 @@ class JsonConfigLoader:
             cfg.loss.top_branch_margin.auto_margin_by_train_stats,
             label_to_index=label_to_index,
         )
+        phase_cfg = cfg.loss.top_branch_margin.phase_weight_schedule
+        if not isinstance(phase_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.top_branch_margin.phase_weight_schedule.enabled "
+                "must be a boolean"
+            )
+        if not isinstance(phase_cfg.start_epoch, int) or isinstance(
+            phase_cfg.start_epoch,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.top_branch_margin.phase_weight_schedule.start_epoch "
+                "must be an integer"
+            )
+        if int(phase_cfg.start_epoch) <= 0:
+            raise ValueError(
+                "train.loss.top_branch_margin.phase_weight_schedule.start_epoch "
+                "must be greater than zero"
+            )
+        if phase_cfg.end_epoch is not None:
+            if not isinstance(phase_cfg.end_epoch, int) or isinstance(
+                phase_cfg.end_epoch,
+                bool,
+            ):
+                raise TypeError(
+                    "train.loss.top_branch_margin.phase_weight_schedule.end_epoch "
+                    "must be an integer or null"
+                )
+            if int(phase_cfg.end_epoch) < int(phase_cfg.start_epoch):
+                raise ValueError(
+                    "train.loss.top_branch_margin.phase_weight_schedule.end_epoch "
+                    "must be greater than or equal to start_epoch"
+                )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            phase_cfg.start_multiplier_by_label,
+            field_name=(
+                "train.loss.top_branch_margin.phase_weight_schedule."
+                "start_multiplier_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            phase_cfg.label_multiplier_by_label,
+            field_name=(
+                "train.loss.top_branch_margin.phase_weight_schedule."
+                "label_multiplier_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
         if (
             cfg.loss.top_branch_margin.auto_margin_by_train_stats.enabled
             and not cfg.loss.top_branch_margin.enabled
@@ -3258,6 +4211,42 @@ class JsonConfigLoader:
             raise ValueError(
                 "train.loss.class_gated_branch_logit_margin.class_weighted "
                 "requires train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.branch_support_score_margin.enabled
+            and cfg.loss.branch_support_score_margin.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.branch_support_score_margin.class_weighted requires "
+                "train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.top_support_score_margin.enabled
+            and cfg.loss.top_support_score_margin.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.top_support_score_margin.class_weighted requires "
+                "train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.class_evidence_gap_cap_regularization.enabled
+            and cfg.loss.class_evidence_gap_cap_regularization.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_gap_cap_regularization.class_weighted "
+                "requires train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.branch_direct_score_margin.enabled
+            and cfg.loss.branch_direct_score_margin.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.branch_direct_score_margin.class_weighted requires "
+                "train.loss.class_weighting.enabled=true"
             )
         if (
             cfg.loss.branch_to_evidence_ranking_consistency.enabled
@@ -3672,11 +4661,40 @@ class JsonConfigLoader:
         global_residual["bounding"] = ClassGateGlobalResidualBoundingConfig(
             **dict(global_residual.get("bounding", {}))
         )
+        correction = dict(global_residual.get("correction", {}))
+        correction["confidence_aware_gate"] = (
+            ClassGateResidualConfidenceAwareGateConfig(
+                **dict(correction.get("confidence_aware_gate", {}))
+            )
+        )
         global_residual["correction"] = ClassGateGlobalResidualCorrectionConfig(
-            **dict(global_residual.get("correction", {}))
+            **correction
         )
         class_gate["global_residual"] = ClassGateGlobalResidualConfig(**global_residual)
         evidence_scorer = dict(class_gate.get("evidence_scorer", {}))
+        score_decomposition = dict(evidence_scorer.get("score_decomposition", {}))
+        score_decomposition["interaction_scale_schedule"] = (
+            ClassGateInteractionScaleScheduleConfig(
+                **dict(score_decomposition.get("interaction_scale_schedule", {}))
+            )
+        )
+        evidence_scorer["score_decomposition"] = ClassGateScoreDecompositionConfig(
+            **score_decomposition
+        )
+        branch_direct_score = dict(evidence_scorer.get("branch_direct_score", {}))
+        branch_direct_score["gate_reliability_mixture"] = (
+            ClassGateReliabilityMixtureConfig(
+                **dict(branch_direct_score.get("gate_reliability_mixture", {}))
+            )
+        )
+        branch_direct_score["top_relative_correction"] = (
+            ClassGateTopRelativeCorrectionConfig(
+                **dict(branch_direct_score.get("top_relative_correction", {}))
+            )
+        )
+        evidence_scorer["branch_direct_score"] = ClassGateBranchDirectScoreConfig(
+            **branch_direct_score
+        )
         evidence_scorer["branch_feature_transform"] = (
             ClassGateBranchFeatureTransformConfig(
                 **dict(evidence_scorer.get("branch_feature_transform", {}))
@@ -3817,6 +4835,37 @@ class JsonConfigLoader:
         loss["class_evidence_margin"] = ClassEvidenceMarginConfig(
             **class_evidence_margin
         )
+        loss["class_evidence_gap_cap_regularization"] = (
+            ClassEvidenceGapCapRegularizationConfig(
+                **dict(loss.get("class_evidence_gap_cap_regularization", {}))
+            )
+        )
+        top_support_score_margin = dict(loss.get("top_support_score_margin", {}))
+        top_support_score_margin["label_weight_by_label"] = dict(
+            top_support_score_margin.get("label_weight_by_label", {})
+        )
+        top_support_score_margin["support_conditioned_multiplier"] = (
+            MarginSupportWeightingConfig(
+                **dict(
+                    top_support_score_margin.get(
+                        "support_conditioned_multiplier",
+                        {},
+                    )
+                )
+            )
+        )
+        top_support_score_margin["hardness_weighting"] = MarginHardnessWeightingConfig(
+            **dict(top_support_score_margin.get("hardness_weighting", {}))
+        )
+        loss["top_support_score_margin"] = TopSupportScoreMarginConfig(
+            **top_support_score_margin
+        )
+        loss["branch_support_score_margin"] = BranchSupportScoreMarginConfig(
+            **dict(loss.get("branch_support_score_margin", {}))
+        )
+        loss["branch_direct_score_margin"] = BranchDirectScoreMarginConfig(
+            **dict(loss.get("branch_direct_score_margin", {}))
+        )
         loss["class_gated_branch_logit_margin"] = ClassGatedBranchLogitMarginConfig(
             **dict(loss.get("class_gated_branch_logit_margin", {}))
         )
@@ -3903,6 +4952,16 @@ class JsonConfigLoader:
         )
         top_branch_margin["auto_margin_by_train_stats"] = AutoMarginByTrainStatsConfig(
             **dict(top_branch_margin.get("auto_margin_by_train_stats", {}))
+        )
+        phase_weight_schedule = dict(top_branch_margin.get("phase_weight_schedule", {}))
+        phase_weight_schedule["start_multiplier_by_label"] = dict(
+            phase_weight_schedule.get("start_multiplier_by_label", {})
+        )
+        phase_weight_schedule["label_multiplier_by_label"] = dict(
+            phase_weight_schedule.get("label_multiplier_by_label", {})
+        )
+        top_branch_margin["phase_weight_schedule"] = (
+            TopBranchMarginPhaseWeightScheduleConfig(**phase_weight_schedule)
         )
         loss["top_branch_margin"] = TopBranchMarginConfig(**top_branch_margin)
         kwargs["loss"] = LossConfig(**loss)
@@ -3994,6 +5053,15 @@ class JsonConfigLoader:
             num_branches=len(cfg.model.encoder.architecture.patch_branches),
             label_to_index=cfg.data.label_to_index,
             evidence_pooling_type=cfg.model.encoder.architecture.evidence_pooling.type,
+            evidence_scorer_type=(
+                cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.type
+            ),
+            score_decomposition_enabled=(
+                cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.score_decomposition.enabled
+            ),
+            branch_direct_score_enabled=(
+                cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_direct_score.enabled
+            ),
         )
         JsonConfigLoader._validate_val(cfg.val)
         JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
@@ -4043,6 +5111,15 @@ class JsonConfigLoader:
             num_branches=len(cfg.model.encoder.architecture.patch_branches),
             label_to_index=cfg.data.label_to_index,
             evidence_pooling_type=cfg.model.encoder.architecture.evidence_pooling.type,
+            evidence_scorer_type=(
+                cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.type
+            ),
+            score_decomposition_enabled=(
+                cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.score_decomposition.enabled
+            ),
+            branch_direct_score_enabled=(
+                cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_direct_score.enabled
+            ),
         )
         JsonConfigLoader._validate_val(cfg.val)
         JsonConfigLoader._validate_checkpointing(cfg.checkpointing)

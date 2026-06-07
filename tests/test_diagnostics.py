@@ -59,6 +59,9 @@ def _class_aware_output() -> AstModelOutput:
         global_residual_logits=torch.tensor([[0.01, 0.02, 0.03]]),
         bounded_global_residual_logits=torch.tensor([[0.01, 0.02, 0.03]]),
         centered_bounded_global_residual_logits=torch.tensor([[-0.01, 0.0, 0.01]]),
+        global_residual_learned_gate=torch.tensor([[0.4, 0.6, 0.9]]),
+        global_residual_evidence_confidence=torch.tensor([[0.3, 0.7, 0.2]]),
+        global_residual_confidence_factor=torch.tensor([[0.79, 0.51, 0.86]]),
         global_residual_gate=torch.tensor([[0.2, 0.5, 0.8]]),
         global_residual_contribution=torch.tensor([[-0.001, 0.0, 0.004]]),
         global_residual_zero_mean_enabled=True,
@@ -89,6 +92,36 @@ def _class_aware_output() -> AstModelOutput:
                 ]
             ]
         ),
+        class_evidence_embedding_scores=torch.tensor([[0.1, 0.3, -0.2]]),
+        class_evidence_top_support_scores=torch.tensor([[0.0, 0.5, -0.1]]),
+        class_evidence_gated_support_scores=torch.tensor([[-0.1, 0.2, 0.0]]),
+        class_evidence_top_raw_existential_scores=torch.tensor([[0.1, 0.4, -0.2]]),
+        class_evidence_top_relative_correction_scores=torch.tensor([[-0.1, 0.1, 0.1]]),
+        class_evidence_top_relative_positive=torch.tensor([[0.0, 0.2, 0.3]]),
+        class_evidence_top_relative_negative=torch.tensor([[-0.2, 0.0, 0.0]]),
+        class_evidence_gate_reliability=torch.tensor([[0.8, 0.9, 0.7]]),
+        class_evidence_gate_reliability_regret=torch.tensor([[0.2, 0.1, 0.3]]),
+        class_evidence_top_margin=torch.tensor([[0.4, 0.8, 0.2]]),
+        class_evidence_gated_margin=torch.tensor([[0.1, 0.7, 0.0]]),
+        class_evidence_branch_existential_scores=torch.tensor([[0.0, 0.5, -0.1]]),
+        class_evidence_branch_competitive_scores=torch.tensor([[-0.1, 0.2, 0.0]]),
+        class_evidence_branch_direct_scores=torch.tensor([[-0.03, 0.56, -0.1]]),
+        class_evidence_branch_residual_scores=torch.tensor([[-0.2, 0.1, 0.2]]),
+        class_evidence_branch_support_scores=torch.tensor([[-0.2, 0.4, 0.0]]),
+        class_evidence_interaction_scores=torch.tensor([[0.2, 0.1, -0.1]]),
+        class_evidence_branch_scale=torch.tensor(0.3),
+        class_evidence_branch_direct_top_scale=torch.tensor(1.0),
+        class_evidence_branch_direct_gated_scale=torch.tensor(0.3),
+        class_evidence_branch_direct_raw_scale=torch.tensor(1.0),
+        class_evidence_branch_direct_relative_scale=torch.tensor(0.3),
+        class_evidence_branch_direct_residual_scale=torch.tensor(0.2),
+        class_evidence_branch_direct_top_weights=torch.tensor([1.0, 1.0]),
+        class_evidence_branch_direct_gated_weights=torch.tensor([0.7, 0.9]),
+        class_evidence_branch_direct_existential_weights=torch.tensor([1.0, 1.0]),
+        class_evidence_branch_direct_competitive_weights=torch.tensor([0.7, 0.9]),
+        class_evidence_interaction_scale=torch.tensor(1.0),
+        class_evidence_interaction_scale_multiplier=torch.tensor(0.2),
+        class_evidence_interaction_effective_scale=torch.tensor(0.2),
         class_evidence_scorer_type="class_axis_attention",
         class_evidence_scorer_branch_feature_transform_mode="tanh",
         class_evidence_scorer_branch_feature_transform_temperature=torch.tensor(1.0),
@@ -300,6 +333,127 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
     assert row["class_evidence_scorer_type"] == "class_axis_attention"
     assert row["class_evidence_scorer_branch_feature_transform_mode"] == "tanh"
     assert row["class_evidence_scorer_branch_feature_transform_temperature"] == 1.0
+    assert row["class_evidence_interaction_scale_multiplier"] == pytest.approx(0.2)
+    assert row["class_evidence_interaction_effective_scale"] == pytest.approx(0.2)
+    assert row["class_evidence_embedding_scores"] == [
+        0.10000000149011612,
+        0.30000001192092896,
+        -0.20000000298023224,
+    ]
+    assert row["class_evidence_embedding_score_gap"] == pytest.approx(0.2)
+    assert row["class_evidence_embedding_score_negative_class"] == 0
+    assert row["class_evidence_top_support_scores"] == [
+        0.0,
+        0.5,
+        -0.10000000149011612,
+    ]
+    assert row["class_evidence_top_support_score_gap"] == pytest.approx(0.5)
+    assert row["class_evidence_top_support_score_negative_class"] == 0
+    assert row["class_evidence_gated_support_scores"] == [
+        -0.10000000149011612,
+        0.20000000298023224,
+        0.0,
+    ]
+    assert row["class_evidence_gated_support_score_gap"] == pytest.approx(0.2)
+    assert row["class_evidence_gated_support_score_negative_class"] == 2
+    assert row["class_evidence_top_raw_existential_scores"] == [
+        0.10000000149011612,
+        0.4000000059604645,
+        -0.20000000298023224,
+    ]
+    assert row["class_evidence_top_raw_existential_score_gap"] == pytest.approx(0.3)
+    assert row["class_evidence_top_raw_existential_score_negative_class"] == 0
+    assert row["class_evidence_top_relative_correction_scores"] == [
+        -0.10000000149011612,
+        0.10000000149011612,
+        0.10000000149011612,
+    ]
+    assert row["class_evidence_top_relative_correction_score_gap"] == pytest.approx(0.0)
+    assert row["class_evidence_top_relative_correction_score_negative_class"] == 2
+    assert row["class_evidence_top_relative_positive"] == [
+        0.0,
+        0.20000000298023224,
+        0.30000001192092896,
+    ]
+    assert row["class_evidence_top_relative_negative"] == [
+        -0.20000000298023224,
+        0.0,
+        0.0,
+    ]
+    assert row["class_evidence_gate_reliability"] == pytest.approx([0.8, 0.9, 0.7])
+    assert row["class_evidence_gate_reliability_regret"] == pytest.approx(
+        [0.2, 0.1, 0.3]
+    )
+    assert row["class_evidence_top_margin"] == pytest.approx([0.4, 0.8, 0.2])
+    assert row["class_evidence_gated_margin"] == pytest.approx([0.1, 0.7, 0.0])
+    assert row["class_evidence_branch_existential_scores"] == [
+        0.0,
+        0.5,
+        -0.10000000149011612,
+    ]
+    assert row["class_evidence_branch_existential_score_gap"] == pytest.approx(0.5)
+    assert row["class_evidence_branch_existential_score_negative_class"] == 0
+    assert row["class_evidence_branch_competitive_scores"] == [
+        -0.10000000149011612,
+        0.20000000298023224,
+        0.0,
+    ]
+    assert row["class_evidence_branch_competitive_score_gap"] == pytest.approx(0.2)
+    assert row["class_evidence_branch_competitive_score_negative_class"] == 2
+    assert row["class_evidence_branch_direct_scores"] == [
+        -0.029999999329447746,
+        0.5600000023841858,
+        -0.10000000149011612,
+    ]
+    assert row["class_evidence_branch_direct_score_gap"] == pytest.approx(0.59)
+    assert row["class_evidence_branch_direct_score_negative_class"] == 0
+    assert row["class_evidence_branch_residual_scores"] == [
+        -0.20000000298023224,
+        0.10000000149011612,
+        0.20000000298023224,
+    ]
+    assert row["class_evidence_branch_residual_score_gap"] == pytest.approx(-0.1)
+    assert row["class_evidence_branch_residual_score_negative_class"] == 2
+    assert row["class_evidence_branch_support_scores"] == [
+        -0.20000000298023224,
+        0.4000000059604645,
+        0.0,
+    ]
+    assert row["class_evidence_branch_support_score_gap"] == pytest.approx(0.4)
+    assert row["class_evidence_branch_support_score_negative_class"] == 2
+    assert row["class_evidence_interaction_scores"] == [
+        0.20000000298023224,
+        0.10000000149011612,
+        -0.10000000149011612,
+    ]
+    assert row["class_evidence_interaction_score_gap"] == pytest.approx(-0.1)
+    assert row["class_evidence_interaction_score_negative_class"] == 0
+    assert row["class_evidence_total_gap"] == pytest.approx(0.6)
+    assert row["class_evidence_total_negative_class"] == 0
+    assert row["class_evidence_branch_scale"] == pytest.approx(0.3)
+    assert row["class_evidence_branch_direct_top_scale"] == pytest.approx(1.0)
+    assert row["class_evidence_branch_direct_gated_scale"] == pytest.approx(0.3)
+    assert row["class_evidence_branch_direct_raw_scale"] == pytest.approx(1.0)
+    assert row["class_evidence_branch_direct_relative_scale"] == pytest.approx(0.3)
+    assert row["class_evidence_branch_direct_residual_scale"] == pytest.approx(0.2)
+    assert row["class_evidence_branch_direct_top_weights"] == pytest.approx([1.0, 1.0])
+    assert row["class_evidence_branch_direct_gated_weights"] == pytest.approx(
+        [0.7, 0.9]
+    )
+    assert row["class_evidence_branch_direct_existential_weights"] == pytest.approx(
+        [1.0, 1.0]
+    )
+    assert row["class_evidence_branch_direct_competitive_weights"] == pytest.approx(
+        [0.7, 0.9]
+    )
+    assert row["class_evidence_interaction_scale"] == pytest.approx(1.0)
+    assert row["global_residual_learned_gate"] == [
+        0.4000000059604645,
+        0.6000000238418579,
+        0.8999999761581421,
+    ]
+    assert row["global_residual_evidence_confidence"] == pytest.approx([0.3, 0.7, 0.2])
+    assert row["global_residual_confidence_factor"] == pytest.approx([0.79, 0.51, 0.86])
     assert row["class_evidence_gate_weights"][1] == [
         0.25,
         0.75,
