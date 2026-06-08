@@ -340,6 +340,9 @@ def main() -> None:
             ),
             branch_direct_score_margin=cfg.train.loss.branch_direct_score_margin,
             branch_support_score_margin=(cfg.train.loss.branch_support_score_margin),
+            branch_path_dominance_constraint=(
+                cfg.train.loss.branch_path_dominance_constraint
+            ),
             class_gated_branch_logit_margin=(
                 cfg.train.loss.class_gated_branch_logit_margin
             ),

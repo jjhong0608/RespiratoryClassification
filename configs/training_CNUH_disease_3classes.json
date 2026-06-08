@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "CNUH_DISEASE_VER11",
+    "name": "CNUH_DISEASE_VER12",
     "task": "Normal_vs_LungParenchymal_vs_Airway",
     "mode": "clip",
     "seed": 1337,
@@ -170,6 +170,21 @@
                   "end_epoch": 30,
                   "start_multiplier": 0.2,
                   "end_multiplier": 1.0
+                },
+                "score_bounding": {
+                  "enabled": true,
+                  "embedding": {
+                    "enabled": true,
+                    "mode": "tanh_bound",
+                    "bound": 8.0,
+                    "temperature": 1.0
+                  },
+                  "interaction": {
+                    "enabled": true,
+                    "mode": "tanh_bound",
+                    "bound": 6.0,
+                    "temperature": 1.0
+                  }
                 }
               },
               "branch_direct_score": {
@@ -195,6 +210,23 @@
                   "positive_scale": 0.2,
                   "negative_scale": 0.05,
                   "negative_clip": 1.0
+                },
+                "top_support_direct_path": {
+                  "enabled": true,
+                  "mode": "monotonic_raw_relative",
+                  "positive_transform": "softplus",
+                  "raw_scale_mode": "bounded_sigmoid",
+                  "raw_scale_min": 0.7,
+                  "raw_scale_init": 1.0,
+                  "raw_scale_max": 2.0,
+                  "relative_positive_scale_mode": "bounded_sigmoid",
+                  "relative_positive_scale_min": 0.2,
+                  "relative_positive_scale_init": 0.5,
+                  "relative_positive_scale_max": 1.5,
+                  "relative_negative_scale_mode": "sigmoid_max",
+                  "relative_negative_scale_init": 0.1,
+                  "relative_negative_scale_max": 0.5,
+                  "residual_scale_max": 0.3
                 },
                 "gate_reliability_mixture": {
                   "enabled": true,
@@ -422,7 +454,7 @@
         "label_weight_by_label": {
           "Normal": 1.0,
           "Lung_Parenchymal": 1.0,
-          "Airway": 2.0
+          "Airway": 1.0
         },
         "support_conditioned_multiplier": {
           "enabled": true,
@@ -445,6 +477,25 @@
         "target": "class_evidence_branch_direct_scores",
         "mode": "softplus_true_vs_hardest_negative",
         "temperature": 1.0,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
+      "branch_path_dominance_constraint": {
+        "enabled": true,
+        "weight": 0.05,
+        "branch_source": "class_evidence_branch_support_scores",
+        "target": "class_evidence_logits",
+        "mode": "branch_gap_preservation",
+        "allowed_drop": 0.5,
+        "support_source": "top_branch_margin",
+        "support_weighting": {
+          "enabled": true,
+          "source": "top_branch_margin",
+          "mode": "linear",
+          "gain": 0.5,
+          "cap": 3.0
+        },
         "class_weighted": true,
         "reduction": "mean",
         "warmup_epochs": 10
@@ -646,7 +697,7 @@
           }
         },
         "phase_weight_schedule": {
-          "enabled": true,
+          "enabled": false,
           "start_epoch": 21,
           "end_epoch": 31,
           "start_multiplier_by_label": {
@@ -657,8 +708,15 @@
           "label_multiplier_by_label": {
             "Normal": 1.0,
             "Lung_Parenchymal": 1.0,
-            "Airway": 2.0
+            "Airway": 1.0
           }
+        },
+        "hardness_weighting": {
+          "enabled": true,
+          "source": "margin_deficit",
+          "mode": "linear",
+          "gain": 1.0,
+          "cap": 3.0
         }
       },
       "branch_auxiliary": {

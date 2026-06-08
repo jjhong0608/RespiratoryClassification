@@ -298,6 +298,13 @@ def _format_component_line(
     )
     _append_raw_loss_pair(
         parts,
+        "branch_dominance",
+        components,
+        raw_key="branch_path_dominance_constraint",
+        loss_key="branch_path_dominance_constraint_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
         "branch_logit_margin",
         components,
         raw_key="class_gated_branch_logit_margin",
@@ -343,8 +350,17 @@ def _format_component_line(
         "top_branch_margin_effective_weight",
         0.0,
     )
-    if top_branch_effective_weight:
-        parts.append(f"top_branch_eff_w={top_branch_effective_weight:.4f}")
+    top_branch_hardness_mult = _component_float(
+        components,
+        "top_branch_margin_hardness_multiplier",
+        0.0,
+    )
+    if top_branch_effective_weight or top_branch_hardness_mult:
+        parts.append(
+            "top_branch_eff="
+            f"{top_branch_effective_weight:.4f}/"
+            f"hard={top_branch_hardness_mult:.4f}"
+        )
     parts.append(
         f"scheduled={_component_float(components, 'total_scheduled', fallback_loss):.4f}"
     )

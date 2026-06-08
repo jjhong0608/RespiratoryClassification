@@ -244,7 +244,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver27"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver28"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.model.encoder.architecture.hidden_size == 384
@@ -334,6 +334,30 @@ def test_retained_repo_configs_load() -> None:
         current_class_gate.evidence_scorer.branch_direct_score.residual_scale_init
         == pytest.approx(0.2)
     )
+    score_bounding = (
+        current_class_gate.evidence_scorer.score_decomposition.score_bounding
+    )
+    assert score_bounding.enabled is True
+    assert score_bounding.embedding.enabled is True
+    assert score_bounding.embedding.bound == pytest.approx(8.0)
+    assert score_bounding.embedding.temperature == pytest.approx(1.0)
+    assert score_bounding.interaction.enabled is True
+    assert score_bounding.interaction.bound == pytest.approx(6.0)
+    assert score_bounding.interaction.temperature == pytest.approx(1.0)
+    direct_path = (
+        current_class_gate.evidence_scorer.branch_direct_score.top_support_direct_path
+    )
+    assert direct_path.enabled is True
+    assert direct_path.mode == "monotonic_raw_relative"
+    assert direct_path.raw_scale_min == pytest.approx(0.7)
+    assert direct_path.raw_scale_init == pytest.approx(1.0)
+    assert direct_path.raw_scale_max == pytest.approx(2.0)
+    assert direct_path.relative_positive_scale_min == pytest.approx(0.2)
+    assert direct_path.relative_positive_scale_init == pytest.approx(0.5)
+    assert direct_path.relative_positive_scale_max == pytest.approx(1.5)
+    assert direct_path.relative_negative_scale_init == pytest.approx(0.1)
+    assert direct_path.relative_negative_scale_max == pytest.approx(0.5)
+    assert direct_path.residual_scale_max == pytest.approx(0.3)
     assert current_training_cfg.train.loss.top_support_score_margin.enabled is True
     assert (
         current_training_cfg.train.loss.top_support_score_margin.weight
@@ -344,7 +368,7 @@ def test_retained_repo_configs_load() -> None:
         == {
             "normal": 1.0,
             "crackle": 1.0,
-            "wheeze": 2.0,
+            "wheeze": 1.0,
         }
     )
     hardness = (
@@ -364,7 +388,7 @@ def test_retained_repo_configs_load() -> None:
     phase_schedule = (
         current_training_cfg.train.loss.top_branch_margin.phase_weight_schedule
     )
-    assert phase_schedule.enabled is True
+    assert phase_schedule.enabled is False
     assert phase_schedule.start_epoch == 21
     assert phase_schedule.end_epoch == 31
     assert phase_schedule.start_multiplier_by_label == {
@@ -375,8 +399,16 @@ def test_retained_repo_configs_load() -> None:
     assert phase_schedule.label_multiplier_by_label == {
         "normal": 1.0,
         "crackle": 1.0,
-        "wheeze": 2.0,
+        "wheeze": 1.0,
     }
+    top_branch_hardness = (
+        current_training_cfg.train.loss.top_branch_margin.hardness_weighting
+    )
+    assert top_branch_hardness.enabled is True
+    assert top_branch_hardness.source == "margin_deficit"
+    assert top_branch_hardness.mode == "linear"
+    assert top_branch_hardness.gain == pytest.approx(1.0)
+    assert top_branch_hardness.cap == pytest.approx(3.0)
     assert current_training_cfg.train.loss.branch_direct_score_margin.enabled is True
     assert (
         current_training_cfg.train.loss.branch_direct_score_margin.weight
@@ -387,6 +419,13 @@ def test_retained_repo_configs_load() -> None:
         current_training_cfg.train.loss.branch_support_score_margin.weight
         == pytest.approx(0.05)
     )
+    dominance = current_training_cfg.train.loss.branch_path_dominance_constraint
+    assert dominance.enabled is True
+    assert dominance.weight == pytest.approx(0.05)
+    assert dominance.allowed_drop == pytest.approx(0.5)
+    assert dominance.support_weighting.enabled is True
+    assert dominance.support_weighting.gain == pytest.approx(0.5)
+    assert dominance.support_weighting.cap == pytest.approx(3.0)
     assert current_class_gate.evidence_scorer.branch_feature_transform.mode == "tanh"
     assert (
         current_class_gate.evidence_scorer.branch_feature_transform.temperature
@@ -443,7 +482,7 @@ def test_retained_repo_configs_load() -> None:
         current_class_gate.global_residual.correction.confidence_aware_gate.damping
         == pytest.approx(0.7)
     )
-    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER11"
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER12"
     assert disease_training_cfg.model.encoder.architecture.hidden_size == 384
     assert disease_training_cfg.model.encoder.architecture.adapter_depth == 6
     assert disease_training_cfg.model.classifier.hidden_dim == 1024
@@ -484,7 +523,7 @@ def test_retained_repo_configs_load() -> None:
         == {
             "Normal": 1.0,
             "Lung_Parenchymal": 1.0,
-            "Airway": 2.0,
+            "Airway": 1.0,
         }
     )
     disease_hardness = (
@@ -500,8 +539,12 @@ def test_retained_repo_configs_load() -> None:
         == {
             "Normal": 1.0,
             "Lung_Parenchymal": 1.0,
-            "Airway": 2.0,
+            "Airway": 1.0,
         }
+    )
+    assert (
+        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.enabled
+        is False
     )
     assert (
         disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.start_epoch
@@ -522,6 +565,9 @@ def test_retained_repo_configs_load() -> None:
     assert disease_training_cfg.train.loss.branch_direct_score_margin.enabled is True
     assert disease_training_cfg.train.loss.branch_direct_score_margin.weight == (
         pytest.approx(0.05)
+    )
+    assert (
+        disease_training_cfg.train.loss.branch_path_dominance_constraint.enabled is True
     )
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
     assert baseline_training_cfg.experiment.logging.terminal_width is None

@@ -49,6 +49,7 @@ from src.utils.config import (
     BranchBinaryAuxiliaryScheduleConfig,
     BranchBinaryPosWeightConfig,
     BranchDirectScoreMarginConfig,
+    BranchPathDominanceConstraintConfig,
     BranchSupportScoreMarginConfig,
     BranchToEvidenceRankingConsistencyConfig,
     CheckpointingConfig,
@@ -80,6 +81,7 @@ from src.utils.config import (
     RdtConfig,
     ResidualContradictionRegularizationConfig,
     TopBranchMarginConfig,
+    TopBranchMarginHardnessWeightingConfig,
     TopBranchMarginPhaseWeightScheduleConfig,
     TopSupportScoreMarginConfig,
 )
@@ -309,6 +311,14 @@ def _trainer_cfg(
     branch_direct_score_margin_temperature: float = 1.0,
     branch_direct_score_margin_class_weighted: bool = False,
     branch_direct_score_margin_warmup_epochs: int = 0,
+    branch_path_dominance_enabled: bool = False,
+    branch_path_dominance_weight: float = 0.0,
+    branch_path_dominance_allowed_drop: float = 0.5,
+    branch_path_dominance_support_weighting: (
+        MarginSupportWeightingConfig | None
+    ) = None,
+    branch_path_dominance_class_weighted: bool = False,
+    branch_path_dominance_warmup_epochs: int = 0,
     class_gated_branch_logit_margin_enabled: bool = False,
     class_gated_branch_logit_margin_weight: float = 0.0,
     class_gated_branch_logit_margin_value: float = 0.0,
@@ -431,6 +441,8 @@ def _trainer_cfg(
     ) = None,
     top_branch_margin_phase_label_multiplier_by_class: tuple[float, ...] | None = None,
     top_branch_margin_phase_schedule: TopBranchMarginPhaseWeightScheduleConfig
+    | None = (None),
+    top_branch_margin_hardness_weighting: TopBranchMarginHardnessWeightingConfig
     | None = (None),
 ) -> TrainerConfig:
     return TrainerConfig(
@@ -574,6 +586,22 @@ def _trainer_cfg(
             reduction="mean",
             warmup_epochs=branch_direct_score_margin_warmup_epochs,
         ),
+        branch_path_dominance_constraint=BranchPathDominanceConstraintConfig(
+            enabled=branch_path_dominance_enabled,
+            weight=branch_path_dominance_weight,
+            branch_source="class_evidence_branch_support_scores",
+            target="class_evidence_logits",
+            mode="branch_gap_preservation",
+            allowed_drop=branch_path_dominance_allowed_drop,
+            support_source="top_branch_margin",
+            support_weighting=(
+                branch_path_dominance_support_weighting
+                or MarginSupportWeightingConfig()
+            ),
+            class_weighted=branch_path_dominance_class_weighted,
+            reduction="mean",
+            warmup_epochs=branch_path_dominance_warmup_epochs,
+        ),
         class_gated_branch_logit_margin=ClassGatedBranchLogitMarginConfig(
             enabled=class_gated_branch_logit_margin_enabled,
             weight=class_gated_branch_logit_margin_weight,
@@ -715,6 +743,10 @@ def _trainer_cfg(
             phase_weight_schedule=(
                 top_branch_margin_phase_schedule
                 or TopBranchMarginPhaseWeightScheduleConfig()
+            ),
+            hardness_weighting=(
+                top_branch_margin_hardness_weighting
+                or TopBranchMarginHardnessWeightingConfig()
             ),
         ),
         top_branch_margin_by_class=top_branch_margin_by_class,
@@ -3911,7 +3943,7 @@ def test_trainer_top_branch_margin_uses_best_branch_margin() -> None:
     labels = torch.tensor([0, 1], dtype=torch.long)
 
     components = trainer._compute_total_loss(criterion, output, labels, epoch=1)
-    raw_margin, weighted_margin, _ = trainer._compute_top_branch_margin_loss(
+    raw_margin, weighted_margin, _, _ = trainer._compute_top_branch_margin_loss(
         output,
         labels,
         epoch=1,
@@ -3951,7 +3983,7 @@ def test_trainer_top_branch_margin_uses_label_specific_margins() -> None:
     )
     labels = torch.tensor([0, 2], dtype=torch.long)
 
-    raw_margin, weighted_margin, _ = trainer._compute_top_branch_margin_loss(
+    raw_margin, weighted_margin, _, _ = trainer._compute_top_branch_margin_loss(
         output,
         labels,
         epoch=1,
@@ -3960,6 +3992,56 @@ def test_trainer_top_branch_margin_uses_label_specific_margins() -> None:
     expected_raw = torch.tensor((0.1 + 0.2) / 2)
     assert torch.isclose(raw_margin, expected_raw)
     assert torch.isclose(weighted_margin, 0.1 * expected_raw)
+
+
+def test_trainer_top_branch_margin_applies_hardness_weighting() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            top_branch_margin_enabled=True,
+            top_branch_margin_weight=0.1,
+            top_branch_margin_value=0.5,
+            top_branch_margin_hardness_weighting=(
+                TopBranchMarginHardnessWeightingConfig(
+                    enabled=True,
+                    source="margin_deficit",
+                    mode="linear",
+                    gain=1.0,
+                    cap=3.0,
+                )
+            ),
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor(
+            [
+                [[0.5, 0.3, 0.0]],
+                [[0.2, 0.4, 0.3]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_margin, weighted_margin, _, hardness_mean = (
+        trainer._compute_top_branch_margin_loss(
+            output,
+            labels,
+            epoch=1,
+        )
+    )
+
+    penalties = torch.tensor([0.3, 0.4])
+    hardness = 1.0 + penalties
+    assert torch.isclose(raw_margin, penalties.mean())
+    assert torch.isclose(
+        weighted_margin, torch.tensor(0.1) * (penalties * hardness).mean()
+    )
+    assert torch.isclose(hardness_mean, hardness.mean())
 
 
 def test_trainer_top_branch_margin_applies_phase_label_multiplier() -> None:
@@ -3994,14 +4076,14 @@ def test_trainer_top_branch_margin_applies_phase_label_multiplier() -> None:
     )
     labels = torch.tensor([0, 1], dtype=torch.long)
 
-    raw_epoch30, weighted_epoch30, effective_epoch30 = (
+    raw_epoch30, weighted_epoch30, effective_epoch30, _ = (
         trainer._compute_top_branch_margin_loss(
             output,
             labels,
             epoch=30,
         )
     )
-    raw_epoch31, weighted_epoch31, effective_epoch31 = (
+    raw_epoch31, weighted_epoch31, effective_epoch31, _ = (
         trainer._compute_top_branch_margin_loss(
             output,
             labels,
@@ -4262,12 +4344,12 @@ def test_trainer_top_branch_margin_class_balanced_and_warmup() -> None:
     )
     labels = torch.tensor([0, 1, 2], dtype=torch.long)
 
-    warmup_raw, warmup_weighted, _ = trainer._compute_top_branch_margin_loss(
+    warmup_raw, warmup_weighted, _, _ = trainer._compute_top_branch_margin_loss(
         output,
         labels,
         epoch=10,
     )
-    raw_margin, weighted_margin, _ = trainer._compute_top_branch_margin_loss(
+    raw_margin, weighted_margin, _, _ = trainer._compute_top_branch_margin_loss(
         output,
         labels,
         epoch=11,
@@ -4278,6 +4360,75 @@ def test_trainer_top_branch_margin_class_balanced_and_warmup() -> None:
     assert torch.isclose(warmup_weighted, torch.tensor(0.0))
     assert torch.isclose(raw_margin, expected_raw)
     assert torch.isclose(weighted_margin, 0.05 * expected_raw)
+
+
+def test_trainer_branch_path_dominance_preserves_branch_gap() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_path_dominance_enabled=True,
+            branch_path_dominance_weight=0.05,
+            branch_path_dominance_allowed_drop=0.5,
+            branch_path_dominance_support_weighting=MarginSupportWeightingConfig(
+                enabled=True,
+                source="top_branch_margin",
+                mode="linear",
+                gain=0.5,
+                cap=3.0,
+            ),
+            branch_path_dominance_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.4],
+            ],
+            dtype=torch.float32,
+        ),
+        class_evidence_branch_support_scores=torch.tensor(
+            [
+                [2.0, 0.0, 0.0],
+                [0.0, 0.9, 0.4],
+            ],
+            dtype=torch.float32,
+        ),
+        branch_logits=torch.tensor(
+            [
+                [[2.0, 1.0, 0.0]],
+                [[0.0, 1.0, 0.4]],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    warmup_raw, warmup_weighted, _ = (
+        trainer._compute_branch_path_dominance_constraint_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+    raw_loss, weighted_loss, support_mean = (
+        trainer._compute_branch_path_dominance_constraint_loss(
+            output,
+            labels,
+            epoch=11,
+        )
+    )
+
+    expected_penalties = torch.tensor([0.5 * 1.5, 0.0])
+    assert torch.isclose(warmup_raw, torch.tensor(0.0))
+    assert torch.isclose(warmup_weighted, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_penalties.mean())
+    assert torch.isclose(weighted_loss, torch.tensor(0.05) * expected_penalties.mean())
+    assert torch.isclose(support_mean, torch.tensor((1.5 + 1.3) / 2.0))
 
 
 def test_trainer_adaptive_branch_objectives_update_train_state_only() -> None:

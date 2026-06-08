@@ -161,6 +161,16 @@ def build_diagnostic_rows(
         if output.class_evidence_embedding_scores is not None
         else None
     )
+    class_evidence_raw_embedding_scores = (
+        output.class_evidence_raw_embedding_scores.detach().cpu()
+        if output.class_evidence_raw_embedding_scores is not None
+        else None
+    )
+    class_evidence_bounded_embedding_scores = (
+        output.class_evidence_bounded_embedding_scores.detach().cpu()
+        if output.class_evidence_bounded_embedding_scores is not None
+        else None
+    )
     class_evidence_top_support_scores = (
         output.class_evidence_top_support_scores.detach().cpu()
         if output.class_evidence_top_support_scores is not None
@@ -179,6 +189,36 @@ def build_diagnostic_rows(
     class_evidence_top_relative_correction_scores = (
         output.class_evidence_top_relative_correction_scores.detach().cpu()
         if output.class_evidence_top_relative_correction_scores is not None
+        else None
+    )
+    class_evidence_top_support_raw_positive_component = (
+        output.class_evidence_top_support_raw_positive_component.detach().cpu()
+        if output.class_evidence_top_support_raw_positive_component is not None
+        else None
+    )
+    class_evidence_top_support_relative_positive_component = (
+        output.class_evidence_top_support_relative_positive_component.detach().cpu()
+        if output.class_evidence_top_support_relative_positive_component is not None
+        else None
+    )
+    class_evidence_top_support_relative_negative_component = (
+        output.class_evidence_top_support_relative_negative_component.detach().cpu()
+        if output.class_evidence_top_support_relative_negative_component is not None
+        else None
+    )
+    class_evidence_top_support_direct_raw_scale = (
+        output.class_evidence_top_support_direct_raw_scale.detach().cpu()
+        if output.class_evidence_top_support_direct_raw_scale is not None
+        else None
+    )
+    class_evidence_top_support_direct_relative_positive_scale = (
+        output.class_evidence_top_support_direct_relative_positive_scale.detach().cpu()
+        if output.class_evidence_top_support_direct_relative_positive_scale is not None
+        else None
+    )
+    class_evidence_top_support_direct_relative_negative_scale = (
+        output.class_evidence_top_support_direct_relative_negative_scale.detach().cpu()
+        if output.class_evidence_top_support_direct_relative_negative_scale is not None
         else None
     )
     class_evidence_top_relative_positive = (
@@ -239,6 +279,16 @@ def build_diagnostic_rows(
     class_evidence_interaction_scores = (
         output.class_evidence_interaction_scores.detach().cpu()
         if output.class_evidence_interaction_scores is not None
+        else None
+    )
+    class_evidence_raw_interaction_scores = (
+        output.class_evidence_raw_interaction_scores.detach().cpu()
+        if output.class_evidence_raw_interaction_scores is not None
+        else None
+    )
+    class_evidence_bounded_interaction_scores = (
+        output.class_evidence_bounded_interaction_scores.detach().cpu()
+        if output.class_evidence_bounded_interaction_scores is not None
         else None
     )
     class_evidence_branch_scale = (
@@ -304,6 +354,26 @@ def build_diagnostic_rows(
     class_evidence_interaction_effective_scale = (
         output.class_evidence_interaction_effective_scale.detach().cpu()
         if output.class_evidence_interaction_effective_scale is not None
+        else None
+    )
+    class_evidence_embedding_score_bound = (
+        output.class_evidence_embedding_score_bound.detach().cpu()
+        if output.class_evidence_embedding_score_bound is not None
+        else None
+    )
+    class_evidence_embedding_score_temperature = (
+        output.class_evidence_embedding_score_temperature.detach().cpu()
+        if output.class_evidence_embedding_score_temperature is not None
+        else None
+    )
+    class_evidence_interaction_score_bound = (
+        output.class_evidence_interaction_score_bound.detach().cpu()
+        if output.class_evidence_interaction_score_bound is not None
+        else None
+    )
+    class_evidence_interaction_score_temperature = (
+        output.class_evidence_interaction_score_temperature.detach().cpu()
+        if output.class_evidence_interaction_score_temperature is not None
         else None
     )
     class_evidence_scorer_branch_feature_transform_temperature = (
@@ -488,6 +558,34 @@ def build_diagnostic_rows(
                     row["class_evidence_embedding_score_negative_class"] = (
                         negative_class
                     )
+            if class_evidence_raw_embedding_scores is not None:
+                row["class_evidence_raw_embedding_scores"] = (
+                    class_evidence_raw_embedding_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_raw_embedding_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_raw_embedding_score_gap"] = gap
+                    row["class_evidence_raw_embedding_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_bounded_embedding_scores is not None:
+                row["class_evidence_bounded_embedding_scores"] = (
+                    class_evidence_bounded_embedding_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_bounded_embedding_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_bounded_embedding_score_gap"] = gap
+                    row["class_evidence_bounded_embedding_score_negative_class"] = (
+                        negative_class
+                    )
             if class_evidence_top_support_scores is not None:
                 row["class_evidence_top_support_scores"] = (
                     class_evidence_top_support_scores[index].tolist()
@@ -543,6 +641,56 @@ def build_diagnostic_rows(
                     row["class_evidence_top_relative_correction_score_gap"] = gap
                     row[
                         "class_evidence_top_relative_correction_score_negative_class"
+                    ] = negative_class
+            if class_evidence_top_support_raw_positive_component is not None:
+                row["class_evidence_top_support_raw_positive_component"] = (
+                    class_evidence_top_support_raw_positive_component[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_top_support_raw_positive_component[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_top_support_raw_positive_component_gap"] = gap
+                    row[
+                        "class_evidence_top_support_raw_positive_component_negative_class"
+                    ] = negative_class
+            if class_evidence_top_support_relative_positive_component is not None:
+                row["class_evidence_top_support_relative_positive_component"] = (
+                    class_evidence_top_support_relative_positive_component[
+                        index
+                    ].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_top_support_relative_positive_component[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row[
+                        "class_evidence_top_support_relative_positive_component_gap"
+                    ] = gap
+                    row[
+                        "class_evidence_top_support_relative_positive_component_negative_class"
+                    ] = negative_class
+            if class_evidence_top_support_relative_negative_component is not None:
+                row["class_evidence_top_support_relative_negative_component"] = (
+                    class_evidence_top_support_relative_negative_component[
+                        index
+                    ].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_top_support_relative_negative_component[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row[
+                        "class_evidence_top_support_relative_negative_component_gap"
+                    ] = gap
+                    row[
+                        "class_evidence_top_support_relative_negative_component_negative_class"
                     ] = negative_class
             if class_evidence_top_relative_positive is not None:
                 row["class_evidence_top_relative_positive"] = (
@@ -652,6 +800,34 @@ def build_diagnostic_rows(
                     row["class_evidence_interaction_score_negative_class"] = (
                         negative_class
                     )
+            if class_evidence_raw_interaction_scores is not None:
+                row["class_evidence_raw_interaction_scores"] = (
+                    class_evidence_raw_interaction_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_raw_interaction_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_raw_interaction_score_gap"] = gap
+                    row["class_evidence_raw_interaction_score_negative_class"] = (
+                        negative_class
+                    )
+            if class_evidence_bounded_interaction_scores is not None:
+                row["class_evidence_bounded_interaction_scores"] = (
+                    class_evidence_bounded_interaction_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_bounded_interaction_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_evidence_bounded_interaction_score_gap"] = gap
+                    row["class_evidence_bounded_interaction_score_negative_class"] = (
+                        negative_class
+                    )
             if class_evidence_logits is not None:
                 gap_payload = _true_vs_hardest_gap(
                     class_evidence_logits[index],
@@ -685,6 +861,22 @@ def build_diagnostic_rows(
                 row["class_evidence_branch_direct_residual_scale"] = float(
                     class_evidence_branch_direct_residual_scale.item()
                 )
+            if class_evidence_top_support_direct_raw_scale is not None:
+                row["class_evidence_top_support_direct_raw_scale"] = float(
+                    class_evidence_top_support_direct_raw_scale.item()
+                )
+            if class_evidence_top_support_direct_relative_positive_scale is not None:
+                row["class_evidence_top_support_direct_relative_positive_scale"] = (
+                    float(
+                        class_evidence_top_support_direct_relative_positive_scale.item()
+                    )
+                )
+            if class_evidence_top_support_direct_relative_negative_scale is not None:
+                row["class_evidence_top_support_direct_relative_negative_scale"] = (
+                    float(
+                        class_evidence_top_support_direct_relative_negative_scale.item()
+                    )
+                )
             if class_evidence_branch_direct_top_weights is not None:
                 row["class_evidence_branch_direct_top_weights"] = (
                     class_evidence_branch_direct_top_weights.tolist()
@@ -712,6 +904,22 @@ def build_diagnostic_rows(
             if class_evidence_interaction_effective_scale is not None:
                 row["class_evidence_interaction_effective_scale"] = float(
                     class_evidence_interaction_effective_scale.item()
+                )
+            if class_evidence_embedding_score_bound is not None:
+                row["class_evidence_embedding_score_bound"] = float(
+                    class_evidence_embedding_score_bound.item()
+                )
+            if class_evidence_embedding_score_temperature is not None:
+                row["class_evidence_embedding_score_temperature"] = float(
+                    class_evidence_embedding_score_temperature.item()
+                )
+            if class_evidence_interaction_score_bound is not None:
+                row["class_evidence_interaction_score_bound"] = float(
+                    class_evidence_interaction_score_bound.item()
+                )
+            if class_evidence_interaction_score_temperature is not None:
+                row["class_evidence_interaction_score_temperature"] = float(
+                    class_evidence_interaction_score_temperature.item()
                 )
             if output.class_evidence_scorer_type is not None:
                 row["class_evidence_scorer_type"] = output.class_evidence_scorer_type

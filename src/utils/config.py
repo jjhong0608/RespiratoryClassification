@@ -24,8 +24,11 @@ from src.models.model import (
     ClassGateMixingConfig,
     ClassGateReliabilityMixtureConfig,
     ClassGateResidualConfidenceAwareGateConfig,
+    ClassGateScoreBoundComponentConfig,
+    ClassGateScoreBoundingConfig,
     ClassGateScoreDecompositionConfig,
     ClassGateTopRelativeCorrectionConfig,
+    ClassGateTopSupportDirectPathConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -352,6 +355,25 @@ class BranchDirectScoreMarginConfig:
 
 
 @dataclass(frozen=True)
+class BranchPathDominanceConstraintConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    branch_source: Literal["class_evidence_branch_support_scores"] = (
+        "class_evidence_branch_support_scores"
+    )
+    target: Literal["class_evidence_logits"] = "class_evidence_logits"
+    mode: Literal["branch_gap_preservation"] = "branch_gap_preservation"
+    allowed_drop: float = 0.5
+    support_source: Literal["top_branch_margin"] = "top_branch_margin"
+    support_weighting: MarginSupportWeightingConfig = field(
+        default_factory=MarginSupportWeightingConfig
+    )
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
 class ClassGatedBranchLogitMarginConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -504,6 +526,15 @@ class TopBranchMarginPhaseWeightScheduleConfig:
 
 
 @dataclass(frozen=True)
+class TopBranchMarginHardnessWeightingConfig:
+    enabled: bool = False
+    source: Literal["margin_deficit"] = "margin_deficit"
+    mode: Literal["linear"] = "linear"
+    gain: float = 1.0
+    cap: float = 3.0
+
+
+@dataclass(frozen=True)
 class GateBranchRegretConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -559,6 +590,9 @@ class TopBranchMarginConfig:
     )
     phase_weight_schedule: TopBranchMarginPhaseWeightScheduleConfig = field(
         default_factory=TopBranchMarginPhaseWeightScheduleConfig
+    )
+    hardness_weighting: TopBranchMarginHardnessWeightingConfig = field(
+        default_factory=TopBranchMarginHardnessWeightingConfig
     )
 
 
@@ -655,6 +689,9 @@ class LossConfig:
     )
     branch_direct_score_margin: BranchDirectScoreMarginConfig = field(
         default_factory=BranchDirectScoreMarginConfig
+    )
+    branch_path_dominance_constraint: BranchPathDominanceConstraintConfig = field(
+        default_factory=BranchPathDominanceConstraintConfig
     )
     class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
         default_factory=ClassGatedBranchLogitMarginConfig
@@ -841,10 +878,13 @@ class JsonConfigLoader:
         "sigmoid_max",
         "bounded_sigmoid",
     }
+    _CLASS_GATE_SCORE_BOUNDING_MODES = {"tanh_bound"}
     _CLASS_GATE_BRANCH_DIRECT_SCORE_TOP_SUPPORT_MODES = {
         "learned_weighted_sum",
         "raw_existential_plus_relative_correction",
     }
+    _CLASS_GATE_TOP_SUPPORT_DIRECT_PATH_MODES = {"monotonic_raw_relative"}
+    _CLASS_GATE_TOP_SUPPORT_DIRECT_PATH_POSITIVE_TRANSFORMS = {"softplus"}
     _CLASS_GATE_BRANCH_DIRECT_SCORE_POSITIVE_WEIGHT_MODES = {"softplus"}
     _CLASS_GATE_BRANCH_FEATURE_TRANSFORM_MODES = {"tanh"}
     _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
@@ -886,6 +926,11 @@ class JsonConfigLoader:
     _BRANCH_DIRECT_SCORE_MARGIN_TARGETS = {"class_evidence_branch_direct_scores"}
     _BRANCH_DIRECT_SCORE_MARGIN_MODES = {"softplus_true_vs_hardest_negative"}
     _BRANCH_DIRECT_SCORE_MARGIN_REDUCTIONS = {"mean"}
+    _BRANCH_PATH_DOMINANCE_BRANCH_SOURCES = {"class_evidence_branch_support_scores"}
+    _BRANCH_PATH_DOMINANCE_TARGETS = {"class_evidence_logits"}
+    _BRANCH_PATH_DOMINANCE_MODES = {"branch_gap_preservation"}
+    _BRANCH_PATH_DOMINANCE_SUPPORT_SOURCES = {"top_branch_margin"}
+    _BRANCH_PATH_DOMINANCE_REDUCTIONS = {"mean"}
     _MARGIN_REDUCTIONS = {"mean", "class_balanced_violating_mean"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_TARGETS = {"class_gated_branch_logits"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_MODES = {"true_vs_hardest_negative"}
@@ -931,6 +976,8 @@ class JsonConfigLoader:
     _TOP_BRANCH_MARGIN_TARGETS = {"branch_logits"}
     _TOP_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
     _TOP_BRANCH_MARGIN_BRANCH_REDUCTIONS = {"max"}
+    _TOP_BRANCH_MARGIN_HARDNESS_SOURCES = {"margin_deficit"}
+    _TOP_BRANCH_MARGIN_HARDNESS_MODES = {"linear"}
     _AUTO_MARGIN_STRATEGIES = {"ema_violation_controller"}
     _AUTO_POSITIVE_THRESHOLD_STRATEGIES = {"ema_eligible_controller"}
     _AUTO_BAD_BRANCH_THRESHOLD_STRATEGIES = {"ema_bad_gate_mass_controller"}
@@ -1353,6 +1400,93 @@ class JsonConfigLoader:
             raise ValueError(f"{field_name}.gain must be greater than or equal to zero")
         if cfg.cap <= 0:
             raise ValueError(f"{field_name}.cap must be greater than zero")
+
+    @staticmethod
+    def _validate_top_branch_margin_hardness_weighting(
+        cfg: TopBranchMarginHardnessWeightingConfig,
+        *,
+        field_name: str,
+    ) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if cfg.source not in JsonConfigLoader._TOP_BRANCH_MARGIN_HARDNESS_SOURCES:
+            raise ValueError(
+                f"{field_name}.source must be one of "
+                f"{sorted(JsonConfigLoader._TOP_BRANCH_MARGIN_HARDNESS_SOURCES)}"
+            )
+        if cfg.mode not in JsonConfigLoader._TOP_BRANCH_MARGIN_HARDNESS_MODES:
+            raise ValueError(
+                f"{field_name}.mode must be one of "
+                f"{sorted(JsonConfigLoader._TOP_BRANCH_MARGIN_HARDNESS_MODES)}"
+            )
+        for value, suffix in ((cfg.gain, "gain"), (cfg.cap, "cap")):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{suffix} must be numeric")
+        if cfg.gain < 0:
+            raise ValueError(f"{field_name}.gain must be greater than or equal to zero")
+        if cfg.cap <= 0:
+            raise ValueError(f"{field_name}.cap must be greater than zero")
+
+    @staticmethod
+    def _validate_score_bound_component(
+        cfg: ClassGateScoreBoundComponentConfig,
+        *,
+        field_name: str,
+    ) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        if cfg.mode not in JsonConfigLoader._CLASS_GATE_SCORE_BOUNDING_MODES:
+            raise ValueError(
+                f"{field_name}.mode must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_SCORE_BOUNDING_MODES)}"
+            )
+        for value, suffix in ((cfg.bound, "bound"), (cfg.temperature, "temperature")):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{suffix} must be numeric")
+            if float(value) <= 0.0:
+                raise ValueError(f"{field_name}.{suffix} must be greater than zero")
+
+    @staticmethod
+    def _validate_scale_bounds(
+        *,
+        mode: str,
+        min_value: float,
+        init_value: float,
+        max_value: float,
+        field_name: str,
+    ) -> None:
+        if mode not in JsonConfigLoader._CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES:
+            raise ValueError(
+                f"{field_name}_mode must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES)}"
+            )
+        for value, suffix in (
+            (min_value, "min"),
+            (init_value, "init"),
+            (max_value, "max"),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}_{suffix} must be numeric")
+        if mode == "sigmoid_max":
+            if float(max_value) <= 0.0:
+                raise ValueError(f"{field_name}_max must be greater than zero")
+            if not (0.0 <= float(init_value) <= float(max_value)):
+                raise ValueError(f"{field_name}_init must be within [0, max]")
+        if mode == "bounded_sigmoid":
+            if float(min_value) < 0.0:
+                raise ValueError(
+                    f"{field_name}_min must be non-negative when mode='bounded_sigmoid'"
+                )
+            if float(max_value) <= float(min_value):
+                raise ValueError(
+                    f"{field_name}_max must be greater than min when "
+                    "mode='bounded_sigmoid'"
+                )
+            if not (float(min_value) <= float(init_value) <= float(max_value)):
+                raise ValueError(
+                    f"{field_name}_init must be within [min, max] when "
+                    "mode='bounded_sigmoid'"
+                )
 
     @staticmethod
     def _validate_hold_decay_schedule(
@@ -1904,6 +2038,33 @@ class JsonConfigLoader:
                     "evidence_scorer.score_decomposition.interaction_scale_schedule."
                     f"{field_name} must be non-negative"
                 )
+        score_bounding = score_decomposition.score_bounding
+        if not isinstance(score_bounding.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.score_bounding.enabled "
+                "must be a boolean"
+            )
+        JsonConfigLoader._validate_score_bound_component(
+            score_bounding.embedding,
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.score_bounding.embedding"
+            ),
+        )
+        JsonConfigLoader._validate_score_bound_component(
+            score_bounding.interaction,
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.score_bounding.interaction"
+            ),
+        )
+        if score_bounding.enabled and not score_decomposition.enabled:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.score_decomposition.score_bounding requires "
+                "score_decomposition.enabled=true"
+            )
         if (
             score_decomposition.enabled
             and evidence_scorer.type != "class_axis_attention"
@@ -1969,6 +2130,77 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "evidence_scorer.branch_direct_score.top_relative_correction."
                 "negative_clip must be greater than zero"
+            )
+        top_support_direct_path = direct_score.top_support_direct_path
+        if not isinstance(top_support_direct_path.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "enabled must be a boolean"
+            )
+        if (
+            top_support_direct_path.mode
+            not in JsonConfigLoader._CLASS_GATE_TOP_SUPPORT_DIRECT_PATH_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "mode must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_TOP_SUPPORT_DIRECT_PATH_MODES)}"
+            )
+        if (
+            top_support_direct_path.positive_transform
+            not in JsonConfigLoader._CLASS_GATE_TOP_SUPPORT_DIRECT_PATH_POSITIVE_TRANSFORMS
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "positive_transform must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_TOP_SUPPORT_DIRECT_PATH_POSITIVE_TRANSFORMS)}"
+            )
+        for prefix, mode, min_value, init_value, max_value in (
+            (
+                "raw_scale",
+                top_support_direct_path.raw_scale_mode,
+                top_support_direct_path.raw_scale_min,
+                top_support_direct_path.raw_scale_init,
+                top_support_direct_path.raw_scale_max,
+            ),
+            (
+                "relative_positive_scale",
+                top_support_direct_path.relative_positive_scale_mode,
+                top_support_direct_path.relative_positive_scale_min,
+                top_support_direct_path.relative_positive_scale_init,
+                top_support_direct_path.relative_positive_scale_max,
+            ),
+            (
+                "relative_negative_scale",
+                top_support_direct_path.relative_negative_scale_mode,
+                top_support_direct_path.relative_negative_scale_min,
+                top_support_direct_path.relative_negative_scale_init,
+                top_support_direct_path.relative_negative_scale_max,
+            ),
+        ):
+            JsonConfigLoader._validate_scale_bounds(
+                mode=mode,
+                min_value=min_value,
+                init_value=init_value,
+                max_value=max_value,
+                field_name=(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_direct_score.top_support_direct_path."
+                    f"{prefix}"
+                ),
+            )
+        if (
+            not isinstance(top_support_direct_path.residual_scale_max, int | float)
+            or isinstance(top_support_direct_path.residual_scale_max, bool)
+            or float(top_support_direct_path.residual_scale_max) < 0.0
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "residual_scale_max must be greater than or equal to zero"
             )
         for prefix, mode, min_value, init_value, max_value in (
             (
@@ -3143,6 +3375,113 @@ class JsonConfigLoader:
                     "train.loss.branch_direct_score_margin requires "
                     "class_gate.evidence_scorer.branch_direct_score.enabled=true"
                 )
+        branch_dominance_cfg = cfg.loss.branch_path_dominance_constraint
+        if not isinstance(branch_dominance_cfg.enabled, bool):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.enabled must be a boolean"
+            )
+        if not isinstance(branch_dominance_cfg.class_weighted, bool):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            branch_dominance_cfg.branch_source
+            not in JsonConfigLoader._BRANCH_PATH_DOMINANCE_BRANCH_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.branch_source must be "
+                "'class_evidence_branch_support_scores'"
+            )
+        if (
+            branch_dominance_cfg.target
+            not in JsonConfigLoader._BRANCH_PATH_DOMINANCE_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.target must be "
+                "'class_evidence_logits'"
+            )
+        if (
+            branch_dominance_cfg.mode
+            not in JsonConfigLoader._BRANCH_PATH_DOMINANCE_MODES
+        ):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.mode must be "
+                "'branch_gap_preservation'"
+            )
+        if (
+            branch_dominance_cfg.support_source
+            not in JsonConfigLoader._BRANCH_PATH_DOMINANCE_SUPPORT_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.support_source must be "
+                "'top_branch_margin'"
+            )
+        if (
+            branch_dominance_cfg.reduction
+            not in JsonConfigLoader._BRANCH_PATH_DOMINANCE_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.reduction must be 'mean'"
+            )
+        if (
+            not isinstance(branch_dominance_cfg.allowed_drop, int | float)
+            or isinstance(branch_dominance_cfg.allowed_drop, bool)
+            or float(branch_dominance_cfg.allowed_drop) < 0.0
+        ):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.allowed_drop must be "
+                "greater than or equal to zero"
+            )
+        if not isinstance(branch_dominance_cfg.warmup_epochs, int) or isinstance(
+            branch_dominance_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.branch_path_dominance_constraint.warmup_epochs "
+                "must be an integer"
+            )
+        if int(branch_dominance_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.warmup_epochs "
+                "must be non-negative"
+            )
+        JsonConfigLoader._validate_margin_support_weighting(
+            branch_dominance_cfg.support_weighting,
+            field_name=(
+                "train.loss.branch_path_dominance_constraint.support_weighting"
+            ),
+        )
+        if branch_dominance_cfg.support_weighting.enabled and (
+            branch_dominance_cfg.support_weighting.source != "top_branch_margin"
+            or branch_dominance_cfg.support_weighting.mode != "linear"
+        ):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.support_weighting "
+                "supports only source='top_branch_margin' and mode='linear'"
+            )
+        if branch_dominance_cfg.enabled:
+            if branch_dominance_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.branch_path_dominance_constraint.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.branch_path_dominance_constraint is supported "
+                    "only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.branch_path_dominance_constraint requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if not score_decomposition_enabled:
+                raise ValueError(
+                    "train.loss.branch_path_dominance_constraint requires "
+                    "class_gate.evidence_scorer.score_decomposition.enabled=true"
+                )
         if not isinstance(cfg.loss.class_gated_branch_logit_margin.enabled, bool):
             raise ValueError(
                 "train.loss.class_gated_branch_logit_margin.enabled must be a boolean"
@@ -4125,6 +4464,10 @@ class JsonConfigLoader:
             min_value=0.0,
             strict_min=False,
         )
+        JsonConfigLoader._validate_top_branch_margin_hardness_weighting(
+            cfg.loss.top_branch_margin.hardness_weighting,
+            field_name="train.loss.top_branch_margin.hardness_weighting",
+        )
         if (
             cfg.loss.top_branch_margin.auto_margin_by_train_stats.enabled
             and not cfg.loss.top_branch_margin.enabled
@@ -4247,6 +4590,15 @@ class JsonConfigLoader:
             raise ValueError(
                 "train.loss.branch_direct_score_margin.class_weighted requires "
                 "train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.branch_path_dominance_constraint.enabled
+            and cfg.loss.branch_path_dominance_constraint.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.branch_path_dominance_constraint.class_weighted "
+                "requires train.loss.class_weighting.enabled=true"
             )
         if (
             cfg.loss.branch_to_evidence_ranking_consistency.enabled
@@ -4678,6 +5030,16 @@ class JsonConfigLoader:
                 **dict(score_decomposition.get("interaction_scale_schedule", {}))
             )
         )
+        score_bounding = dict(score_decomposition.get("score_bounding", {}))
+        score_bounding["embedding"] = ClassGateScoreBoundComponentConfig(
+            **dict(score_bounding.get("embedding", {}))
+        )
+        score_bounding["interaction"] = ClassGateScoreBoundComponentConfig(
+            **dict(score_bounding.get("interaction", {}))
+        )
+        score_decomposition["score_bounding"] = ClassGateScoreBoundingConfig(
+            **score_bounding
+        )
         evidence_scorer["score_decomposition"] = ClassGateScoreDecompositionConfig(
             **score_decomposition
         )
@@ -4690,6 +5052,11 @@ class JsonConfigLoader:
         branch_direct_score["top_relative_correction"] = (
             ClassGateTopRelativeCorrectionConfig(
                 **dict(branch_direct_score.get("top_relative_correction", {}))
+            )
+        )
+        branch_direct_score["top_support_direct_path"] = (
+            ClassGateTopSupportDirectPathConfig(
+                **dict(branch_direct_score.get("top_support_direct_path", {}))
             )
         )
         evidence_scorer["branch_direct_score"] = ClassGateBranchDirectScoreConfig(
@@ -4866,6 +5233,13 @@ class JsonConfigLoader:
         loss["branch_direct_score_margin"] = BranchDirectScoreMarginConfig(
             **dict(loss.get("branch_direct_score_margin", {}))
         )
+        branch_path_dominance = dict(loss.get("branch_path_dominance_constraint", {}))
+        branch_path_dominance["support_weighting"] = MarginSupportWeightingConfig(
+            **dict(branch_path_dominance.get("support_weighting", {}))
+        )
+        loss["branch_path_dominance_constraint"] = BranchPathDominanceConstraintConfig(
+            **branch_path_dominance
+        )
         loss["class_gated_branch_logit_margin"] = ClassGatedBranchLogitMarginConfig(
             **dict(loss.get("class_gated_branch_logit_margin", {}))
         )
@@ -4962,6 +5336,11 @@ class JsonConfigLoader:
         )
         top_branch_margin["phase_weight_schedule"] = (
             TopBranchMarginPhaseWeightScheduleConfig(**phase_weight_schedule)
+        )
+        top_branch_margin["hardness_weighting"] = (
+            TopBranchMarginHardnessWeightingConfig(
+                **dict(top_branch_margin.get("hardness_weighting", {}))
+            )
         )
         loss["top_branch_margin"] = TopBranchMarginConfig(**top_branch_margin)
         kwargs["loss"] = LossConfig(**loss)

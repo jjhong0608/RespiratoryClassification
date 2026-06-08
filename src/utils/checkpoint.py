@@ -7,6 +7,7 @@ import torch
 from src.models.model import (
     AstFeatureDims,
     BranchEventDropoutConfig,
+    ClassGateBranchDirectScoreConfig,
     ClassGateBranchFeatureTransformConfig,
     ClassGateBranchLogitFeatureConfig,
     ClassGateConfig,
@@ -16,9 +17,15 @@ from src.models.model import (
     ClassGateGlobalResidualConfig,
     ClassGateGlobalResidualCorrectionConfig,
     ClassGateGlobalResidualWarmupConfig,
+    ClassGateInteractionScaleScheduleConfig,
     ClassGateMixingConfig,
+    ClassGateReliabilityMixtureConfig,
     ClassGateResidualConfidenceAwareGateConfig,
+    ClassGateScoreBoundComponentConfig,
+    ClassGateScoreBoundingConfig,
     ClassGateScoreDecompositionConfig,
+    ClassGateTopRelativeCorrectionConfig,
+    ClassGateTopSupportDirectPathConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -164,8 +171,63 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
             "model_cfg.encoder.architecture.evidence_pooling.class_gate."
             "evidence_scorer.score_decomposition must be a dict"
         )
+    score_decomposition_kwargs = dict(score_decomposition_raw)
+    interaction_schedule_raw = score_decomposition_kwargs.get(
+        "interaction_scale_schedule",
+        {},
+    )
+    if not isinstance(interaction_schedule_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "evidence_scorer.score_decomposition.interaction_scale_schedule "
+            "must be a dict"
+        )
+    score_bounding_raw = score_decomposition_kwargs.get("score_bounding", {})
+    if not isinstance(score_bounding_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "evidence_scorer.score_decomposition.score_bounding must be a dict"
+        )
+    score_bounding_kwargs = dict(score_bounding_raw)
+    score_bounding_kwargs["embedding"] = ClassGateScoreBoundComponentConfig(
+        **dict(score_bounding_kwargs.get("embedding", {}))
+    )
+    score_bounding_kwargs["interaction"] = ClassGateScoreBoundComponentConfig(
+        **dict(score_bounding_kwargs.get("interaction", {}))
+    )
+    score_decomposition_kwargs["score_bounding"] = ClassGateScoreBoundingConfig(
+        **score_bounding_kwargs
+    )
+    score_decomposition_kwargs["interaction_scale_schedule"] = (
+        ClassGateInteractionScaleScheduleConfig(**dict(interaction_schedule_raw))
+    )
     evidence_scorer_kwargs["score_decomposition"] = ClassGateScoreDecompositionConfig(
-        **dict(score_decomposition_raw)
+        **score_decomposition_kwargs
+    )
+    branch_direct_score_raw = evidence_scorer_kwargs.get("branch_direct_score", {})
+    if not isinstance(branch_direct_score_raw, Mapping):
+        raise TypeError(
+            "model_cfg.encoder.architecture.evidence_pooling.class_gate."
+            "evidence_scorer.branch_direct_score must be a dict"
+        )
+    branch_direct_score_kwargs = dict(branch_direct_score_raw)
+    branch_direct_score_kwargs["gate_reliability_mixture"] = (
+        ClassGateReliabilityMixtureConfig(
+            **dict(branch_direct_score_kwargs.get("gate_reliability_mixture", {}))
+        )
+    )
+    branch_direct_score_kwargs["top_relative_correction"] = (
+        ClassGateTopRelativeCorrectionConfig(
+            **dict(branch_direct_score_kwargs.get("top_relative_correction", {}))
+        )
+    )
+    branch_direct_score_kwargs["top_support_direct_path"] = (
+        ClassGateTopSupportDirectPathConfig(
+            **dict(branch_direct_score_kwargs.get("top_support_direct_path", {}))
+        )
+    )
+    evidence_scorer_kwargs["branch_direct_score"] = ClassGateBranchDirectScoreConfig(
+        **branch_direct_score_kwargs
     )
     branch_feature_transform_raw = evidence_scorer_kwargs.get(
         "branch_feature_transform",

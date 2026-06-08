@@ -35,6 +35,7 @@ from src.utils.config import (
     BranchAuxiliaryLossConfig,
     BranchBinaryAuxiliaryLossConfig,
     BranchDirectScoreMarginConfig,
+    BranchPathDominanceConstraintConfig,
     BranchSupportScoreMarginConfig,
     BranchToEvidenceRankingConsistencyConfig,
     CheckpointingConfig,
@@ -113,6 +114,9 @@ class TrainerConfig:
     branch_direct_score_margin: BranchDirectScoreMarginConfig = field(
         default_factory=BranchDirectScoreMarginConfig
     )
+    branch_path_dominance_constraint: BranchPathDominanceConstraintConfig = field(
+        default_factory=BranchPathDominanceConstraintConfig
+    )
     class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
         default_factory=ClassGatedBranchLogitMarginConfig
     )
@@ -173,6 +177,9 @@ class LossComponents:
     top_support_score_margin_hardness_multiplier: Tensor | None = None
     branch_direct_score_margin: Tensor | None = None
     branch_direct_score_margin_loss: Tensor | None = None
+    branch_path_dominance_constraint: Tensor | None = None
+    branch_path_dominance_constraint_loss: Tensor | None = None
+    branch_path_dominance_support_multiplier: Tensor | None = None
     branch_support_score_margin: Tensor | None = None
     branch_support_score_margin_loss: Tensor | None = None
     class_gated_branch_logit_margin: Tensor | None = None
@@ -200,6 +207,7 @@ class LossComponents:
     top_branch_margin: Tensor | None = None
     top_branch_margin_loss: Tensor | None = None
     top_branch_margin_effective_weight: Tensor | None = None
+    top_branch_margin_hardness_multiplier: Tensor | None = None
     branch_binary_aux_weight: float = 0.0
     branch_binary_aux_monitor_weight: float = 0.0
 
@@ -717,6 +725,27 @@ class Trainer(LoggingMixin):
                 f"source='{expected_source}' and mode='negative_gap'"
             )
         hardness = torch.relu(-margin_gap)
+        hard_weight = 1.0 + (
+            float(cfg.gain) * torch.clamp(hardness, min=0.0, max=float(cfg.cap))
+        )
+        return hard_weight, hardness
+
+    @staticmethod
+    def _top_branch_margin_hardness_weights(
+        margin_deficit: Tensor,
+        cfg: Any,
+        *,
+        loss_name: str,
+    ) -> tuple[Tensor, Tensor]:
+        if not cfg.enabled:
+            ones = torch.ones_like(margin_deficit)
+            return ones, margin_deficit.detach() * 0.0
+        if cfg.source != "margin_deficit" or cfg.mode != "linear":
+            raise ValueError(
+                f"{loss_name}.hardness_weighting supports only "
+                "source='margin_deficit' and mode='linear'"
+            )
+        hardness = torch.clamp(margin_deficit.detach(), min=0.0)
         hard_weight = 1.0 + (
             float(cfg.gain) * torch.clamp(hardness, min=0.0, max=float(cfg.cap))
         )
@@ -1607,6 +1636,102 @@ class Trainer(LoggingMixin):
         weighted_loss = float(cfg.weight) * raw_loss
         return raw_loss, weighted_loss
 
+    def _compute_branch_path_dominance_constraint_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        cfg = self.cfg.branch_path_dominance_constraint
+        if cfg.branch_source != "class_evidence_branch_support_scores":
+            raise ValueError(
+                "branch path dominance supports only "
+                "branch_source='class_evidence_branch_support_scores'"
+            )
+        if cfg.target != "class_evidence_logits":
+            raise ValueError(
+                "branch path dominance supports only target='class_evidence_logits'"
+            )
+        if cfg.mode != "branch_gap_preservation":
+            raise ValueError(
+                "branch path dominance supports only mode='branch_gap_preservation'"
+            )
+        if cfg.support_source != "top_branch_margin":
+            raise ValueError(
+                "branch path dominance supports only support_source='top_branch_margin'"
+            )
+        if output.class_evidence_branch_support_scores is None:
+            raise ValueError(
+                "branch path dominance enabled but model did not return "
+                "class_evidence_branch_support_scores"
+            )
+        if output.class_evidence_logits is None:
+            raise ValueError(
+                "branch path dominance enabled but model did not return "
+                "class_evidence_logits"
+            )
+        branch_scores = output.class_evidence_branch_support_scores
+        evidence_logits = output.class_evidence_logits
+        if tuple(branch_scores.shape) != tuple(evidence_logits.shape):
+            raise ValueError(
+                "branch path dominance requires branch support scores and "
+                "class evidence logits to have the same shape"
+            )
+        label_indices = self._validate_class_margin_inputs(
+            evidence_logits,
+            labels,
+            logits_name="class_evidence_logits",
+            loss_name="branch path dominance",
+        )
+        self._validate_class_margin_inputs(
+            branch_scores,
+            labels,
+            logits_name="class_evidence_branch_support_scores",
+            loss_name="branch path dominance",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = evidence_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = evidence_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+
+        branch_gap, _ = self._true_vs_hardest_negative_gap(
+            branch_scores,
+            label_indices,
+        )
+        evidence_gap, _ = self._true_vs_hardest_negative_gap(
+            evidence_logits,
+            label_indices,
+        )
+        support_weight, _ = self._margin_support_weights(
+            output,
+            labels,
+            label_indices,
+            branch_gap,
+            cfg.support_weighting,
+            loss_name="branch_path_dominance_constraint",
+        )
+        penalties = (
+            torch.relu(branch_gap - evidence_gap - float(cfg.allowed_drop))
+            * support_weight
+        )
+        class_weights = self._class_margin_weights(
+            label_indices,
+            evidence_logits,
+            enabled=cfg.class_weighted,
+            loss_name="branch_path_dominance_constraint",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss, support_weight.detach().mean()
+
     def _compute_class_gated_branch_logit_margin_loss(
         self,
         output: AstModelOutput,
@@ -2403,7 +2528,7 @@ class Trainer(LoggingMixin):
         labels: Tensor,
         *,
         epoch: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         cfg = self.cfg.top_branch_margin
         if cfg.target != "branch_logits":
             raise ValueError("top branch margin supports only target='branch_logits'")
@@ -2415,7 +2540,7 @@ class Trainer(LoggingMixin):
             raise ValueError("top branch margin supports only branch_reduction='max'")
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = output.logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss
+            return raw_loss, raw_loss, raw_loss, raw_loss
         branch_logits, label_indices = self._branch_margin_inputs(
             output,
             labels,
@@ -2423,12 +2548,17 @@ class Trainer(LoggingMixin):
         )
         if label_indices.numel() == 0:
             raw_loss = branch_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss
+            return raw_loss, raw_loss, raw_loss, raw_loss
 
         branch_margin = self._true_class_branch_margins(branch_logits, label_indices)
         top_margin = branch_margin.max(dim=1).values
         margin_targets = self._top_branch_margin_targets(label_indices, top_margin)
         penalties = torch.relu(margin_targets - top_margin)
+        hardness_multipliers, _ = self._top_branch_margin_hardness_weights(
+            penalties,
+            cfg.hardness_weighting,
+            loss_name="top_branch_margin",
+        )
         class_weights = self._class_margin_weights(
             label_indices,
             branch_logits[:, 0, :],
@@ -2447,14 +2577,19 @@ class Trainer(LoggingMixin):
             epoch=epoch,
         )
         weighted_raw_loss = self._reduce_class_margin_penalties(
-            penalties,
+            penalties * hardness_multipliers,
             label_indices,
             class_weights * phase_multipliers,
             reduction=cfg.reduction,
         )
         weighted_loss = float(cfg.weight) * weighted_raw_loss
         effective_weight = (float(cfg.weight) * phase_multipliers).detach().mean()
-        return raw_loss, weighted_loss, effective_weight
+        return (
+            raw_loss,
+            weighted_loss,
+            effective_weight,
+            hardness_multipliers.detach().mean(),
+        )
 
     def _compute_gate_branch_regret_loss(
         self,
@@ -2829,6 +2964,21 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + branch_support_score_margin_loss
             monitor_total = monitor_total + branch_support_score_margin_loss
+        branch_path_dominance_constraint: Tensor | None = None
+        branch_path_dominance_constraint_loss: Tensor | None = None
+        branch_path_dominance_support_multiplier: Tensor | None = None
+        if self.cfg.branch_path_dominance_constraint.enabled:
+            (
+                branch_path_dominance_constraint,
+                branch_path_dominance_constraint_loss,
+                branch_path_dominance_support_multiplier,
+            ) = self._compute_branch_path_dominance_constraint_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + branch_path_dominance_constraint_loss
+            monitor_total = monitor_total + branch_path_dominance_constraint_loss
         class_gated_branch_logit_margin: Tensor | None = None
         class_gated_branch_logit_margin_loss: Tensor | None = None
         if self.cfg.class_gated_branch_logit_margin.enabled:
@@ -2900,11 +3050,13 @@ class Trainer(LoggingMixin):
         top_branch_margin: Tensor | None = None
         top_branch_margin_loss: Tensor | None = None
         top_branch_margin_effective_weight: Tensor | None = None
+        top_branch_margin_hardness_multiplier: Tensor | None = None
         if self.cfg.top_branch_margin.enabled:
             (
                 top_branch_margin,
                 top_branch_margin_loss,
                 top_branch_margin_effective_weight,
+                top_branch_margin_hardness_multiplier,
             ) = self._compute_top_branch_margin_loss(
                 output,
                 labels,
@@ -2984,6 +3136,13 @@ class Trainer(LoggingMixin):
             ),
             branch_direct_score_margin=branch_direct_score_margin,
             branch_direct_score_margin_loss=branch_direct_score_margin_loss,
+            branch_path_dominance_constraint=branch_path_dominance_constraint,
+            branch_path_dominance_constraint_loss=(
+                branch_path_dominance_constraint_loss
+            ),
+            branch_path_dominance_support_multiplier=(
+                branch_path_dominance_support_multiplier
+            ),
             branch_support_score_margin=branch_support_score_margin,
             branch_support_score_margin_loss=branch_support_score_margin_loss,
             class_gated_branch_logit_margin=class_gated_branch_logit_margin,
@@ -3029,6 +3188,9 @@ class Trainer(LoggingMixin):
             top_branch_margin=top_branch_margin,
             top_branch_margin_loss=top_branch_margin_loss,
             top_branch_margin_effective_weight=top_branch_margin_effective_weight,
+            top_branch_margin_hardness_multiplier=(
+                top_branch_margin_hardness_multiplier
+            ),
             branch_binary_aux_weight=branch_binary_weight,
             branch_binary_aux_monitor_weight=branch_binary_monitor_weight,
         )
@@ -3366,8 +3528,13 @@ class Trainer(LoggingMixin):
                 top_margin,
                 epoch=epoch,
             )
+            hardness_multipliers, hardness = self._top_branch_margin_hardness_weights(
+                torch.relu(margin_targets - top_margin),
+                self.cfg.top_branch_margin.hardness_weighting,
+                loss_name="top_branch_margin",
+            )
             effective_weights = float(self.cfg.top_branch_margin.weight) * (
-                phase_multipliers
+                phase_multipliers * hardness_multipliers
             )
             for index, row in enumerate(rows):
                 row["top_branch_margin_target"] = float(
@@ -3381,6 +3548,18 @@ class Trainer(LoggingMixin):
                 )
                 row["top_branch_margin_effective_label_multiplier"] = float(
                     phase_multipliers[index].detach().cpu().item()
+                )
+                row["top_branch_margin_hardness"] = float(
+                    hardness[index].detach().cpu().item()
+                )
+                row["top_branch_margin_hardness_weight"] = float(
+                    hardness_multipliers[index].detach().cpu().item()
+                )
+                row["top_branch_margin_total_multiplier"] = float(
+                    (phase_multipliers[index] * hardness_multipliers[index])
+                    .detach()
+                    .cpu()
+                    .item()
                 )
                 row["top_branch_margin_effective_weight"] = float(
                     effective_weights[index].detach().cpu().item()
@@ -3621,6 +3800,73 @@ class Trainer(LoggingMixin):
                         support_cfg.temperature
                     )
                     row["branch_support_score_margin_eligible"] = bool(active)
+        if (
+            self.cfg.branch_path_dominance_constraint.enabled
+            and output.class_evidence_branch_support_scores is not None
+            and output.class_evidence_logits is not None
+        ):
+            dominance_cfg = self.cfg.branch_path_dominance_constraint
+            branch_scores = output.class_evidence_branch_support_scores.detach()
+            evidence_logits = output.class_evidence_logits.detach()
+            if (
+                tuple(branch_scores.shape)
+                == tuple(evidence_logits.shape)
+                == (
+                    int(labels.numel()),
+                    int(branch_logits.shape[2]),
+                )
+            ):
+                branch_gap, branch_negative = self._true_vs_hardest_negative_gap(
+                    branch_scores,
+                    label_indices,
+                )
+                evidence_gap, evidence_negative = self._true_vs_hardest_negative_gap(
+                    evidence_logits,
+                    label_indices,
+                )
+                support_weight, support_gap = self._margin_support_weights(
+                    output,
+                    labels,
+                    label_indices,
+                    branch_gap,
+                    dominance_cfg.support_weighting,
+                    loss_name="branch_path_dominance_constraint",
+                )
+                active = int(epoch) > int(dominance_cfg.warmup_epochs)
+                penalties = (
+                    torch.relu(
+                        branch_gap - evidence_gap - float(dominance_cfg.allowed_drop)
+                    )
+                    * support_weight
+                )
+                if not active:
+                    penalties = torch.zeros_like(penalties)
+                for index, row in enumerate(rows):
+                    row["branch_path_dominance_branch_gap"] = float(
+                        branch_gap[index].detach().cpu().item()
+                    )
+                    row["branch_path_dominance_branch_negative_class"] = int(
+                        branch_negative[index].detach().cpu().item()
+                    )
+                    row["branch_path_dominance_evidence_gap"] = float(
+                        evidence_gap[index].detach().cpu().item()
+                    )
+                    row["branch_path_dominance_evidence_negative_class"] = int(
+                        evidence_negative[index].detach().cpu().item()
+                    )
+                    row["branch_path_dominance_support_gap"] = float(
+                        support_gap[index].detach().cpu().item()
+                    )
+                    row["branch_path_dominance_support_weight"] = float(
+                        support_weight[index].detach().cpu().item()
+                    )
+                    row["branch_path_dominance_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
+                    row["branch_path_dominance_allowed_drop"] = float(
+                        dominance_cfg.allowed_drop
+                    )
+                    row["branch_path_dominance_eligible"] = bool(active)
         if (
             self.cfg.branch_direct_score_margin.enabled
             and output.class_evidence_branch_direct_scores is not None
@@ -4192,6 +4438,9 @@ class Trainer(LoggingMixin):
             "top_support_score_margin_hardness_multiplier": 0.0,
             "branch_direct_score_margin": 0.0,
             "branch_direct_score_margin_loss": 0.0,
+            "branch_path_dominance_constraint": 0.0,
+            "branch_path_dominance_constraint_loss": 0.0,
+            "branch_path_dominance_support_multiplier": 0.0,
             "branch_support_score_margin": 0.0,
             "branch_support_score_margin_loss": 0.0,
             "class_gated_branch_logit_margin": 0.0,
@@ -4219,6 +4468,7 @@ class Trainer(LoggingMixin):
             "top_branch_margin": 0.0,
             "top_branch_margin_loss": 0.0,
             "top_branch_margin_effective_weight": 0.0,
+            "top_branch_margin_hardness_multiplier": 0.0,
             "branch_binary_aux_weight": 0.0,
             "branch_binary_aux_monitor_weight": 0.0,
         }
@@ -4328,6 +4578,15 @@ class Trainer(LoggingMixin):
                 "branch_direct_score_margin_loss": (
                     loss_components.branch_direct_score_margin_loss
                 ),
+                "branch_path_dominance_constraint": (
+                    loss_components.branch_path_dominance_constraint
+                ),
+                "branch_path_dominance_constraint_loss": (
+                    loss_components.branch_path_dominance_constraint_loss
+                ),
+                "branch_path_dominance_support_multiplier": (
+                    loss_components.branch_path_dominance_support_multiplier
+                ),
                 "branch_support_score_margin": (
                     loss_components.branch_support_score_margin
                 ),
@@ -4400,6 +4659,9 @@ class Trainer(LoggingMixin):
                 "top_branch_margin_loss": loss_components.top_branch_margin_loss,
                 "top_branch_margin_effective_weight": (
                     loss_components.top_branch_margin_effective_weight
+                ),
+                "top_branch_margin_hardness_multiplier": (
+                    loss_components.top_branch_margin_hardness_multiplier
                 ),
                 "branch_binary_aux_weight": (loss_components.branch_binary_aux_weight),
                 "branch_binary_aux_monitor_weight": (
@@ -4691,6 +4953,22 @@ class Trainer(LoggingMixin):
                         "branch_direct_score_margin_loss",
                         0.0,
                     ),
+                    "train_branch_path_dominance_constraint": train_components.get(
+                        "branch_path_dominance_constraint",
+                        0.0,
+                    ),
+                    "train_loss_branch_path_dominance_constraint": (
+                        train_components.get(
+                            "branch_path_dominance_constraint_loss",
+                            0.0,
+                        )
+                    ),
+                    "train_branch_path_dominance_support_multiplier": (
+                        train_components.get(
+                            "branch_path_dominance_support_multiplier",
+                            0.0,
+                        )
+                    ),
                     "train_branch_support_score_margin": train_components.get(
                         "branch_support_score_margin",
                         0.0,
@@ -4825,6 +5103,12 @@ class Trainer(LoggingMixin):
                         "top_branch_margin_effective_weight",
                         0.0,
                     ),
+                    "train_top_branch_margin_hardness_multiplier": (
+                        train_components.get(
+                            "top_branch_margin_hardness_multiplier",
+                            0.0,
+                        )
+                    ),
                 }
             )
             val_components = dict(val_result.loss_components)
@@ -4924,6 +5208,20 @@ class Trainer(LoggingMixin):
                     "val_loss_branch_direct_score_margin": val_components.get(
                         "branch_direct_score_margin_loss",
                         0.0,
+                    ),
+                    "val_branch_path_dominance_constraint": val_components.get(
+                        "branch_path_dominance_constraint",
+                        0.0,
+                    ),
+                    "val_loss_branch_path_dominance_constraint": val_components.get(
+                        "branch_path_dominance_constraint_loss",
+                        0.0,
+                    ),
+                    "val_branch_path_dominance_support_multiplier": (
+                        val_components.get(
+                            "branch_path_dominance_support_multiplier",
+                            0.0,
+                        )
                     ),
                     "val_branch_support_score_margin": val_components.get(
                         "branch_support_score_margin",
@@ -5049,6 +5347,10 @@ class Trainer(LoggingMixin):
                     ),
                     "val_top_branch_margin_effective_weight": val_components.get(
                         "top_branch_margin_effective_weight",
+                        0.0,
+                    ),
+                    "val_top_branch_margin_hardness_multiplier": val_components.get(
+                        "top_branch_margin_hardness_multiplier",
                         0.0,
                     ),
                 }
