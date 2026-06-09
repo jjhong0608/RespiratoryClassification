@@ -294,6 +294,34 @@ class ClassEvidenceGapCapRegularizationConfig:
     target: Literal["class_evidence_logits"] = "class_evidence_logits"
     mode: Literal["negative_gap_hinge"] = "negative_gap_hinge"
     negative_gap_cap: float = 3.0
+    negative_gap_cap_by_label: Mapping[str, float] = field(default_factory=dict)
+    label_weight_by_label: Mapping[str, float] = field(default_factory=dict)
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class ClassEvidencePositiveGapCapRegularizationConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_logits"] = "class_evidence_logits"
+    mode: Literal["positive_gap_hinge"] = "positive_gap_hinge"
+    positive_gap_cap: float = 8.0
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class InteractionGapCapRegularizationConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_interaction_scores"] = (
+        "class_evidence_interaction_scores"
+    )
+    mode: Literal["absolute_gap_hinge"] = "absolute_gap_hinge"
+    gap_cap: float = 6.0
     class_weighted: bool = False
     reduction: Literal["mean"] = "mean"
     warmup_epochs: int = 0
@@ -320,6 +348,24 @@ class TopSupportScoreMarginConfig:
     hardness_weighting: MarginHardnessWeightingConfig = field(
         default_factory=MarginHardnessWeightingConfig
     )
+
+
+@dataclass(frozen=True)
+class TopSupportGapMinConstraintConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_evidence_top_support_scores"] = (
+        "class_evidence_top_support_scores"
+    )
+    mode: Literal["support_conditioned_min_gap"] = "support_conditioned_min_gap"
+    base_min_gap: float = 0.0
+    base_min_gap_by_label: Mapping[str, float] = field(default_factory=dict)
+    support_source: Literal["top_branch_margin"] = "top_branch_margin"
+    support_gain: float = 0.5
+    support_cap: float = 2.0
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
 
 
 @dataclass(frozen=True)
@@ -364,10 +410,38 @@ class BranchPathDominanceConstraintConfig:
     target: Literal["class_evidence_logits"] = "class_evidence_logits"
     mode: Literal["branch_gap_preservation"] = "branch_gap_preservation"
     allowed_drop: float = 0.5
+    allowed_drop_by_label: Mapping[str, float] = field(default_factory=dict)
+    label_weight_by_label: Mapping[str, float] = field(default_factory=dict)
     support_source: Literal["top_branch_margin"] = "top_branch_margin"
     support_weighting: MarginSupportWeightingConfig = field(
         default_factory=MarginSupportWeightingConfig
     )
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class BranchSupportDisagreementCapRegularizationConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    branch_source: Literal["class_evidence_branch_support_scores"] = (
+        "class_evidence_branch_support_scores"
+    )
+    embedding_source: Literal["class_evidence_embedding_scores"] = (
+        "class_evidence_embedding_scores"
+    )
+    interaction_source: Literal["class_evidence_interaction_scores"] = (
+        "class_evidence_interaction_scores"
+    )
+    mode: Literal["branch_gap_conditioned_abs_gap_cap"] = (
+        "branch_gap_conditioned_abs_gap_cap"
+    )
+    disagreement_threshold: float = 0.0
+    condition_gain: float = 1.0
+    condition_cap: float = 3.0
+    embedding_gap_cap: float = 6.0
+    interaction_gap_cap: float = 4.0
     class_weighted: bool = False
     reduction: Literal["mean"] = "mean"
     warmup_epochs: int = 0
@@ -681,8 +755,17 @@ class LossConfig:
     class_evidence_gap_cap_regularization: ClassEvidenceGapCapRegularizationConfig = (
         field(default_factory=ClassEvidenceGapCapRegularizationConfig)
     )
+    class_evidence_positive_gap_cap_regularization: ClassEvidencePositiveGapCapRegularizationConfig = field(
+        default_factory=ClassEvidencePositiveGapCapRegularizationConfig
+    )
+    interaction_gap_cap_regularization: InteractionGapCapRegularizationConfig = field(
+        default_factory=InteractionGapCapRegularizationConfig
+    )
     top_support_score_margin: TopSupportScoreMarginConfig = field(
         default_factory=TopSupportScoreMarginConfig
+    )
+    top_support_gap_min_constraint: TopSupportGapMinConstraintConfig = field(
+        default_factory=TopSupportGapMinConstraintConfig
     )
     branch_support_score_margin: BranchSupportScoreMarginConfig = field(
         default_factory=BranchSupportScoreMarginConfig
@@ -692,6 +775,9 @@ class LossConfig:
     )
     branch_path_dominance_constraint: BranchPathDominanceConstraintConfig = field(
         default_factory=BranchPathDominanceConstraintConfig
+    )
+    branch_support_disagreement_cap_regularization: BranchSupportDisagreementCapRegularizationConfig = field(
+        default_factory=BranchSupportDisagreementCapRegularizationConfig
     )
     class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
         default_factory=ClassGatedBranchLogitMarginConfig
@@ -917,9 +1003,19 @@ class JsonConfigLoader:
     _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_TARGETS = {"class_evidence_logits"}
     _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_MODES = {"negative_gap_hinge"}
     _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_REDUCTIONS = {"mean"}
+    _CLASS_EVIDENCE_POSITIVE_GAP_CAP_REGULARIZATION_TARGETS = {"class_evidence_logits"}
+    _CLASS_EVIDENCE_POSITIVE_GAP_CAP_REGULARIZATION_MODES = {"positive_gap_hinge"}
+    _CLASS_EVIDENCE_POSITIVE_GAP_CAP_REGULARIZATION_REDUCTIONS = {"mean"}
+    _INTERACTION_GAP_CAP_REGULARIZATION_TARGETS = {"class_evidence_interaction_scores"}
+    _INTERACTION_GAP_CAP_REGULARIZATION_MODES = {"absolute_gap_hinge"}
+    _INTERACTION_GAP_CAP_REGULARIZATION_REDUCTIONS = {"mean"}
     _TOP_SUPPORT_SCORE_MARGIN_TARGETS = {"class_evidence_top_support_scores"}
     _TOP_SUPPORT_SCORE_MARGIN_MODES = {"softplus_true_vs_hardest_negative"}
     _TOP_SUPPORT_SCORE_MARGIN_REDUCTIONS = {"mean"}
+    _TOP_SUPPORT_GAP_MIN_CONSTRAINT_TARGETS = {"class_evidence_top_support_scores"}
+    _TOP_SUPPORT_GAP_MIN_CONSTRAINT_MODES = {"support_conditioned_min_gap"}
+    _TOP_SUPPORT_GAP_MIN_CONSTRAINT_SUPPORT_SOURCES = {"top_branch_margin"}
+    _TOP_SUPPORT_GAP_MIN_CONSTRAINT_REDUCTIONS = {"mean"}
     _BRANCH_SUPPORT_SCORE_MARGIN_TARGETS = {"class_evidence_branch_support_scores"}
     _BRANCH_SUPPORT_SCORE_MARGIN_MODES = {"softplus_true_vs_hardest_negative"}
     _BRANCH_SUPPORT_SCORE_MARGIN_REDUCTIONS = {"mean"}
@@ -931,6 +1027,15 @@ class JsonConfigLoader:
     _BRANCH_PATH_DOMINANCE_MODES = {"branch_gap_preservation"}
     _BRANCH_PATH_DOMINANCE_SUPPORT_SOURCES = {"top_branch_margin"}
     _BRANCH_PATH_DOMINANCE_REDUCTIONS = {"mean"}
+    _BRANCH_SUPPORT_DISAGREEMENT_BRANCH_SOURCES = {
+        "class_evidence_branch_support_scores"
+    }
+    _BRANCH_SUPPORT_DISAGREEMENT_EMBEDDING_SOURCES = {"class_evidence_embedding_scores"}
+    _BRANCH_SUPPORT_DISAGREEMENT_INTERACTION_SOURCES = {
+        "class_evidence_interaction_scores"
+    }
+    _BRANCH_SUPPORT_DISAGREEMENT_MODES = {"branch_gap_conditioned_abs_gap_cap"}
+    _BRANCH_SUPPORT_DISAGREEMENT_REDUCTIONS = {"mean"}
     _MARGIN_REDUCTIONS = {"mean", "class_balanced_violating_mean"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_TARGETS = {"class_gated_branch_logits"}
     _CLASS_GATED_BRANCH_LOGIT_MARGIN_MODES = {"true_vs_hardest_negative"}
@@ -2180,6 +2285,13 @@ class JsonConfigLoader:
                 top_support_direct_path.relative_negative_scale_init,
                 top_support_direct_path.relative_negative_scale_max,
             ),
+            (
+                "residual_scale",
+                top_support_direct_path.residual_scale_mode,
+                top_support_direct_path.residual_scale_min,
+                top_support_direct_path.residual_scale_init,
+                top_support_direct_path.residual_scale_max,
+            ),
         ):
             JsonConfigLoader._validate_scale_bounds(
                 mode=mode,
@@ -2193,15 +2305,27 @@ class JsonConfigLoader:
                 ),
             )
         if (
-            not isinstance(top_support_direct_path.residual_scale_max, int | float)
-            or isinstance(top_support_direct_path.residual_scale_max, bool)
-            or float(top_support_direct_path.residual_scale_max) < 0.0
+            not isinstance(top_support_direct_path.residual_hidden_size, int)
+            or isinstance(top_support_direct_path.residual_hidden_size, bool)
+            or int(top_support_direct_path.residual_hidden_size) <= 0
         ):
             raise ValueError(
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "evidence_scorer.branch_direct_score.top_support_direct_path."
-                "residual_scale_max must be greater than or equal to zero"
+                "residual_hidden_size must be a positive integer"
             )
+        for field_name in ("residual_bound", "residual_temperature"):
+            value = getattr(top_support_direct_path, field_name)
+            if (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or float(value) <= 0.0
+            ):
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_direct_score.top_support_direct_path."
+                    f"{field_name} must be greater than zero"
+                )
         for prefix, mode, min_value, init_value, max_value in (
             (
                 "top_scale",
@@ -3064,6 +3188,25 @@ class JsonConfigLoader:
                 "train.loss.class_evidence_gap_cap_regularization."
                 "negative_gap_cap must be greater than zero"
             )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            gap_cap_cfg.negative_gap_cap_by_label,
+            field_name=(
+                "train.loss.class_evidence_gap_cap_regularization."
+                "negative_gap_cap_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=True,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            gap_cap_cfg.label_weight_by_label,
+            field_name=(
+                "train.loss.class_evidence_gap_cap_regularization.label_weight_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
         if not isinstance(gap_cap_cfg.warmup_epochs, int) or isinstance(
             gap_cap_cfg.warmup_epochs,
             bool,
@@ -3093,6 +3236,163 @@ class JsonConfigLoader:
                     "train.loss.class_evidence_gap_cap_regularization requires "
                     "model.encoder.architecture.evidence_pooling.type="
                     "'class_aware_branch_gated'"
+                )
+        positive_gap_cap_cfg = cfg.loss.class_evidence_positive_gap_cap_regularization
+        if not isinstance(positive_gap_cap_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.class_evidence_positive_gap_cap_regularization.enabled "
+                "must be a boolean"
+            )
+        if not isinstance(positive_gap_cap_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.class_evidence_positive_gap_cap_regularization."
+                "class_weighted must be a boolean"
+            )
+        if (
+            positive_gap_cap_cfg.target
+            not in JsonConfigLoader._CLASS_EVIDENCE_POSITIVE_GAP_CAP_REGULARIZATION_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_positive_gap_cap_regularization.target "
+                "must be 'class_evidence_logits'"
+            )
+        if (
+            positive_gap_cap_cfg.mode
+            not in JsonConfigLoader._CLASS_EVIDENCE_POSITIVE_GAP_CAP_REGULARIZATION_MODES
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_positive_gap_cap_regularization.mode "
+                "must be 'positive_gap_hinge'"
+            )
+        if (
+            positive_gap_cap_cfg.reduction
+            not in JsonConfigLoader._CLASS_EVIDENCE_POSITIVE_GAP_CAP_REGULARIZATION_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_positive_gap_cap_regularization."
+                "reduction must be 'mean'"
+            )
+        if (
+            not isinstance(positive_gap_cap_cfg.positive_gap_cap, int | float)
+            or isinstance(positive_gap_cap_cfg.positive_gap_cap, bool)
+            or float(positive_gap_cap_cfg.positive_gap_cap) <= 0.0
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_positive_gap_cap_regularization."
+                "positive_gap_cap must be greater than zero"
+            )
+        if not isinstance(
+            positive_gap_cap_cfg.warmup_epochs,
+            int,
+        ) or isinstance(positive_gap_cap_cfg.warmup_epochs, bool):
+            raise TypeError(
+                "train.loss.class_evidence_positive_gap_cap_regularization."
+                "warmup_epochs must be an integer"
+            )
+        if int(positive_gap_cap_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.class_evidence_positive_gap_cap_regularization."
+                "warmup_epochs must be non-negative"
+            )
+        if positive_gap_cap_cfg.enabled:
+            if positive_gap_cap_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.class_evidence_positive_gap_cap_regularization."
+                    "weight must be greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.class_evidence_positive_gap_cap_regularization "
+                    "is supported only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.class_evidence_positive_gap_cap_regularization "
+                    "requires model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+        interaction_gap_cap_cfg = cfg.loss.interaction_gap_cap_regularization
+        if not isinstance(interaction_gap_cap_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.interaction_gap_cap_regularization.enabled must be "
+                "a boolean"
+            )
+        if not isinstance(interaction_gap_cap_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.interaction_gap_cap_regularization.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            interaction_gap_cap_cfg.target
+            not in JsonConfigLoader._INTERACTION_GAP_CAP_REGULARIZATION_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.interaction_gap_cap_regularization.target must be "
+                "'class_evidence_interaction_scores'"
+            )
+        if (
+            interaction_gap_cap_cfg.mode
+            not in JsonConfigLoader._INTERACTION_GAP_CAP_REGULARIZATION_MODES
+        ):
+            raise ValueError(
+                "train.loss.interaction_gap_cap_regularization.mode must be "
+                "'absolute_gap_hinge'"
+            )
+        if (
+            interaction_gap_cap_cfg.reduction
+            not in JsonConfigLoader._INTERACTION_GAP_CAP_REGULARIZATION_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.interaction_gap_cap_regularization.reduction must be 'mean'"
+            )
+        if (
+            not isinstance(interaction_gap_cap_cfg.gap_cap, int | float)
+            or isinstance(interaction_gap_cap_cfg.gap_cap, bool)
+            or float(interaction_gap_cap_cfg.gap_cap) <= 0.0
+        ):
+            raise ValueError(
+                "train.loss.interaction_gap_cap_regularization.gap_cap must be "
+                "greater than zero"
+            )
+        if not isinstance(
+            interaction_gap_cap_cfg.warmup_epochs,
+            int,
+        ) or isinstance(interaction_gap_cap_cfg.warmup_epochs, bool):
+            raise TypeError(
+                "train.loss.interaction_gap_cap_regularization.warmup_epochs "
+                "must be an integer"
+            )
+        if int(interaction_gap_cap_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.interaction_gap_cap_regularization.warmup_epochs "
+                "must be non-negative"
+            )
+        if interaction_gap_cap_cfg.enabled:
+            if interaction_gap_cap_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.interaction_gap_cap_regularization.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.interaction_gap_cap_regularization is supported "
+                    "only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.interaction_gap_cap_regularization requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if evidence_scorer_type != "class_axis_attention":
+                raise ValueError(
+                    "train.loss.interaction_gap_cap_regularization requires "
+                    "class_gate.evidence_scorer.type='class_axis_attention'"
+                )
+            if not score_decomposition_enabled:
+                raise ValueError(
+                    "train.loss.interaction_gap_cap_regularization requires "
+                    "class_gate.evidence_scorer.score_decomposition.enabled=true"
                 )
         top_support_cfg = cfg.loss.top_support_score_margin
         if not isinstance(top_support_cfg.enabled, bool):
@@ -3208,6 +3508,145 @@ class JsonConfigLoader:
                 raise ValueError(
                     "train.loss.top_support_score_margin requires "
                     "class_gate.evidence_scorer.branch_direct_score.enabled=true"
+                )
+        top_support_min_cfg = cfg.loss.top_support_gap_min_constraint
+        if not isinstance(top_support_min_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.top_support_gap_min_constraint.enabled must be a boolean"
+            )
+        if not isinstance(top_support_min_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.top_support_gap_min_constraint.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            top_support_min_cfg.target
+            not in JsonConfigLoader._TOP_SUPPORT_GAP_MIN_CONSTRAINT_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.top_support_gap_min_constraint.target must be "
+                "'class_evidence_top_support_scores'"
+            )
+        if (
+            top_support_min_cfg.mode
+            not in JsonConfigLoader._TOP_SUPPORT_GAP_MIN_CONSTRAINT_MODES
+        ):
+            raise ValueError(
+                "train.loss.top_support_gap_min_constraint.mode must be "
+                "'support_conditioned_min_gap'"
+            )
+        if (
+            top_support_min_cfg.support_source
+            not in JsonConfigLoader._TOP_SUPPORT_GAP_MIN_CONSTRAINT_SUPPORT_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.top_support_gap_min_constraint.support_source must be "
+                "'top_branch_margin'"
+            )
+        if (
+            top_support_min_cfg.reduction
+            not in JsonConfigLoader._TOP_SUPPORT_GAP_MIN_CONSTRAINT_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.top_support_gap_min_constraint.reduction must be 'mean'"
+            )
+        for field_name, value, min_value, strict_min in (
+            (
+                "base_min_gap",
+                top_support_min_cfg.base_min_gap,
+                0.0,
+                False,
+            ),
+            (
+                "support_gain",
+                top_support_min_cfg.support_gain,
+                0.0,
+                False,
+            ),
+            (
+                "support_cap",
+                top_support_min_cfg.support_cap,
+                0.0,
+                True,
+            ),
+        ):
+            if (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or (
+                    float(value) <= min_value
+                    if strict_min
+                    else float(value) < min_value
+                )
+            ):
+                comparator = (
+                    "greater than" if strict_min else "greater than or equal to"
+                )
+                raise ValueError(
+                    f"train.loss.top_support_gap_min_constraint.{field_name} "
+                    f"must be {comparator} {min_value}"
+                )
+        if not isinstance(top_support_min_cfg.warmup_epochs, int) or isinstance(
+            top_support_min_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.top_support_gap_min_constraint.warmup_epochs "
+                "must be an integer"
+            )
+        if int(top_support_min_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.top_support_gap_min_constraint.warmup_epochs "
+                "must be non-negative"
+            )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            top_support_min_cfg.base_min_gap_by_label,
+            field_name=(
+                "train.loss.top_support_gap_min_constraint.base_min_gap_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        if top_support_min_cfg.enabled:
+            if top_support_min_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.top_support_gap_min_constraint.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.top_support_gap_min_constraint is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.top_support_gap_min_constraint requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if evidence_scorer_type != "class_axis_attention":
+                raise ValueError(
+                    "train.loss.top_support_gap_min_constraint requires "
+                    "class_gate.evidence_scorer.type='class_axis_attention'"
+                )
+            if not score_decomposition_enabled:
+                raise ValueError(
+                    "train.loss.top_support_gap_min_constraint requires "
+                    "class_gate.evidence_scorer.score_decomposition.enabled=true"
+                )
+            if not branch_direct_score_enabled:
+                raise ValueError(
+                    "train.loss.top_support_gap_min_constraint requires "
+                    "class_gate.evidence_scorer.branch_direct_score.enabled=true"
+                )
+            if (
+                top_support_min_cfg.class_weighted
+                and not cfg.loss.class_weighting.enabled
+            ):
+                raise ValueError(
+                    "train.loss.top_support_gap_min_constraint.class_weighted "
+                    "requires train.loss.class_weighting.enabled=true"
                 )
         branch_support_cfg = cfg.loss.branch_support_score_margin
         if not isinstance(branch_support_cfg.enabled, bool):
@@ -3433,6 +3872,24 @@ class JsonConfigLoader:
                 "train.loss.branch_path_dominance_constraint.allowed_drop must be "
                 "greater than or equal to zero"
             )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            branch_dominance_cfg.allowed_drop_by_label,
+            field_name=(
+                "train.loss.branch_path_dominance_constraint.allowed_drop_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            branch_dominance_cfg.label_weight_by_label,
+            field_name=(
+                "train.loss.branch_path_dominance_constraint.label_weight_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
         if not isinstance(branch_dominance_cfg.warmup_epochs, int) or isinstance(
             branch_dominance_cfg.warmup_epochs,
             bool,
@@ -3481,6 +3938,145 @@ class JsonConfigLoader:
                 raise ValueError(
                     "train.loss.branch_path_dominance_constraint requires "
                     "class_gate.evidence_scorer.score_decomposition.enabled=true"
+                )
+        disagreement_cap_cfg = cfg.loss.branch_support_disagreement_cap_regularization
+        if not isinstance(disagreement_cap_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.branch_support_disagreement_cap_regularization.enabled "
+                "must be a boolean"
+            )
+        if not isinstance(disagreement_cap_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.branch_support_disagreement_cap_regularization."
+                "class_weighted must be a boolean"
+            )
+        if (
+            disagreement_cap_cfg.branch_source
+            not in JsonConfigLoader._BRANCH_SUPPORT_DISAGREEMENT_BRANCH_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.branch_support_disagreement_cap_regularization."
+                "branch_source must be 'class_evidence_branch_support_scores'"
+            )
+        if (
+            disagreement_cap_cfg.embedding_source
+            not in JsonConfigLoader._BRANCH_SUPPORT_DISAGREEMENT_EMBEDDING_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.branch_support_disagreement_cap_regularization."
+                "embedding_source must be 'class_evidence_embedding_scores'"
+            )
+        if (
+            disagreement_cap_cfg.interaction_source
+            not in JsonConfigLoader._BRANCH_SUPPORT_DISAGREEMENT_INTERACTION_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.branch_support_disagreement_cap_regularization."
+                "interaction_source must be 'class_evidence_interaction_scores'"
+            )
+        if (
+            disagreement_cap_cfg.mode
+            not in JsonConfigLoader._BRANCH_SUPPORT_DISAGREEMENT_MODES
+        ):
+            raise ValueError(
+                "train.loss.branch_support_disagreement_cap_regularization.mode "
+                "must be 'branch_gap_conditioned_abs_gap_cap'"
+            )
+        if (
+            disagreement_cap_cfg.reduction
+            not in JsonConfigLoader._BRANCH_SUPPORT_DISAGREEMENT_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.branch_support_disagreement_cap_regularization."
+                "reduction must be 'mean'"
+            )
+        for field_name, value, min_value, strict_min in (
+            (
+                "disagreement_threshold",
+                disagreement_cap_cfg.disagreement_threshold,
+                0.0,
+                False,
+            ),
+            ("condition_gain", disagreement_cap_cfg.condition_gain, 0.0, False),
+            ("condition_cap", disagreement_cap_cfg.condition_cap, 0.0, True),
+            ("embedding_gap_cap", disagreement_cap_cfg.embedding_gap_cap, 0.0, True),
+            (
+                "interaction_gap_cap",
+                disagreement_cap_cfg.interaction_gap_cap,
+                0.0,
+                True,
+            ),
+        ):
+            if (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or (
+                    float(value) <= min_value
+                    if strict_min
+                    else float(value) < min_value
+                )
+            ):
+                comparator = (
+                    "greater than" if strict_min else "greater than or equal to"
+                )
+                raise ValueError(
+                    "train.loss.branch_support_disagreement_cap_regularization."
+                    f"{field_name} must be {comparator} {min_value}"
+                )
+        if not isinstance(disagreement_cap_cfg.warmup_epochs, int) or isinstance(
+            disagreement_cap_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.branch_support_disagreement_cap_regularization."
+                "warmup_epochs must be an integer"
+            )
+        if int(disagreement_cap_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.branch_support_disagreement_cap_regularization."
+                "warmup_epochs must be non-negative"
+            )
+        if disagreement_cap_cfg.enabled:
+            if disagreement_cap_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.branch_support_disagreement_cap_regularization."
+                    "weight must be greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.branch_support_disagreement_cap_regularization "
+                    "is supported only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.branch_support_disagreement_cap_regularization "
+                    "requires model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if evidence_scorer_type != "class_axis_attention":
+                raise ValueError(
+                    "train.loss.branch_support_disagreement_cap_regularization "
+                    "requires class_gate.evidence_scorer.type='class_axis_attention'"
+                )
+            if not score_decomposition_enabled:
+                raise ValueError(
+                    "train.loss.branch_support_disagreement_cap_regularization "
+                    "requires class_gate.evidence_scorer.score_decomposition."
+                    "enabled=true"
+                )
+            if not branch_direct_score_enabled:
+                raise ValueError(
+                    "train.loss.branch_support_disagreement_cap_regularization "
+                    "requires class_gate.evidence_scorer.branch_direct_score."
+                    "enabled=true"
+                )
+            if (
+                disagreement_cap_cfg.class_weighted
+                and not cfg.loss.class_weighting.enabled
+            ):
+                raise ValueError(
+                    "train.loss.branch_support_disagreement_cap_regularization."
+                    "class_weighted requires train.loss.class_weighting.enabled=true"
                 )
         if not isinstance(cfg.loss.class_gated_branch_logit_margin.enabled, bool):
             raise ValueError(
@@ -4583,6 +5179,24 @@ class JsonConfigLoader:
                 "requires train.loss.class_weighting.enabled=true"
             )
         if (
+            cfg.loss.class_evidence_positive_gap_cap_regularization.enabled
+            and cfg.loss.class_evidence_positive_gap_cap_regularization.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.class_evidence_positive_gap_cap_regularization."
+                "class_weighted requires train.loss.class_weighting.enabled=true"
+            )
+        if (
+            cfg.loss.interaction_gap_cap_regularization.enabled
+            and cfg.loss.interaction_gap_cap_regularization.class_weighted
+            and not cfg.loss.class_weighting.enabled
+        ):
+            raise ValueError(
+                "train.loss.interaction_gap_cap_regularization.class_weighted "
+                "requires train.loss.class_weighting.enabled=true"
+            )
+        if (
             cfg.loss.branch_direct_score_margin.enabled
             and cfg.loss.branch_direct_score_margin.class_weighted
             and not cfg.loss.class_weighting.enabled
@@ -5202,9 +5816,31 @@ class JsonConfigLoader:
         loss["class_evidence_margin"] = ClassEvidenceMarginConfig(
             **class_evidence_margin
         )
+        class_evidence_gap_cap = dict(
+            loss.get("class_evidence_gap_cap_regularization", {})
+        )
+        class_evidence_gap_cap["negative_gap_cap_by_label"] = dict(
+            class_evidence_gap_cap.get("negative_gap_cap_by_label", {})
+        )
+        class_evidence_gap_cap["label_weight_by_label"] = dict(
+            class_evidence_gap_cap.get("label_weight_by_label", {})
+        )
         loss["class_evidence_gap_cap_regularization"] = (
-            ClassEvidenceGapCapRegularizationConfig(
-                **dict(loss.get("class_evidence_gap_cap_regularization", {}))
+            ClassEvidenceGapCapRegularizationConfig(**class_evidence_gap_cap)
+        )
+        loss["class_evidence_positive_gap_cap_regularization"] = (
+            ClassEvidencePositiveGapCapRegularizationConfig(
+                **dict(
+                    loss.get(
+                        "class_evidence_positive_gap_cap_regularization",
+                        {},
+                    )
+                )
+            )
+        )
+        loss["interaction_gap_cap_regularization"] = (
+            InteractionGapCapRegularizationConfig(
+                **dict(loss.get("interaction_gap_cap_regularization", {}))
             )
         )
         top_support_score_margin = dict(loss.get("top_support_score_margin", {}))
@@ -5227,6 +5863,15 @@ class JsonConfigLoader:
         loss["top_support_score_margin"] = TopSupportScoreMarginConfig(
             **top_support_score_margin
         )
+        top_support_gap_min_constraint = dict(
+            loss.get("top_support_gap_min_constraint", {})
+        )
+        top_support_gap_min_constraint["base_min_gap_by_label"] = dict(
+            top_support_gap_min_constraint.get("base_min_gap_by_label", {})
+        )
+        loss["top_support_gap_min_constraint"] = TopSupportGapMinConstraintConfig(
+            **top_support_gap_min_constraint
+        )
         loss["branch_support_score_margin"] = BranchSupportScoreMarginConfig(
             **dict(loss.get("branch_support_score_margin", {}))
         )
@@ -5234,11 +5879,27 @@ class JsonConfigLoader:
             **dict(loss.get("branch_direct_score_margin", {}))
         )
         branch_path_dominance = dict(loss.get("branch_path_dominance_constraint", {}))
+        branch_path_dominance["allowed_drop_by_label"] = dict(
+            branch_path_dominance.get("allowed_drop_by_label", {})
+        )
+        branch_path_dominance["label_weight_by_label"] = dict(
+            branch_path_dominance.get("label_weight_by_label", {})
+        )
         branch_path_dominance["support_weighting"] = MarginSupportWeightingConfig(
             **dict(branch_path_dominance.get("support_weighting", {}))
         )
         loss["branch_path_dominance_constraint"] = BranchPathDominanceConstraintConfig(
             **branch_path_dominance
+        )
+        loss["branch_support_disagreement_cap_regularization"] = (
+            BranchSupportDisagreementCapRegularizationConfig(
+                **dict(
+                    loss.get(
+                        "branch_support_disagreement_cap_regularization",
+                        {},
+                    )
+                )
+            )
         )
         loss["class_gated_branch_logit_margin"] = ClassGatedBranchLogitMarginConfig(
             **dict(loss.get("class_gated_branch_logit_margin", {}))

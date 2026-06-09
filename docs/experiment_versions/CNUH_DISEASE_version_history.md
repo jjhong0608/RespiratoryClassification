@@ -515,3 +515,355 @@ top_branch_margin
 - final combiner는 여전히 evidence gap을 크게 뒤집지 않는다.
 
 주의할 점은 score bounding이 너무 강하면 underfit이 생길 수 있다는 것이다. 따라서 `embedding bound=8.0`, `interaction bound=6.0`은 첫 실험값이며, 후속 분석에서 `bounded_embedding_score_gap`과 `bounded_interaction_score_gap`이 너무 작게 묶이는지 확인해야 한다.
+
+## VER12 -> VER13
+
+### 목적
+
+`CNUH_DISEASE_VER13`은 `VER12`에서 추가한 label-agnostic evidence-path 보정이 모든 label의 난이도 차이를 충분히 반영하지 못한 문제를 보완하는 실험이다.
+
+`VER12` diagnostics에서 확인한 병목은 두 가지였다.
+
+- Airway hard sample에서는 `top_branch_margin -> top_support_score -> branch_support_score -> class_evidence_logits` chain이 계속 약해졌다.
+- Lung/Normal sample에서는 `class_evidence_logits`, 특히 embedding/interaction path가 과도하게 커져 validation loss를 키웠다.
+
+따라서 `VER13`은 구조 자체는 `VER12`를 유지하되, 다음 원칙을 적용한다.
+
+- Airway branch/top-support hard sample에는 `VER11`에서 효과가 있었던 label-aware 압력을 복원한다.
+- `branch_path_dominance_constraint`와 `class_evidence_gap_cap_regularization`은 label별 cap/drop/weight를 지원한다.
+- Lung/Normal overconfidence는 positive evidence gap cap과 interaction gap cap으로 제한한다.
+- final combiner, bounded zero-mean residual, confidence-aware gate는 유지한다.
+
+### 핵심 변경 요약
+
+#### 1. Airway top-support / top-branch 강화 복원
+
+`top_support_score_margin.label_weight_by_label`은 Airway만 `2.0`으로 복원했다.
+
+```json
+"label_weight_by_label": {
+  "Normal": 1.0,
+  "Lung_Parenchymal": 1.0,
+  "Airway": 2.0
+}
+```
+
+`top_branch_margin.phase_weight_schedule`도 다시 활성화했다. epoch 21부터 31까지 Airway multiplier가 `1.0 -> 2.0`으로 ramp되고, Normal/Lung은 `1.0`으로 유지된다.
+
+이 설정은 branch teacher 자체가 약한 Airway hard sample을 더 일찍 보정하기 위한 것이다.
+
+#### 2. Branch dominance label-aware 확장
+
+`branch_path_dominance_constraint`는 다음 label-aware 값을 사용한다.
+
+```json
+"label_weight_by_label": {
+  "Normal": 0.75,
+  "Lung_Parenchymal": 0.75,
+  "Airway": 1.5
+},
+"allowed_drop_by_label": {
+  "Normal": 0.5,
+  "Lung_Parenchymal": 0.75,
+  "Airway": 0.3
+}
+```
+
+해석은 다음과 같다.
+
+- Airway는 branch support gap이 evidence gap으로 전달되어야 하는 압력을 더 크게 둔다.
+- Airway는 `allowed_drop=0.3`으로 더 엄격하게 둔다.
+- Lung은 이미 overconfidence가 강하게 발생하므로 `allowed_drop=0.75`, label multiplier `0.75`로 완화한다.
+
+diagnostics에서는 다음 값을 같이 확인한다.
+
+```text
+branch_path_dominance_branch_gap
+branch_path_dominance_evidence_gap
+branch_path_dominance_allowed_drop_effective
+branch_path_dominance_label_multiplier
+```
+
+#### 3. Negative evidence gap cap label-aware 확장
+
+`class_evidence_gap_cap_regularization`은 wrong overconfidence, 즉 true class evidence gap이 너무 음수로 내려가는 경우를 제한한다.
+
+`VER13`에서는 Airway를 더 엄격하게 둔다.
+
+```json
+"negative_gap_cap_by_label": {
+  "Normal": 3.0,
+  "Lung_Parenchymal": 3.0,
+  "Airway": 2.5
+},
+"label_weight_by_label": {
+  "Normal": 1.0,
+  "Lung_Parenchymal": 1.0,
+  "Airway": 1.5
+}
+```
+
+이 설정은 Airway가 wrong class에 강하게 눌리는 sample의 penalty를 더 빨리 키우기 위한 것이다.
+
+#### 4. Positive evidence gap cap 추가
+
+새 loss `class_evidence_positive_gap_cap_regularization`을 추가했다.
+
+```text
+penalty = relu(evidence_gap - positive_gap_cap)
+```
+
+첫 실험값은 다음이다.
+
+```json
+"weight": 0.01,
+"positive_gap_cap": 8.0,
+"class_weighted": false
+```
+
+이 loss는 맞은 sample에서도 evidence gap이 지나치게 커져 validation loss와 calibration을 악화시키는 현상을 줄이는 보조 regularizer다.
+
+#### 5. Interaction gap cap 추가
+
+새 loss `interaction_gap_cap_regularization`을 추가했다.
+
+```text
+penalty = relu(abs(interaction_gap) - gap_cap)
+```
+
+첫 실험값은 다음이다.
+
+```json
+"weight": 0.01,
+"gap_cap": 6.0,
+"class_weighted": false
+```
+
+이 loss는 `interaction_score`가 branch support를 안정적으로 보정하기보다 이미 생긴 방향을 과도하게 증폭하는 경우를 제한한다.
+
+### Code Impact
+
+이번 변경은 다음 위치에 영향을 준다.
+
+- `src/utils/config.py`
+  - label-aware cap/drop/weight mapping validation
+  - `class_evidence_positive_gap_cap_regularization` schema
+  - `interaction_gap_cap_regularization` schema
+- `src/cli/training.py`, `src/cli/cv.py`
+  - label name mapping을 class-index tuple로 resolve
+- `src/training/trainer.py`
+  - label-aware negative gap cap
+  - label-aware branch dominance
+  - positive gap cap loss
+  - interaction gap cap loss
+  - diagnostics/history/checkpoint extra state 확장
+- `src/training/epoch_logging.py`
+  - `positive_gap_cap`, `interaction_gap_cap` epoch summary 출력
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER13`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver29`
+
+### Diagnostics Checkpoints
+
+`VER13` 분석에서는 다음 chain을 label별로 확인한다.
+
+```text
+top_branch_margin
+-> top_support_score_gap
+-> branch_direct_score_gap
+-> branch_support_score_gap
+-> branch_path_dominance_allowed_drop_effective
+-> class_evidence_gap
+-> class_evidence_gap_cap_effective_cap
+-> class_evidence_positive_gap_cap_penalty
+-> interaction_gap_cap_penalty
+-> final_gap
+```
+
+성공 기준은 다음이다.
+
+- Airway hard sample에서 `top_support_score_gap`과 `branch_support_score_gap`이 덜 음수로 내려간다.
+- Airway error sample에서 `branch_path_dominance_penalty`와 `class_evidence_gap_cap_penalty`가 실제로 켜진다.
+- Lung/Normal correct sample에서 `class_evidence_positive_gap_cap_penalty`가 extreme evidence gap만 제한한다.
+- `interaction_gap_cap_penalty`가 interaction path의 과도한 증폭 sample에 선택적으로 켜진다.
+- final combiner는 여전히 evidence gap을 크게 뒤집지 않는다.
+
+주의할 점은 label-aware 압력을 되살렸기 때문에 Airway recall은 좋아질 수 있지만 Normal false positive가 증가할 수 있다는 것이다. 따라서 `macro_f1`뿐 아니라 Normal specificity와 Airway recall을 함께 확인해야 한다.
+
+## VER13 -> VER14
+
+### 목적
+
+`CNUH_DISEASE_VER14`는 `VER13`에서 확인된 남은 병목을 더 직접적으로 보정하는 실험이다.
+
+`VER13`의 핵심 관찰은 loss pressure가 부족한 것이 아니라, `top_branch_margin`이 true class를 지지하는 sample에서도 `top_support_score_gap`이 음수로 뒤집히는 경우가 남는다는 점이었다. 특히 Airway hard sample에서는 다음 chain이 계속 병목으로 남았다.
+
+```text
+top_branch_margin
+-> top_support_score_gap
+-> branch_direct_score_gap
+-> branch_support_score_gap
+-> class_evidence_gap
+-> final_gap
+```
+
+즉, `top_support_score_margin`, `branch_path_dominance_constraint`, `class_evidence_gap_cap_regularization`이 실제로 켜져도, `top_support_score` 자체가 branch teacher의 sign을 충분히 보존하지 못하면 evidence path는 여전히 Normal 또는 다른 negative class로 기울 수 있다.
+
+따라서 `VER14`는 다음 세 가지를 결정 사항으로 둔다.
+
+- `top_support_score`를 learned correction 중심이 아니라 teacher-derived monotonic direct score 중심으로 바꾼다.
+- `top_support_score_margin`보다 더 직접적으로 `top_support_gap`의 sign 또는 최소 gap을 강제한다.
+- embedding/interaction path는 단순 cap이 아니라 branch-support disagreement가 있을 때만 강하게 제한한다.
+
+### 핵심 변경 방향
+
+#### 1. Teacher-derived monotonic top support 강화
+
+`top_support_score`는 `top_raw`와 `top_relative`가 만드는 branch teacher 신호를 primary path로 사용한다.
+
+적용 수식은 다음과 같다.
+
+```text
+direct_top_score[c] =
+  raw_scale * top_raw[c]
+  + relative_positive_scale * softplus(top_relative[c])
+  - relative_negative_scale * softplus(-top_relative[c])
+  + class_bias[c]
+
+top_support_score[c] =
+  direct_top_score[c]
+  + top_support_residual_scale * bounded_top_support_residual[c]
+```
+
+해석은 다음과 같다.
+
+- `top_raw[c]`가 높으면 해당 class의 top support가 구조적으로 커져야 한다.
+- `top_relative[c] > 0`이면 해당 class가 다른 class보다 top-branch support에서 우세하므로 support가 더 커져야 한다.
+- `top_relative[c] < 0`이면 해당 class가 경쟁에서 밀리므로 support가 낮아져야 한다.
+- learned residual은 작은 보정만 담당하며, direct teacher score의 sign을 쉽게 뒤집지 못해야 한다.
+
+이를 위해 `a`, `b`, `c`는 non-negative parameter로 두고, learned residual은 bounded correction으로 제한한다. `VER13`에서 `top_margin > 0`인데도 `top_support_gap < 0`이 남았기 때문에, `VER14`에서는 top support의 기본 sign을 learned residual이 아니라 branch teacher가 결정하도록 만든다.
+
+구현에서는 direct top score가 tanh 변환 후 feature가 아니라 raw `class_top_branch_margin_features`와 raw relative top support를 사용한다. 반면 bounded residual correction, gated support, class-axis attention은 기존 transformed branch feature path를 유지한다.
+
+#### 2. `top_support_gap` sign 직접 강제
+
+기존 `top_support_score_margin`은 softplus true-vs-hardest-negative ranking이다. 안정적이지만, `top_support_score_margin_penalty`가 큰데도 gap sign이 바뀌지 않는 경우에는 너무 부드럽다.
+
+따라서 `VER14`에서는 support-conditioned 또는 label-aware hinge를 추가한다.
+
+적용 수식은 다음과 같다.
+
+```text
+top_support_gap =
+  top_support_score[y]
+  - max(top_support_score[j != y])
+
+target_min_gap =
+  base_min_gap_by_label[y]
+  + support_gain * clamp(relu(top_branch_margin[y]), 0, support_cap)
+
+loss =
+  relu(target_min_gap - top_support_gap)
+```
+
+이 loss의 목적은 `top_branch_margin`이 true class를 충분히 지지하는 sample에서 `top_support_gap`이 최소한 0 또는 label별 최소 gap 이상이 되도록 강제하는 것이다.
+
+중요한 점은 이 변경이 Airway-only hardcoding이 아니라는 것이다. 구조는 모든 label에 공통으로 적용하고, label별 난이도 차이는 `base_min_gap_by_label` 또는 multiplier config로 조절한다.
+
+#### 3. Branch-support disagreement conditioned embedding/interaction cap
+
+`VER13`에서 `class_evidence_positive_gap_cap_regularization`과 `interaction_gap_cap_regularization`을 추가했지만, 첫 실험 weight는 `0.01`이었다. 단순히 weight를 올리면 correct sample의 큰 positive gap까지 눌러 underfit 위험이 있다.
+
+따라서 `VER14`에서는 embedding/interaction path를 항상 제한하지 않고, branch path와 disagreement가 있을 때만 강하게 제한한다.
+
+적용 수식은 다음과 같다.
+
+```text
+branch_support_disagreement =
+  1 + condition_gain
+      * clamp(relu(disagreement_threshold - branch_support_gap), 0, condition_cap)
+
+embedding_cap_loss =
+  branch_support_disagreement
+  * relu(abs(embedding_gap) - embedding_gap_cap)
+
+interaction_cap_loss =
+  branch_support_disagreement
+  * relu(abs(interaction_gap) - interaction_gap_cap)
+```
+
+또는 더 직접적으로 다음 조건을 사용할 수 있다.
+
+```text
+if top_support_gap < threshold or branch_support_gap < threshold:
+  penalize large embedding_gap
+  penalize large interaction_gap
+```
+
+이 방식은 branch support가 이미 좋은 correct sample은 덜 건드리고, branch path가 약하거나 반대 방향인데 embedding/interaction이 큰 확신을 만드는 sample만 제한한다.
+
+### Code Impact
+
+이번 변경은 다음 위치에 영향을 준다.
+
+- `src/utils/config.py`
+  - monotonic top-support direct path config 확장
+  - `top_support_gap_min_constraint` 또는 equivalent hinge loss schema 추가
+  - branch-support-disagreement conditioned cap schema 추가
+- `src/models/multiscale_rdt_ast.py`
+  - `top_support_score` 계산을 teacher-derived direct score 중심으로 재구성
+  - learned residual correction이 direct score를 과도하게 뒤집지 못하도록 bounded residual scale 적용
+  - diagnostics용 `direct_top_score`, `top_support_residual_score`, scale/weight field 출력
+- `src/training/trainer.py`
+  - `top_support_gap` hinge loss 추가
+  - embedding/interaction conditioned cap loss 추가
+  - 기존 `top_support_score_margin`, `branch_path_dominance_constraint`, `class_evidence_gap_cap_regularization`과의 loss ordering 정리
+- `src/evaluation/diagnostics.py`
+  - `direct_top_score_gap`
+  - `top_support_residual_gap`
+  - `top_support_gap_min_target`
+  - `top_support_gap_min_penalty`
+  - `branch_support_disagreement`
+  - `embedding_disagreement_cap_penalty`
+  - `interaction_disagreement_cap_penalty`
+- `src/training/epoch_logging.py`
+  - 새 hinge/cap loss의 epoch raw/loss summary 출력
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER14`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver30`
+
+### Diagnostics Checkpoints
+
+`VER14` 분석에서는 다음 chain을 대표 epoch과 label별로 확인한다.
+
+```text
+top_branch_margin
+-> direct_top_score_gap
+-> top_support_residual_gap
+-> top_support_score_gap
+-> branch_direct_score_gap
+-> branch_support_score_gap
+-> branch_support_disagreement
+-> bounded_embedding_score_gap
+-> bounded_interaction_score_gap
+-> class_evidence_gap
+-> final_gap
+```
+
+성공 기준은 다음이다.
+
+- `top_branch_margin > 0`인 sample에서 `top_support_score_gap < 0`인 비율이 줄어든다.
+- `direct_top_score_gap`이 양수인데 learned residual 때문에 `top_support_score_gap`이 음수로 뒤집히는 case가 줄어든다.
+- `top_support_gap_min_penalty`가 학습 후반으로 갈수록 줄어든다.
+- `branch_support_disagreement`가 큰 sample에서만 embedding/interaction conditioned cap이 선택적으로 켜진다.
+- embedding/interaction cap이 correct high-confidence sample 전체를 누르지 않는다.
+- final combiner는 여전히 `class_evidence_gap`을 크게 뒤집지 않는다.
+
+### 주의점
+
+`VER14`는 loss weight를 단순히 키우는 실험이 아니다. `VER13`에서 이미 penalty가 커도 `top_support_gap` sign이 해결되지 않는 현상이 확인되었기 때문에, primary 수정은 top-support score 구조 자체에 있다.
+
+또한 label-aware 설정은 유지할 수 있지만, 핵심 구조는 label-agnostic이어야 한다. 즉 Airway만 따로 처리하는 것이 아니라 모든 label에 동일한 teacher-derived top-support path와 disagreement-conditioned cap을 적용하고, label별 난이도는 config multiplier와 min-gap 값으로만 조절한다.

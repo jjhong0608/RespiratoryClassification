@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "CNUH_DISEASE_VER12",
+    "name": "CNUH_DISEASE_VER14",
     "task": "Normal_vs_LungParenchymal_vs_Airway",
     "mode": "clip",
     "seed": 1337,
@@ -224,8 +224,15 @@
                   "relative_positive_scale_init": 0.5,
                   "relative_positive_scale_max": 1.5,
                   "relative_negative_scale_mode": "sigmoid_max",
+                  "relative_negative_scale_min": 0.0,
                   "relative_negative_scale_init": 0.1,
                   "relative_negative_scale_max": 0.5,
+                  "residual_hidden_size": 64,
+                  "residual_scale_mode": "sigmoid_max",
+                  "residual_scale_min": 0.0,
+                  "residual_scale_init": 0.05,
+                  "residual_bound": 1.0,
+                  "residual_temperature": 1.0,
                   "residual_scale_max": 0.3
                 },
                 "gate_reliability_mixture": {
@@ -428,7 +435,37 @@
         "target": "class_evidence_logits",
         "mode": "negative_gap_hinge",
         "negative_gap_cap": 3.0,
+        "negative_gap_cap_by_label": {
+          "Normal": 3.0,
+          "Lung_Parenchymal": 3.0,
+          "Airway": 2.5
+        },
+        "label_weight_by_label": {
+          "Normal": 1.0,
+          "Lung_Parenchymal": 1.0,
+          "Airway": 1.5
+        },
         "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
+      "class_evidence_positive_gap_cap_regularization": {
+        "enabled": true,
+        "weight": 0.01,
+        "target": "class_evidence_logits",
+        "mode": "positive_gap_hinge",
+        "positive_gap_cap": 8.0,
+        "class_weighted": false,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
+      "interaction_gap_cap_regularization": {
+        "enabled": true,
+        "weight": 0.01,
+        "target": "class_evidence_interaction_scores",
+        "mode": "absolute_gap_hinge",
+        "gap_cap": 6.0,
+        "class_weighted": false,
         "reduction": "mean",
         "warmup_epochs": 10
       },
@@ -454,7 +491,7 @@
         "label_weight_by_label": {
           "Normal": 1.0,
           "Lung_Parenchymal": 1.0,
-          "Airway": 1.0
+          "Airway": 2.0
         },
         "support_conditioned_multiplier": {
           "enabled": true,
@@ -470,6 +507,24 @@
           "gain": 1.0,
           "cap": 3.0
         }
+      },
+      "top_support_gap_min_constraint": {
+        "enabled": true,
+        "weight": 0.05,
+        "target": "class_evidence_top_support_scores",
+        "mode": "support_conditioned_min_gap",
+        "base_min_gap": 0.0,
+        "base_min_gap_by_label": {
+          "Normal": 0.0,
+          "Lung_Parenchymal": 0.0,
+          "Airway": 0.2
+        },
+        "support_source": "top_branch_margin",
+        "support_gain": 0.5,
+        "support_cap": 2.0,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
       },
       "branch_direct_score_margin": {
         "enabled": true,
@@ -488,6 +543,16 @@
         "target": "class_evidence_logits",
         "mode": "branch_gap_preservation",
         "allowed_drop": 0.5,
+        "allowed_drop_by_label": {
+          "Normal": 0.5,
+          "Lung_Parenchymal": 0.75,
+          "Airway": 0.3
+        },
+        "label_weight_by_label": {
+          "Normal": 0.75,
+          "Lung_Parenchymal": 0.75,
+          "Airway": 1.5
+        },
         "support_source": "top_branch_margin",
         "support_weighting": {
           "enabled": true,
@@ -497,6 +562,22 @@
           "cap": 3.0
         },
         "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
+      "branch_support_disagreement_cap_regularization": {
+        "enabled": true,
+        "weight": 0.02,
+        "branch_source": "class_evidence_branch_support_scores",
+        "embedding_source": "class_evidence_embedding_scores",
+        "interaction_source": "class_evidence_interaction_scores",
+        "mode": "branch_gap_conditioned_abs_gap_cap",
+        "disagreement_threshold": 0.0,
+        "condition_gain": 1.0,
+        "condition_cap": 3.0,
+        "embedding_gap_cap": 6.0,
+        "interaction_gap_cap": 4.0,
+        "class_weighted": false,
         "reduction": "mean",
         "warmup_epochs": 10
       },
@@ -697,7 +778,7 @@
           }
         },
         "phase_weight_schedule": {
-          "enabled": false,
+          "enabled": true,
           "start_epoch": 21,
           "end_epoch": 31,
           "start_multiplier_by_label": {
@@ -708,7 +789,7 @@
           "label_multiplier_by_label": {
             "Normal": 1.0,
             "Lung_Parenchymal": 1.0,
-            "Airway": 1.0
+            "Airway": 2.0
           }
         },
         "hardness_weighting": {

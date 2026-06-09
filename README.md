@@ -311,7 +311,14 @@ class_evidence_logits = embedding_score + branch_scale * branch_support_score + 
 When `branch_direct_score.enabled=true`, the branch-support term is split again:
 
 ```text
-top_support_score = top_raw_existential_score + small_relative_correction
+direct_top_score =
+  raw_scale * top_raw
+  + relative_positive_scale * softplus(top_relative)
+  - relative_negative_scale * softplus(-top_relative)
+  + class_bias
+top_support_score =
+  direct_top_score
+  + top_support_residual_scale * bounded_top_support_residual
 gated_support_score = positive_weight(gated_raw, gated_relative) + class_bias
 gate_regret = relu(top_margin - gated_margin - tolerance)
 gate_reliability = exp(-gate_regret / temperature).detach()
@@ -322,15 +329,20 @@ branch_support_score = branch_direct_score + residual_scale * branch_residual_sc
 
 The top path is gate-independent, so it can preserve branch evidence when the
 class gate selects the wrong branch. In
-`top_support_mode="raw_existential_plus_relative_correction"`, the top raw
-support is the primary existential signal and top-relative support is only a
-small correction; negative relative support is clipped and scaled separately so
-it cannot dominate the top path. The gated path remains useful when the gate is
-reliable, but reliability attenuates it when top support is stronger than the
-gate-selected support. The positive weights are class-shared, while top/gated
-biases are class-specific. Diagnostics should be read in this order:
-`top_support_score_gap -> gated_support_score_gap -> branch_direct_score_gap ->
-branch_support_score_gap -> class_evidence_gap -> final_gap`.
+`top_support_direct_path.mode="monotonic_raw_relative"`, top raw support and
+positive top-relative support can only raise the direct top score, while
+negative top-relative support lowers it through a separate non-negative scale.
+This direct top path uses the untransformed top-branch teacher features; the
+bounded top-support residual, gated support, and attention path continue to use
+the configured transformed branch features. The learned top-support residual is
+bounded and small, so it can calibrate the teacher-derived score without freely
+reversing its sign. The gated path remains useful when the gate is reliable, but
+reliability attenuates it when top support is stronger than gate-selected
+support. The positive weights are class-shared, while top/gated biases are
+class-specific. Diagnostics should be read in this order: `top_branch_margin ->
+direct_top_score_gap -> top_support_residual_gap -> top_support_score_gap ->
+gated_support_score_gap -> branch_direct_score_gap -> branch_support_score_gap
+-> class_evidence_gap -> final_gap`.
 
 This keeps class-axis attention as the interaction scorer while making direct
 branch-support contribution visible in diagnostics.
@@ -438,10 +450,64 @@ the top-support anchor and are separate from the global class weighting scheme.
 when the top-support true-vs-hardest-negative gap is negative, making hard
 top-support errors contribute more without changing the branch/gate losses.
 
+`top_support_gap_min_constraint` is a harder companion to
+`top_support_score_margin`. It enforces a support-conditioned minimum gap on
+`class_evidence_top_support_scores`:
+
+```text
+target_min_gap =
+  base_min_gap_by_label[true]
+  + support_gain * clamp(relu(top_branch_margin[true]), max=support_cap)
+loss = relu(target_min_gap - top_support_gap)
+```
+
+Use it when diagnostics show `top_branch_margin` supports the true class but
+`top_support_score_gap` remains negative. The effective `top_support_gap_min_target`
+and per-sample `top_support_gap_min_penalty` are written to diagnostics.
+
 `class_evidence_gap_cap_regularization` limits overconfident wrong evidence
 rankings with a label-agnostic hinge on `class_evidence_logits`: `relu(-gap -
 negative_gap_cap)`. It is intended as a stabilizer for large negative evidence
 gaps, not as a replacement for the true-label evidence anchors.
+Recent disease configs can make this stabilizer label-aware through
+`negative_gap_cap_by_label` and `label_weight_by_label`. The effective cap and
+label multiplier are written to diagnostics so Airway hard-sample pressure can
+be separated from Lung/Normal stabilization pressure.
+
+`class_evidence_positive_gap_cap_regularization` limits excessive positive
+evidence gaps with `relu(gap - positive_gap_cap)`. It is label-agnostic in the
+current configs and is meant to reduce overconfident true-class evidence logits
+that inflate validation loss even when the prediction is correct.
+
+`interaction_gap_cap_regularization` applies an absolute gap cap to
+`class_evidence_interaction_scores`: `relu(abs(interaction_gap) - gap_cap)`.
+This keeps the interaction path from amplifying already-formed class
+preferences beyond the branch-support signal. It does not change the forward
+architecture; it is a trainer-side regularizer.
+
+`branch_support_disagreement_cap_regularization` is a conditional version of
+embedding/interaction gap capping. It keeps correct high-confidence samples
+mostly untouched, but increases the cap penalty when the branch-support gap is
+weak or points against the true class:
+
+```text
+disagreement = 1 + gain * clamp(relu(threshold - branch_support_gap), max=cap)
+loss =
+  disagreement * relu(abs(embedding_gap) - embedding_gap_cap)
+  + disagreement * relu(abs(interaction_gap) - interaction_gap_cap)
+```
+
+Diagnostics store `branch_support_disagreement`,
+`embedding_disagreement_cap_penalty`, and
+`interaction_disagreement_cap_penalty`.
+
+`branch_path_dominance_constraint` preserves the direction of the branch support
+path when it should already support the true class. It compares the
+true-vs-hardest-negative gap of `class_evidence_branch_support_scores` with the
+gap of `class_evidence_logits`, allowing a configurable drop before applying a
+hinge penalty. Recent disease configs can tune `allowed_drop_by_label` and
+`label_weight_by_label` to reflect label-specific difficulty while keeping the
+same loss formula.
 
 `branch_direct_score_margin` applies the same true-label anchored softplus
 ranking loss to `class_evidence_branch_direct_scores`. Use it when branch/gate
@@ -589,8 +655,11 @@ Important class-aware fields include:
 - `class_evidence_scorer_branch_features`: transformed branch features used by the evidence scorer.
 - `class_evidence_embedding_scores`: embedding-only component of decomposed evidence logits.
 - `class_evidence_top_support_scores`: gate-independent direct score from top branch support features.
+- `class_evidence_direct_top_scores`: teacher-derived monotonic top score before bounded top-support residual correction.
+- `class_evidence_top_support_residual_scores`: bounded learned correction added to the direct top score.
 - `class_evidence_top_raw_existential_scores`: primary top raw support score before relative correction.
 - `class_evidence_top_relative_correction_scores`: small correction from top-relative support.
+- `class_evidence_top_support_direct_residual_scale`: scale applied to the bounded top-support residual.
 - `class_evidence_top_relative_positive`, `class_evidence_top_relative_negative`: split relative support features used for diagnostics.
 - `class_evidence_gated_support_scores`: gate-conditioned direct score from class-gated branch support features.
 - `class_evidence_gate_reliability`: reliability multiplier applied to gated support.
@@ -610,6 +679,8 @@ Important class-aware fields include:
 - `class_evidence_interaction_scale_multiplier`: epoch schedule multiplier applied to interaction score.
 - `class_evidence_interaction_effective_scale`: scheduled scale actually applied to interaction score.
 - `class_evidence_embedding_score_gap`, `class_evidence_branch_support_score_gap`, `class_evidence_interaction_score_gap`: true-vs-hardest-negative component gaps.
+- `direct_top_score_gap`, `top_support_residual_gap`, `top_support_gap_min_target`, `top_support_gap_min_penalty`: top-support teacher path and min-gap constraint diagnostics.
+- `branch_support_disagreement`, `embedding_disagreement_cap_penalty`, `interaction_disagreement_cap_penalty`: disagreement-conditioned cap diagnostics.
 - `global_residual_gate`: class-wise residual correction gate.
 - `global_residual_learned_gate`: learned correction gate before evidence-confidence damping.
 - `global_residual_evidence_confidence`: class-wise confidence computed from evidence gaps.

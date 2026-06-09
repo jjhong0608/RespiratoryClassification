@@ -28,6 +28,7 @@ from src.models.model import (
     ClassGateResidualConfidenceAwareGateConfig,
     ClassGateScoreDecompositionConfig,
     ClassGateTopRelativeCorrectionConfig,
+    ClassGateTopSupportDirectPathConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -1056,6 +1057,14 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
                                     negative_clip=1.0,
                                 )
                             ),
+                            top_support_direct_path=(
+                                ClassGateTopSupportDirectPathConfig(
+                                    enabled=True,
+                                    residual_hidden_size=8,
+                                    residual_scale_init=0.05,
+                                    residual_scale_max=0.3,
+                                )
+                            ),
                             gate_reliability_mixture=(
                                 ClassGateReliabilityMixtureConfig(
                                     enabled=True,
@@ -1107,6 +1116,8 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
 
     assert output.class_evidence_logits is not None
     assert output.class_evidence_embedding_scores is not None
+    assert output.class_evidence_direct_top_scores is not None
+    assert output.class_evidence_top_support_residual_scores is not None
     assert output.class_evidence_top_support_scores is not None
     assert output.class_evidence_gated_support_scores is not None
     assert output.class_evidence_top_raw_existential_scores is not None
@@ -1129,6 +1140,7 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
     assert output.class_evidence_branch_direct_raw_scale is not None
     assert output.class_evidence_branch_direct_relative_scale is not None
     assert output.class_evidence_branch_direct_residual_scale is not None
+    assert output.class_evidence_top_support_direct_residual_scale is not None
     assert output.class_evidence_branch_direct_top_weights is not None
     assert output.class_evidence_branch_direct_gated_weights is not None
     assert output.class_evidence_branch_direct_existential_weights is not None
@@ -1160,15 +1172,26 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
         output.class_evidence_branch_existential_scores,
         output.class_evidence_top_support_scores,
     )
+    expected_direct_top_scores = (
+        output.class_evidence_top_raw_existential_scores
+        + output.class_evidence_top_relative_correction_scores
+    )
+    assert torch.allclose(
+        output.class_evidence_direct_top_scores,
+        expected_direct_top_scores,
+        atol=1e-5,
+    )
+    expected_top_support_scores = output.class_evidence_direct_top_scores + (
+        output.class_evidence_top_support_direct_residual_scale
+        * output.class_evidence_top_support_residual_scores
+    )
     assert torch.allclose(
         output.class_evidence_top_support_scores,
-        output.class_evidence_top_raw_existential_scores
-        + output.class_evidence_top_relative_correction_scores,
+        expected_top_support_scores,
         atol=1e-5,
     )
     assert torch.all(output.class_evidence_top_relative_positive >= 0)
     assert torch.all(output.class_evidence_top_relative_negative <= 0)
-    assert torch.all(output.class_evidence_top_relative_negative >= -1.0)
     assert torch.allclose(
         output.class_evidence_branch_competitive_scores,
         output.class_evidence_gated_support_scores,

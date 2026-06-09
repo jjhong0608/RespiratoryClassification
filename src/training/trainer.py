@@ -36,11 +36,13 @@ from src.utils.config import (
     BranchBinaryAuxiliaryLossConfig,
     BranchDirectScoreMarginConfig,
     BranchPathDominanceConstraintConfig,
+    BranchSupportDisagreementCapRegularizationConfig,
     BranchSupportScoreMarginConfig,
     BranchToEvidenceRankingConsistencyConfig,
     CheckpointingConfig,
     ClassEvidenceGapCapRegularizationConfig,
     ClassEvidenceMarginConfig,
+    ClassEvidencePositiveGapCapRegularizationConfig,
     ClassGatedBranchLogitMarginConfig,
     ClassGateDiversityRegularizationConfig,
     EarlyStoppingConfig,
@@ -50,9 +52,11 @@ from src.utils.config import (
     GateEntropyRegularizationConfig,
     GateWeightedBranchMarginConfig,
     GlobalResidualAntiVetoConfig,
+    InteractionGapCapRegularizationConfig,
     LabelSmoothingConfig,
     ResidualContradictionRegularizationConfig,
     TopBranchMarginConfig,
+    TopSupportGapMinConstraintConfig,
     TopSupportScoreMarginConfig,
 )
 from src.utils.fs import Fs
@@ -104,10 +108,22 @@ class TrainerConfig:
     class_evidence_gap_cap_regularization: ClassEvidenceGapCapRegularizationConfig = (
         field(default_factory=ClassEvidenceGapCapRegularizationConfig)
     )
+    class_evidence_gap_cap_negative_cap_by_class: tuple[float, ...] | None = None
+    class_evidence_gap_cap_label_weight_by_class: tuple[float, ...] | None = None
+    class_evidence_positive_gap_cap_regularization: ClassEvidencePositiveGapCapRegularizationConfig = field(
+        default_factory=ClassEvidencePositiveGapCapRegularizationConfig
+    )
+    interaction_gap_cap_regularization: InteractionGapCapRegularizationConfig = field(
+        default_factory=InteractionGapCapRegularizationConfig
+    )
     top_support_score_margin: TopSupportScoreMarginConfig = field(
         default_factory=TopSupportScoreMarginConfig
     )
     top_support_score_margin_label_weight_by_class: tuple[float, ...] | None = None
+    top_support_gap_min_constraint: TopSupportGapMinConstraintConfig = field(
+        default_factory=TopSupportGapMinConstraintConfig
+    )
+    top_support_gap_min_base_by_class: tuple[float, ...] | None = None
     branch_support_score_margin: BranchSupportScoreMarginConfig = field(
         default_factory=BranchSupportScoreMarginConfig
     )
@@ -116,6 +132,11 @@ class TrainerConfig:
     )
     branch_path_dominance_constraint: BranchPathDominanceConstraintConfig = field(
         default_factory=BranchPathDominanceConstraintConfig
+    )
+    branch_path_dominance_allowed_drop_by_class: tuple[float, ...] | None = None
+    branch_path_dominance_label_weight_by_class: tuple[float, ...] | None = None
+    branch_support_disagreement_cap_regularization: BranchSupportDisagreementCapRegularizationConfig = field(
+        default_factory=BranchSupportDisagreementCapRegularizationConfig
     )
     class_gated_branch_logit_margin: ClassGatedBranchLogitMarginConfig = field(
         default_factory=ClassGatedBranchLogitMarginConfig
@@ -170,16 +191,30 @@ class LossComponents:
     class_evidence_margin_loss: Tensor | None = None
     class_evidence_gap_cap_regularization: Tensor | None = None
     class_evidence_gap_cap_regularization_loss: Tensor | None = None
+    class_evidence_gap_cap_label_multiplier: Tensor | None = None
+    class_evidence_gap_cap_effective_cap: Tensor | None = None
+    class_evidence_positive_gap_cap_regularization: Tensor | None = None
+    class_evidence_positive_gap_cap_regularization_loss: Tensor | None = None
+    interaction_gap_cap_regularization: Tensor | None = None
+    interaction_gap_cap_regularization_loss: Tensor | None = None
     top_support_score_margin: Tensor | None = None
     top_support_score_margin_loss: Tensor | None = None
     top_support_score_margin_label_multiplier: Tensor | None = None
     top_support_score_margin_support_multiplier: Tensor | None = None
     top_support_score_margin_hardness_multiplier: Tensor | None = None
+    top_support_gap_min_constraint: Tensor | None = None
+    top_support_gap_min_constraint_loss: Tensor | None = None
+    top_support_gap_min_target: Tensor | None = None
     branch_direct_score_margin: Tensor | None = None
     branch_direct_score_margin_loss: Tensor | None = None
     branch_path_dominance_constraint: Tensor | None = None
     branch_path_dominance_constraint_loss: Tensor | None = None
     branch_path_dominance_support_multiplier: Tensor | None = None
+    branch_path_dominance_label_multiplier: Tensor | None = None
+    branch_path_dominance_allowed_drop: Tensor | None = None
+    branch_support_disagreement_cap_regularization: Tensor | None = None
+    branch_support_disagreement_cap_regularization_loss: Tensor | None = None
+    branch_support_disagreement_weight: Tensor | None = None
     branch_support_score_margin: Tensor | None = None
     branch_support_score_margin_loss: Tensor | None = None
     class_gated_branch_logit_margin: Tensor | None = None
@@ -1382,7 +1417,7 @@ class Trainer(LoggingMixin):
         labels: Tensor,
         *,
         epoch: int,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         cfg = self.cfg.class_evidence_gap_cap_regularization
         if cfg.target != "class_evidence_logits":
             raise ValueError(
@@ -1408,6 +1443,82 @@ class Trainer(LoggingMixin):
         )
         if label_indices.numel() == 0:
             raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss, raw_loss
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss, raw_loss
+        evidence_gap, _ = self._true_vs_hardest_negative_gap(
+            logits,
+            label_indices,
+        )
+        negative_gap_caps = self._class_values_tensor(
+            self.cfg.class_evidence_gap_cap_negative_cap_by_class,
+            label_indices,
+            device=logits.device,
+            dtype=logits.dtype,
+            fallback=float(cfg.negative_gap_cap),
+        )
+        label_multipliers = self._class_values_tensor(
+            self.cfg.class_evidence_gap_cap_label_weight_by_class,
+            label_indices,
+            device=logits.device,
+            dtype=logits.dtype,
+            fallback=1.0,
+        )
+        penalties = torch.relu(-evidence_gap - negative_gap_caps)
+        penalties = penalties * label_multipliers
+        class_weights = self._class_margin_weights(
+            label_indices,
+            logits,
+            enabled=cfg.class_weighted,
+            loss_name="class_evidence_gap_cap_regularization",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return (
+            raw_loss,
+            weighted_loss,
+            label_multipliers.detach().mean(),
+            negative_gap_caps.detach().mean(),
+        )
+
+    def _compute_class_evidence_positive_gap_cap_regularization_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor]:
+        cfg = self.cfg.class_evidence_positive_gap_cap_regularization
+        if cfg.target != "class_evidence_logits":
+            raise ValueError(
+                "class evidence positive gap cap regularization supports only "
+                "target='class_evidence_logits'"
+            )
+        if cfg.mode != "positive_gap_hinge":
+            raise ValueError(
+                "class evidence positive gap cap regularization supports only "
+                "mode='positive_gap_hinge'"
+            )
+        if output.class_evidence_logits is None:
+            raise ValueError(
+                "class evidence positive gap cap regularization enabled but model "
+                "did not return class_evidence_logits"
+            )
+        logits = output.class_evidence_logits
+        label_indices = self._validate_class_margin_inputs(
+            logits,
+            labels,
+            logits_name="class_evidence_logits",
+            loss_name="class evidence positive gap cap regularization",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = logits.sum() * 0.0
             return raw_loss, raw_loss
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = logits.sum() * 0.0
@@ -1416,12 +1527,68 @@ class Trainer(LoggingMixin):
             logits,
             label_indices,
         )
-        penalties = torch.relu(-evidence_gap - float(cfg.negative_gap_cap))
+        penalties = torch.relu(evidence_gap - float(cfg.positive_gap_cap))
         class_weights = self._class_margin_weights(
             label_indices,
             logits,
             enabled=cfg.class_weighted,
-            loss_name="class_evidence_gap_cap_regularization",
+            loss_name="class_evidence_positive_gap_cap_regularization",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss
+
+    def _compute_interaction_gap_cap_regularization_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor]:
+        cfg = self.cfg.interaction_gap_cap_regularization
+        if cfg.target != "class_evidence_interaction_scores":
+            raise ValueError(
+                "interaction gap cap regularization supports only "
+                "target='class_evidence_interaction_scores'"
+            )
+        if cfg.mode != "absolute_gap_hinge":
+            raise ValueError(
+                "interaction gap cap regularization supports only "
+                "mode='absolute_gap_hinge'"
+            )
+        if output.class_evidence_interaction_scores is None:
+            raise ValueError(
+                "interaction gap cap regularization enabled but model did not "
+                "return class_evidence_interaction_scores"
+            )
+        logits = output.class_evidence_interaction_scores
+        label_indices = self._validate_class_margin_inputs(
+            logits,
+            labels,
+            logits_name="class_evidence_interaction_scores",
+            loss_name="interaction gap cap regularization",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss
+        interaction_gap, _ = self._true_vs_hardest_negative_gap(
+            logits,
+            label_indices,
+        )
+        penalties = torch.relu(interaction_gap.abs() - float(cfg.gap_cap))
+        class_weights = self._class_margin_weights(
+            label_indices,
+            logits,
+            enabled=cfg.class_weighted,
+            loss_name="interaction_gap_cap_regularization",
         )
         raw_loss = self._reduce_class_margin_penalties(
             penalties,
@@ -1579,6 +1746,100 @@ class Trainer(LoggingMixin):
             hardness_multipliers.detach().mean(),
         )
 
+    def _compute_top_support_gap_min_constraint_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        cfg = self.cfg.top_support_gap_min_constraint
+        if cfg.target != "class_evidence_top_support_scores":
+            raise ValueError(
+                "top support gap min constraint supports only "
+                "target='class_evidence_top_support_scores'"
+            )
+        if cfg.mode != "support_conditioned_min_gap":
+            raise ValueError(
+                "top support gap min constraint supports only "
+                "mode='support_conditioned_min_gap'"
+            )
+        if cfg.support_source != "top_branch_margin":
+            raise ValueError(
+                "top support gap min constraint supports only "
+                "support_source='top_branch_margin'"
+            )
+        if output.class_evidence_top_support_scores is None:
+            raise ValueError(
+                "top support gap min constraint enabled but model did not return "
+                "class_evidence_top_support_scores"
+            )
+        if output.class_top_branch_margin_features is None:
+            raise ValueError(
+                "top support gap min constraint enabled but model did not return "
+                "class_top_branch_margin_features"
+            )
+        logits = output.class_evidence_top_support_scores
+        top_branch_margin = output.class_top_branch_margin_features
+        if tuple(logits.shape) != tuple(top_branch_margin.shape):
+            raise ValueError(
+                "top support gap min constraint requires top support scores and "
+                "top branch margin features to have the same shape"
+            )
+        label_indices = self._validate_class_margin_inputs(
+            logits,
+            labels,
+            logits_name="class_evidence_top_support_scores",
+            loss_name="top support gap min constraint",
+        )
+        self._validate_class_margin_inputs(
+            top_branch_margin,
+            labels,
+            logits_name="class_top_branch_margin_features",
+            loss_name="top support gap min constraint",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        top_support_gap, _ = self._true_vs_hardest_negative_gap(
+            logits,
+            label_indices,
+        )
+        base_min_gap = self._class_values_tensor(
+            self.cfg.top_support_gap_min_base_by_class,
+            label_indices,
+            device=logits.device,
+            dtype=logits.dtype,
+            fallback=float(cfg.base_min_gap),
+        )
+        true_top_margin = top_branch_margin.gather(
+            1,
+            label_indices.unsqueeze(1),
+        ).squeeze(1)
+        support = torch.clamp(
+            torch.relu(true_top_margin),
+            max=float(cfg.support_cap),
+        )
+        target_min_gap = base_min_gap + float(cfg.support_gain) * support
+        penalties = torch.relu(target_min_gap - top_support_gap)
+        class_weights = self._class_margin_weights(
+            label_indices,
+            logits,
+            enabled=cfg.class_weighted,
+            loss_name="top_support_gap_min_constraint",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss, target_min_gap.detach().mean()
+
     def _compute_branch_direct_score_margin_loss(
         self,
         output: AstModelOutput,
@@ -1642,7 +1903,7 @@ class Trainer(LoggingMixin):
         labels: Tensor,
         *,
         epoch: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         cfg = self.cfg.branch_path_dominance_constraint
         if cfg.branch_source != "class_evidence_branch_support_scores":
             raise ValueError(
@@ -1692,10 +1953,10 @@ class Trainer(LoggingMixin):
         )
         if label_indices.numel() == 0:
             raw_loss = evidence_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss
+            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = evidence_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss
+            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
 
         branch_gap, _ = self._true_vs_hardest_negative_gap(
             branch_scores,
@@ -1713,9 +1974,24 @@ class Trainer(LoggingMixin):
             cfg.support_weighting,
             loss_name="branch_path_dominance_constraint",
         )
+        allowed_drops = self._class_values_tensor(
+            self.cfg.branch_path_dominance_allowed_drop_by_class,
+            label_indices,
+            device=evidence_logits.device,
+            dtype=evidence_logits.dtype,
+            fallback=float(cfg.allowed_drop),
+        )
+        label_multipliers = self._class_values_tensor(
+            self.cfg.branch_path_dominance_label_weight_by_class,
+            label_indices,
+            device=evidence_logits.device,
+            dtype=evidence_logits.dtype,
+            fallback=1.0,
+        )
         penalties = (
-            torch.relu(branch_gap - evidence_gap - float(cfg.allowed_drop))
+            torch.relu(branch_gap - evidence_gap - allowed_drops)
             * support_weight
+            * label_multipliers
         )
         class_weights = self._class_margin_weights(
             label_indices,
@@ -1730,7 +2006,128 @@ class Trainer(LoggingMixin):
             reduction=cfg.reduction,
         )
         weighted_loss = float(cfg.weight) * raw_loss
-        return raw_loss, weighted_loss, support_weight.detach().mean()
+        return (
+            raw_loss,
+            weighted_loss,
+            support_weight.detach().mean(),
+            label_multipliers.detach().mean(),
+            allowed_drops.detach().mean(),
+        )
+
+    def _compute_branch_support_disagreement_cap_regularization_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        cfg = self.cfg.branch_support_disagreement_cap_regularization
+        if cfg.branch_source != "class_evidence_branch_support_scores":
+            raise ValueError(
+                "branch support disagreement cap supports only "
+                "branch_source='class_evidence_branch_support_scores'"
+            )
+        if cfg.embedding_source != "class_evidence_embedding_scores":
+            raise ValueError(
+                "branch support disagreement cap supports only "
+                "embedding_source='class_evidence_embedding_scores'"
+            )
+        if cfg.interaction_source != "class_evidence_interaction_scores":
+            raise ValueError(
+                "branch support disagreement cap supports only "
+                "interaction_source='class_evidence_interaction_scores'"
+            )
+        if cfg.mode != "branch_gap_conditioned_abs_gap_cap":
+            raise ValueError(
+                "branch support disagreement cap supports only "
+                "mode='branch_gap_conditioned_abs_gap_cap'"
+            )
+        if output.class_evidence_branch_support_scores is None:
+            raise ValueError(
+                "branch support disagreement cap enabled but model did not return "
+                "class_evidence_branch_support_scores"
+            )
+        if output.class_evidence_embedding_scores is None:
+            raise ValueError(
+                "branch support disagreement cap enabled but model did not return "
+                "class_evidence_embedding_scores"
+            )
+        if output.class_evidence_interaction_scores is None:
+            raise ValueError(
+                "branch support disagreement cap enabled but model did not return "
+                "class_evidence_interaction_scores"
+            )
+        branch_scores = output.class_evidence_branch_support_scores
+        embedding_scores = output.class_evidence_embedding_scores
+        interaction_scores = output.class_evidence_interaction_scores
+        if tuple(branch_scores.shape) != tuple(embedding_scores.shape) or tuple(
+            branch_scores.shape
+        ) != tuple(interaction_scores.shape):
+            raise ValueError(
+                "branch support disagreement cap requires branch, embedding, "
+                "and interaction scores to have the same shape"
+            )
+        label_indices = self._validate_class_margin_inputs(
+            branch_scores,
+            labels,
+            logits_name="class_evidence_branch_support_scores",
+            loss_name="branch support disagreement cap",
+        )
+        self._validate_class_margin_inputs(
+            embedding_scores,
+            labels,
+            logits_name="class_evidence_embedding_scores",
+            loss_name="branch support disagreement cap",
+        )
+        self._validate_class_margin_inputs(
+            interaction_scores,
+            labels,
+            logits_name="class_evidence_interaction_scores",
+            loss_name="branch support disagreement cap",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = branch_scores.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = branch_scores.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        branch_gap, _ = self._true_vs_hardest_negative_gap(
+            branch_scores,
+            label_indices,
+        )
+        embedding_gap, _ = self._true_vs_hardest_negative_gap(
+            embedding_scores,
+            label_indices,
+        )
+        interaction_gap, _ = self._true_vs_hardest_negative_gap(
+            interaction_scores,
+            label_indices,
+        )
+        disagreement = 1.0 + float(cfg.condition_gain) * torch.clamp(
+            torch.relu(float(cfg.disagreement_threshold) - branch_gap),
+            max=float(cfg.condition_cap),
+        )
+        embedding_penalties = disagreement * torch.relu(
+            embedding_gap.abs() - float(cfg.embedding_gap_cap)
+        )
+        interaction_penalties = disagreement * torch.relu(
+            interaction_gap.abs() - float(cfg.interaction_gap_cap)
+        )
+        penalties = embedding_penalties + interaction_penalties
+        class_weights = self._class_margin_weights(
+            label_indices,
+            branch_scores,
+            enabled=cfg.class_weighted,
+            loss_name="branch_support_disagreement_cap_regularization",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss, disagreement.detach().mean()
 
     def _compute_class_gated_branch_logit_margin_loss(
         self,
@@ -2908,10 +3305,14 @@ class Trainer(LoggingMixin):
             monitor_total = monitor_total + class_evidence_margin_loss
         class_evidence_gap_cap_regularization: Tensor | None = None
         class_evidence_gap_cap_regularization_loss: Tensor | None = None
+        class_evidence_gap_cap_label_multiplier: Tensor | None = None
+        class_evidence_gap_cap_effective_cap: Tensor | None = None
         if self.cfg.class_evidence_gap_cap_regularization.enabled:
             (
                 class_evidence_gap_cap_regularization,
                 class_evidence_gap_cap_regularization_loss,
+                class_evidence_gap_cap_label_multiplier,
+                class_evidence_gap_cap_effective_cap,
             ) = self._compute_class_evidence_gap_cap_regularization_loss(
                 output,
                 labels,
@@ -2921,6 +3322,36 @@ class Trainer(LoggingMixin):
                 scheduled_total + class_evidence_gap_cap_regularization_loss
             )
             monitor_total = monitor_total + class_evidence_gap_cap_regularization_loss
+        class_evidence_positive_gap_cap_regularization: Tensor | None = None
+        class_evidence_positive_gap_cap_regularization_loss: Tensor | None = None
+        if self.cfg.class_evidence_positive_gap_cap_regularization.enabled:
+            (
+                class_evidence_positive_gap_cap_regularization,
+                class_evidence_positive_gap_cap_regularization_loss,
+            ) = self._compute_class_evidence_positive_gap_cap_regularization_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = (
+                scheduled_total + class_evidence_positive_gap_cap_regularization_loss
+            )
+            monitor_total = (
+                monitor_total + class_evidence_positive_gap_cap_regularization_loss
+            )
+        interaction_gap_cap_regularization: Tensor | None = None
+        interaction_gap_cap_regularization_loss: Tensor | None = None
+        if self.cfg.interaction_gap_cap_regularization.enabled:
+            (
+                interaction_gap_cap_regularization,
+                interaction_gap_cap_regularization_loss,
+            ) = self._compute_interaction_gap_cap_regularization_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + interaction_gap_cap_regularization_loss
+            monitor_total = monitor_total + interaction_gap_cap_regularization_loss
         top_support_score_margin: Tensor | None = None
         top_support_score_margin_loss: Tensor | None = None
         top_support_score_margin_label_multiplier: Tensor | None = None
@@ -2940,6 +3371,21 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + top_support_score_margin_loss
             monitor_total = monitor_total + top_support_score_margin_loss
+        top_support_gap_min_constraint: Tensor | None = None
+        top_support_gap_min_constraint_loss: Tensor | None = None
+        top_support_gap_min_target: Tensor | None = None
+        if self.cfg.top_support_gap_min_constraint.enabled:
+            (
+                top_support_gap_min_constraint,
+                top_support_gap_min_constraint_loss,
+                top_support_gap_min_target,
+            ) = self._compute_top_support_gap_min_constraint_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + top_support_gap_min_constraint_loss
+            monitor_total = monitor_total + top_support_gap_min_constraint_loss
         branch_direct_score_margin: Tensor | None = None
         branch_direct_score_margin_loss: Tensor | None = None
         if self.cfg.branch_direct_score_margin.enabled:
@@ -2967,11 +3413,15 @@ class Trainer(LoggingMixin):
         branch_path_dominance_constraint: Tensor | None = None
         branch_path_dominance_constraint_loss: Tensor | None = None
         branch_path_dominance_support_multiplier: Tensor | None = None
+        branch_path_dominance_label_multiplier: Tensor | None = None
+        branch_path_dominance_allowed_drop: Tensor | None = None
         if self.cfg.branch_path_dominance_constraint.enabled:
             (
                 branch_path_dominance_constraint,
                 branch_path_dominance_constraint_loss,
                 branch_path_dominance_support_multiplier,
+                branch_path_dominance_label_multiplier,
+                branch_path_dominance_allowed_drop,
             ) = self._compute_branch_path_dominance_constraint_loss(
                 output,
                 labels,
@@ -2979,6 +3429,25 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + branch_path_dominance_constraint_loss
             monitor_total = monitor_total + branch_path_dominance_constraint_loss
+        branch_support_disagreement_cap_regularization: Tensor | None = None
+        branch_support_disagreement_cap_regularization_loss: Tensor | None = None
+        branch_support_disagreement_weight: Tensor | None = None
+        if self.cfg.branch_support_disagreement_cap_regularization.enabled:
+            (
+                branch_support_disagreement_cap_regularization,
+                branch_support_disagreement_cap_regularization_loss,
+                branch_support_disagreement_weight,
+            ) = self._compute_branch_support_disagreement_cap_regularization_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = (
+                scheduled_total + branch_support_disagreement_cap_regularization_loss
+            )
+            monitor_total = (
+                monitor_total + branch_support_disagreement_cap_regularization_loss
+            )
         class_gated_branch_logit_margin: Tensor | None = None
         class_gated_branch_logit_margin_loss: Tensor | None = None
         if self.cfg.class_gated_branch_logit_margin.enabled:
@@ -3123,6 +3592,20 @@ class Trainer(LoggingMixin):
             class_evidence_gap_cap_regularization_loss=(
                 class_evidence_gap_cap_regularization_loss
             ),
+            class_evidence_gap_cap_label_multiplier=(
+                class_evidence_gap_cap_label_multiplier
+            ),
+            class_evidence_gap_cap_effective_cap=(class_evidence_gap_cap_effective_cap),
+            class_evidence_positive_gap_cap_regularization=(
+                class_evidence_positive_gap_cap_regularization
+            ),
+            class_evidence_positive_gap_cap_regularization_loss=(
+                class_evidence_positive_gap_cap_regularization_loss
+            ),
+            interaction_gap_cap_regularization=interaction_gap_cap_regularization,
+            interaction_gap_cap_regularization_loss=(
+                interaction_gap_cap_regularization_loss
+            ),
             top_support_score_margin=top_support_score_margin,
             top_support_score_margin_loss=top_support_score_margin_loss,
             top_support_score_margin_label_multiplier=(
@@ -3134,6 +3617,9 @@ class Trainer(LoggingMixin):
             top_support_score_margin_hardness_multiplier=(
                 top_support_score_margin_hardness_multiplier
             ),
+            top_support_gap_min_constraint=top_support_gap_min_constraint,
+            top_support_gap_min_constraint_loss=top_support_gap_min_constraint_loss,
+            top_support_gap_min_target=top_support_gap_min_target,
             branch_direct_score_margin=branch_direct_score_margin,
             branch_direct_score_margin_loss=branch_direct_score_margin_loss,
             branch_path_dominance_constraint=branch_path_dominance_constraint,
@@ -3143,6 +3629,17 @@ class Trainer(LoggingMixin):
             branch_path_dominance_support_multiplier=(
                 branch_path_dominance_support_multiplier
             ),
+            branch_path_dominance_label_multiplier=(
+                branch_path_dominance_label_multiplier
+            ),
+            branch_path_dominance_allowed_drop=branch_path_dominance_allowed_drop,
+            branch_support_disagreement_cap_regularization=(
+                branch_support_disagreement_cap_regularization
+            ),
+            branch_support_disagreement_cap_regularization_loss=(
+                branch_support_disagreement_cap_regularization_loss
+            ),
+            branch_support_disagreement_weight=branch_support_disagreement_weight,
             branch_support_score_margin=branch_support_score_margin,
             branch_support_score_margin_loss=branch_support_score_margin_loss,
             class_gated_branch_logit_margin=class_gated_branch_logit_margin,
@@ -3660,8 +4157,22 @@ class Trainer(LoggingMixin):
                     label_indices,
                 )
                 active = int(epoch) > int(gap_cap_cfg.warmup_epochs)
-                gap_cap_penalty = torch.relu(
-                    -gap_cap_gap - float(gap_cap_cfg.negative_gap_cap)
+                effective_caps = self._class_values_tensor(
+                    self.cfg.class_evidence_gap_cap_negative_cap_by_class,
+                    label_indices,
+                    device=evidence_logits.device,
+                    dtype=evidence_logits.dtype,
+                    fallback=float(gap_cap_cfg.negative_gap_cap),
+                )
+                label_multipliers = self._class_values_tensor(
+                    self.cfg.class_evidence_gap_cap_label_weight_by_class,
+                    label_indices,
+                    device=evidence_logits.device,
+                    dtype=evidence_logits.dtype,
+                    fallback=1.0,
+                )
+                gap_cap_penalty = (
+                    torch.relu(-gap_cap_gap - effective_caps) * label_multipliers
                 )
                 if not active:
                     gap_cap_penalty = torch.zeros_like(gap_cap_penalty)
@@ -3677,12 +4188,104 @@ class Trainer(LoggingMixin):
                         gap_cap_penalty[index].detach().cpu().item()
                     )
                     row["class_evidence_gap_cap_cap"] = float(
-                        gap_cap_cfg.negative_gap_cap
+                        effective_caps[index].detach().cpu().item()
+                    )
+                    row["class_evidence_gap_cap_effective_cap"] = float(
+                        effective_caps[index].detach().cpu().item()
+                    )
+                    row["class_evidence_gap_cap_label_multiplier"] = float(
+                        label_multipliers[index].detach().cpu().item()
                     )
                     row["class_evidence_gap_cap_eligible"] = bool(
                         gap_cap_eligible[index].detach().cpu().item()
                     )
                     row["class_evidence_gap_cap_mode"] = str(gap_cap_cfg.mode)
+        if (
+            self.cfg.class_evidence_positive_gap_cap_regularization.enabled
+            and output.class_evidence_logits is not None
+        ):
+            positive_gap_cap_cfg = (
+                self.cfg.class_evidence_positive_gap_cap_regularization
+            )
+            evidence_logits = output.class_evidence_logits.detach()
+            if tuple(evidence_logits.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
+                positive_gap, positive_negative = self._true_vs_hardest_negative_gap(
+                    evidence_logits,
+                    label_indices,
+                )
+                active = int(epoch) > int(positive_gap_cap_cfg.warmup_epochs)
+                positive_penalty = torch.relu(
+                    positive_gap - float(positive_gap_cap_cfg.positive_gap_cap)
+                )
+                if not active:
+                    positive_penalty = torch.zeros_like(positive_penalty)
+                positive_eligible = positive_penalty > 0
+                for index, row in enumerate(rows):
+                    row["class_evidence_positive_gap_cap_gap"] = float(
+                        positive_gap[index].detach().cpu().item()
+                    )
+                    row["class_evidence_positive_gap_cap_negative_class"] = int(
+                        positive_negative[index].detach().cpu().item()
+                    )
+                    row["class_evidence_positive_gap_cap_penalty"] = float(
+                        positive_penalty[index].detach().cpu().item()
+                    )
+                    row["class_evidence_positive_gap_cap_cap"] = float(
+                        positive_gap_cap_cfg.positive_gap_cap
+                    )
+                    row["class_evidence_positive_gap_cap_eligible"] = bool(
+                        positive_eligible[index].detach().cpu().item()
+                    )
+                    row["class_evidence_positive_gap_cap_mode"] = str(
+                        positive_gap_cap_cfg.mode
+                    )
+        if (
+            self.cfg.interaction_gap_cap_regularization.enabled
+            and output.class_evidence_interaction_scores is not None
+        ):
+            interaction_gap_cap_cfg = self.cfg.interaction_gap_cap_regularization
+            interaction_scores = output.class_evidence_interaction_scores.detach()
+            if tuple(interaction_scores.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
+                interaction_gap, interaction_negative = (
+                    self._true_vs_hardest_negative_gap(
+                        interaction_scores,
+                        label_indices,
+                    )
+                )
+                interaction_abs_gap = interaction_gap.abs()
+                active = int(epoch) > int(interaction_gap_cap_cfg.warmup_epochs)
+                interaction_penalty = torch.relu(
+                    interaction_abs_gap - float(interaction_gap_cap_cfg.gap_cap)
+                )
+                if not active:
+                    interaction_penalty = torch.zeros_like(interaction_penalty)
+                interaction_eligible = interaction_penalty > 0
+                for index, row in enumerate(rows):
+                    row["interaction_gap_cap_gap"] = float(
+                        interaction_gap[index].detach().cpu().item()
+                    )
+                    row["interaction_gap_cap_abs_gap"] = float(
+                        interaction_abs_gap[index].detach().cpu().item()
+                    )
+                    row["interaction_gap_cap_negative_class"] = int(
+                        interaction_negative[index].detach().cpu().item()
+                    )
+                    row["interaction_gap_cap_penalty"] = float(
+                        interaction_penalty[index].detach().cpu().item()
+                    )
+                    row["interaction_gap_cap_cap"] = float(
+                        interaction_gap_cap_cfg.gap_cap
+                    )
+                    row["interaction_gap_cap_eligible"] = bool(
+                        interaction_eligible[index].detach().cpu().item()
+                    )
+                    row["interaction_gap_cap_mode"] = str(interaction_gap_cap_cfg.mode)
         if (
             self.cfg.top_support_score_margin.enabled
             and output.class_evidence_top_support_scores is not None
@@ -3767,6 +4370,70 @@ class Trainer(LoggingMixin):
                     )
                     row["top_support_score_margin_eligible"] = bool(active)
         if (
+            self.cfg.top_support_gap_min_constraint.enabled
+            and output.class_evidence_top_support_scores is not None
+            and output.class_top_branch_margin_features is not None
+        ):
+            top_min_cfg = self.cfg.top_support_gap_min_constraint
+            top_support_scores = output.class_evidence_top_support_scores.detach()
+            top_branch_margin_features = (
+                output.class_top_branch_margin_features.detach()
+            )
+            if (
+                tuple(top_support_scores.shape)
+                == tuple(top_branch_margin_features.shape)
+                == (
+                    int(labels.numel()),
+                    int(branch_logits.shape[2]),
+                )
+            ):
+                margin_gap, margin_negative = self._true_vs_hardest_negative_gap(
+                    top_support_scores,
+                    label_indices,
+                )
+                base_min_gap = self._class_values_tensor(
+                    self.cfg.top_support_gap_min_base_by_class,
+                    label_indices,
+                    device=top_support_scores.device,
+                    dtype=top_support_scores.dtype,
+                    fallback=float(top_min_cfg.base_min_gap),
+                )
+                true_top_margin = top_branch_margin_features.gather(
+                    1,
+                    label_indices.unsqueeze(1),
+                ).squeeze(1)
+                support = torch.clamp(
+                    torch.relu(true_top_margin),
+                    max=float(top_min_cfg.support_cap),
+                )
+                target_min_gap = (
+                    base_min_gap + float(top_min_cfg.support_gain) * support
+                )
+                active = int(epoch) > int(top_min_cfg.warmup_epochs)
+                penalties = torch.relu(target_min_gap - margin_gap)
+                if not active:
+                    penalties = torch.zeros_like(penalties)
+                for index, row in enumerate(rows):
+                    row["top_support_gap_min_constraint_gap"] = float(
+                        margin_gap[index].detach().cpu().item()
+                    )
+                    row["top_support_gap_min_constraint_negative_class"] = int(
+                        margin_negative[index].detach().cpu().item()
+                    )
+                    row["top_support_gap_min_target"] = float(
+                        target_min_gap[index].detach().cpu().item()
+                    )
+                    row["top_support_gap_min_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
+                    row["top_support_gap_min_support_value"] = float(
+                        support[index].detach().cpu().item()
+                    )
+                    row["top_support_gap_min_base_min_gap"] = float(
+                        base_min_gap[index].detach().cpu().item()
+                    )
+                    row["top_support_gap_min_eligible"] = bool(active)
+        if (
             self.cfg.branch_support_score_margin.enabled
             and output.class_evidence_branch_support_scores is not None
         ):
@@ -3832,12 +4499,25 @@ class Trainer(LoggingMixin):
                     dominance_cfg.support_weighting,
                     loss_name="branch_path_dominance_constraint",
                 )
+                allowed_drops = self._class_values_tensor(
+                    self.cfg.branch_path_dominance_allowed_drop_by_class,
+                    label_indices,
+                    device=evidence_logits.device,
+                    dtype=evidence_logits.dtype,
+                    fallback=float(dominance_cfg.allowed_drop),
+                )
+                label_multipliers = self._class_values_tensor(
+                    self.cfg.branch_path_dominance_label_weight_by_class,
+                    label_indices,
+                    device=evidence_logits.device,
+                    dtype=evidence_logits.dtype,
+                    fallback=1.0,
+                )
                 active = int(epoch) > int(dominance_cfg.warmup_epochs)
                 penalties = (
-                    torch.relu(
-                        branch_gap - evidence_gap - float(dominance_cfg.allowed_drop)
-                    )
+                    torch.relu(branch_gap - evidence_gap - allowed_drops)
                     * support_weight
+                    * label_multipliers
                 )
                 if not active:
                     penalties = torch.zeros_like(penalties)
@@ -3860,13 +4540,108 @@ class Trainer(LoggingMixin):
                     row["branch_path_dominance_support_weight"] = float(
                         support_weight[index].detach().cpu().item()
                     )
+                    row["branch_path_dominance_label_multiplier"] = float(
+                        label_multipliers[index].detach().cpu().item()
+                    )
                     row["branch_path_dominance_penalty"] = float(
                         penalties[index].detach().cpu().item()
                     )
                     row["branch_path_dominance_allowed_drop"] = float(
-                        dominance_cfg.allowed_drop
+                        allowed_drops[index].detach().cpu().item()
+                    )
+                    row["branch_path_dominance_allowed_drop_effective"] = float(
+                        allowed_drops[index].detach().cpu().item()
                     )
                     row["branch_path_dominance_eligible"] = bool(active)
+        if (
+            self.cfg.branch_support_disagreement_cap_regularization.enabled
+            and output.class_evidence_branch_support_scores is not None
+            and output.class_evidence_embedding_scores is not None
+            and output.class_evidence_interaction_scores is not None
+        ):
+            disagree_cfg = self.cfg.branch_support_disagreement_cap_regularization
+            branch_scores = output.class_evidence_branch_support_scores.detach()
+            embedding_scores = output.class_evidence_embedding_scores.detach()
+            interaction_scores = output.class_evidence_interaction_scores.detach()
+            if (
+                tuple(branch_scores.shape)
+                == tuple(embedding_scores.shape)
+                == tuple(interaction_scores.shape)
+                == (
+                    int(labels.numel()),
+                    int(branch_logits.shape[2]),
+                )
+            ):
+                branch_gap, branch_negative = self._true_vs_hardest_negative_gap(
+                    branch_scores,
+                    label_indices,
+                )
+                embedding_gap, embedding_negative = self._true_vs_hardest_negative_gap(
+                    embedding_scores,
+                    label_indices,
+                )
+                interaction_gap, interaction_negative = (
+                    self._true_vs_hardest_negative_gap(
+                        interaction_scores,
+                        label_indices,
+                    )
+                )
+                active = int(epoch) > int(disagree_cfg.warmup_epochs)
+                disagreement_weight = 1.0 + float(
+                    disagree_cfg.condition_gain
+                ) * torch.clamp(
+                    torch.relu(float(disagree_cfg.disagreement_threshold) - branch_gap),
+                    max=float(disagree_cfg.condition_cap),
+                )
+                embedding_penalty = disagreement_weight * torch.relu(
+                    embedding_gap.abs() - float(disagree_cfg.embedding_gap_cap)
+                )
+                interaction_penalty = disagreement_weight * torch.relu(
+                    interaction_gap.abs() - float(disagree_cfg.interaction_gap_cap)
+                )
+                penalties = embedding_penalty + interaction_penalty
+                if not active:
+                    embedding_penalty = torch.zeros_like(embedding_penalty)
+                    interaction_penalty = torch.zeros_like(interaction_penalty)
+                    penalties = torch.zeros_like(penalties)
+                for index, row in enumerate(rows):
+                    row["branch_support_disagreement_branch_gap"] = float(
+                        branch_gap[index].detach().cpu().item()
+                    )
+                    row["branch_support_disagreement_branch_negative_class"] = int(
+                        branch_negative[index].detach().cpu().item()
+                    )
+                    row["branch_support_disagreement_embedding_gap"] = float(
+                        embedding_gap[index].detach().cpu().item()
+                    )
+                    row["branch_support_disagreement_embedding_negative_class"] = int(
+                        embedding_negative[index].detach().cpu().item()
+                    )
+                    row["branch_support_disagreement_interaction_gap"] = float(
+                        interaction_gap[index].detach().cpu().item()
+                    )
+                    row["branch_support_disagreement_interaction_negative_class"] = int(
+                        interaction_negative[index].detach().cpu().item()
+                    )
+                    row["branch_support_disagreement"] = float(
+                        disagreement_weight[index].detach().cpu().item()
+                    )
+                    row["embedding_disagreement_cap_penalty"] = float(
+                        embedding_penalty[index].detach().cpu().item()
+                    )
+                    row["interaction_disagreement_cap_penalty"] = float(
+                        interaction_penalty[index].detach().cpu().item()
+                    )
+                    row["branch_support_disagreement_cap_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
+                    row["branch_support_disagreement_embedding_gap_cap"] = float(
+                        disagree_cfg.embedding_gap_cap
+                    )
+                    row["branch_support_disagreement_interaction_gap_cap"] = float(
+                        disagree_cfg.interaction_gap_cap
+                    )
+                    row["branch_support_disagreement_cap_eligible"] = bool(active)
         if (
             self.cfg.branch_direct_score_margin.enabled
             and output.class_evidence_branch_direct_scores is not None
@@ -4431,16 +5206,30 @@ class Trainer(LoggingMixin):
             "class_evidence_margin_loss": 0.0,
             "class_evidence_gap_cap_regularization": 0.0,
             "class_evidence_gap_cap_regularization_loss": 0.0,
+            "class_evidence_gap_cap_label_multiplier": 0.0,
+            "class_evidence_gap_cap_effective_cap": 0.0,
+            "class_evidence_positive_gap_cap_regularization": 0.0,
+            "class_evidence_positive_gap_cap_regularization_loss": 0.0,
+            "interaction_gap_cap_regularization": 0.0,
+            "interaction_gap_cap_regularization_loss": 0.0,
             "top_support_score_margin": 0.0,
             "top_support_score_margin_loss": 0.0,
             "top_support_score_margin_label_multiplier": 0.0,
             "top_support_score_margin_support_multiplier": 0.0,
             "top_support_score_margin_hardness_multiplier": 0.0,
+            "top_support_gap_min_constraint": 0.0,
+            "top_support_gap_min_constraint_loss": 0.0,
+            "top_support_gap_min_target": 0.0,
             "branch_direct_score_margin": 0.0,
             "branch_direct_score_margin_loss": 0.0,
             "branch_path_dominance_constraint": 0.0,
             "branch_path_dominance_constraint_loss": 0.0,
             "branch_path_dominance_support_multiplier": 0.0,
+            "branch_path_dominance_label_multiplier": 0.0,
+            "branch_path_dominance_allowed_drop": 0.0,
+            "branch_support_disagreement_cap_regularization": 0.0,
+            "branch_support_disagreement_cap_regularization_loss": 0.0,
+            "branch_support_disagreement_weight": 0.0,
             "branch_support_score_margin": 0.0,
             "branch_support_score_margin_loss": 0.0,
             "class_gated_branch_logit_margin": 0.0,
@@ -4559,6 +5348,24 @@ class Trainer(LoggingMixin):
                 "class_evidence_gap_cap_regularization_loss": (
                     loss_components.class_evidence_gap_cap_regularization_loss
                 ),
+                "class_evidence_gap_cap_label_multiplier": (
+                    loss_components.class_evidence_gap_cap_label_multiplier
+                ),
+                "class_evidence_gap_cap_effective_cap": (
+                    loss_components.class_evidence_gap_cap_effective_cap
+                ),
+                "class_evidence_positive_gap_cap_regularization": (
+                    loss_components.class_evidence_positive_gap_cap_regularization
+                ),
+                "class_evidence_positive_gap_cap_regularization_loss": (
+                    loss_components.class_evidence_positive_gap_cap_regularization_loss
+                ),
+                "interaction_gap_cap_regularization": (
+                    loss_components.interaction_gap_cap_regularization
+                ),
+                "interaction_gap_cap_regularization_loss": (
+                    loss_components.interaction_gap_cap_regularization_loss
+                ),
                 "top_support_score_margin": loss_components.top_support_score_margin,
                 "top_support_score_margin_loss": (
                     loss_components.top_support_score_margin_loss
@@ -4571,6 +5378,15 @@ class Trainer(LoggingMixin):
                 ),
                 "top_support_score_margin_hardness_multiplier": (
                     loss_components.top_support_score_margin_hardness_multiplier
+                ),
+                "top_support_gap_min_constraint": (
+                    loss_components.top_support_gap_min_constraint
+                ),
+                "top_support_gap_min_constraint_loss": (
+                    loss_components.top_support_gap_min_constraint_loss
+                ),
+                "top_support_gap_min_target": (
+                    loss_components.top_support_gap_min_target
                 ),
                 "branch_direct_score_margin": (
                     loss_components.branch_direct_score_margin
@@ -4586,6 +5402,21 @@ class Trainer(LoggingMixin):
                 ),
                 "branch_path_dominance_support_multiplier": (
                     loss_components.branch_path_dominance_support_multiplier
+                ),
+                "branch_path_dominance_label_multiplier": (
+                    loss_components.branch_path_dominance_label_multiplier
+                ),
+                "branch_path_dominance_allowed_drop": (
+                    loss_components.branch_path_dominance_allowed_drop
+                ),
+                "branch_support_disagreement_cap_regularization": (
+                    loss_components.branch_support_disagreement_cap_regularization
+                ),
+                "branch_support_disagreement_cap_regularization_loss": (
+                    loss_components.branch_support_disagreement_cap_regularization_loss
+                ),
+                "branch_support_disagreement_weight": (
+                    loss_components.branch_support_disagreement_weight
                 ),
                 "branch_support_score_margin": (
                     loss_components.branch_support_score_margin
@@ -4919,6 +5750,42 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "train_class_evidence_gap_cap_label_multiplier": (
+                        train_components.get(
+                            "class_evidence_gap_cap_label_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "train_class_evidence_gap_cap_effective_cap": (
+                        train_components.get(
+                            "class_evidence_gap_cap_effective_cap",
+                            0.0,
+                        )
+                    ),
+                    "train_class_evidence_positive_gap_cap_regularization": (
+                        train_components.get(
+                            "class_evidence_positive_gap_cap_regularization",
+                            0.0,
+                        )
+                    ),
+                    "train_loss_class_evidence_positive_gap_cap_regularization": (
+                        train_components.get(
+                            "class_evidence_positive_gap_cap_regularization_loss",
+                            0.0,
+                        )
+                    ),
+                    "train_interaction_gap_cap_regularization": (
+                        train_components.get(
+                            "interaction_gap_cap_regularization",
+                            0.0,
+                        )
+                    ),
+                    "train_loss_interaction_gap_cap_regularization": (
+                        train_components.get(
+                            "interaction_gap_cap_regularization_loss",
+                            0.0,
+                        )
+                    ),
                     "train_top_support_score_margin": train_components.get(
                         "top_support_score_margin",
                         0.0,
@@ -4945,6 +5812,18 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "train_top_support_gap_min_constraint": train_components.get(
+                        "top_support_gap_min_constraint",
+                        0.0,
+                    ),
+                    "train_loss_top_support_gap_min_constraint": train_components.get(
+                        "top_support_gap_min_constraint_loss",
+                        0.0,
+                    ),
+                    "train_top_support_gap_min_target": train_components.get(
+                        "top_support_gap_min_target",
+                        0.0,
+                    ),
                     "train_branch_direct_score_margin": train_components.get(
                         "branch_direct_score_margin",
                         0.0,
@@ -4968,6 +5847,34 @@ class Trainer(LoggingMixin):
                             "branch_path_dominance_support_multiplier",
                             0.0,
                         )
+                    ),
+                    "train_branch_path_dominance_label_multiplier": (
+                        train_components.get(
+                            "branch_path_dominance_label_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "train_branch_path_dominance_allowed_drop": (
+                        train_components.get(
+                            "branch_path_dominance_allowed_drop",
+                            0.0,
+                        )
+                    ),
+                    "train_branch_support_disagreement_cap_regularization": (
+                        train_components.get(
+                            "branch_support_disagreement_cap_regularization",
+                            0.0,
+                        )
+                    ),
+                    "train_loss_branch_support_disagreement_cap_regularization": (
+                        train_components.get(
+                            "branch_support_disagreement_cap_regularization_loss",
+                            0.0,
+                        )
+                    ),
+                    "train_branch_support_disagreement_weight": train_components.get(
+                        "branch_support_disagreement_weight",
+                        0.0,
                     ),
                     "train_branch_support_score_margin": train_components.get(
                         "branch_support_score_margin",
@@ -5175,6 +6082,42 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "val_class_evidence_gap_cap_label_multiplier": (
+                        val_components.get(
+                            "class_evidence_gap_cap_label_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "val_class_evidence_gap_cap_effective_cap": (
+                        val_components.get(
+                            "class_evidence_gap_cap_effective_cap",
+                            0.0,
+                        )
+                    ),
+                    "val_class_evidence_positive_gap_cap_regularization": (
+                        val_components.get(
+                            "class_evidence_positive_gap_cap_regularization",
+                            0.0,
+                        )
+                    ),
+                    "val_loss_class_evidence_positive_gap_cap_regularization": (
+                        val_components.get(
+                            "class_evidence_positive_gap_cap_regularization_loss",
+                            0.0,
+                        )
+                    ),
+                    "val_interaction_gap_cap_regularization": (
+                        val_components.get(
+                            "interaction_gap_cap_regularization",
+                            0.0,
+                        )
+                    ),
+                    "val_loss_interaction_gap_cap_regularization": (
+                        val_components.get(
+                            "interaction_gap_cap_regularization_loss",
+                            0.0,
+                        )
+                    ),
                     "val_top_support_score_margin": val_components.get(
                         "top_support_score_margin",
                         0.0,
@@ -5201,6 +6144,18 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "val_top_support_gap_min_constraint": val_components.get(
+                        "top_support_gap_min_constraint",
+                        0.0,
+                    ),
+                    "val_loss_top_support_gap_min_constraint": val_components.get(
+                        "top_support_gap_min_constraint_loss",
+                        0.0,
+                    ),
+                    "val_top_support_gap_min_target": val_components.get(
+                        "top_support_gap_min_target",
+                        0.0,
+                    ),
                     "val_branch_direct_score_margin": val_components.get(
                         "branch_direct_score_margin",
                         0.0,
@@ -5222,6 +6177,34 @@ class Trainer(LoggingMixin):
                             "branch_path_dominance_support_multiplier",
                             0.0,
                         )
+                    ),
+                    "val_branch_path_dominance_label_multiplier": (
+                        val_components.get(
+                            "branch_path_dominance_label_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "val_branch_path_dominance_allowed_drop": (
+                        val_components.get(
+                            "branch_path_dominance_allowed_drop",
+                            0.0,
+                        )
+                    ),
+                    "val_branch_support_disagreement_cap_regularization": (
+                        val_components.get(
+                            "branch_support_disagreement_cap_regularization",
+                            0.0,
+                        )
+                    ),
+                    "val_loss_branch_support_disagreement_cap_regularization": (
+                        val_components.get(
+                            "branch_support_disagreement_cap_regularization_loss",
+                            0.0,
+                        )
+                    ),
+                    "val_branch_support_disagreement_weight": val_components.get(
+                        "branch_support_disagreement_weight",
+                        0.0,
                     ),
                     "val_branch_support_score_margin": val_components.get(
                         "branch_support_score_margin",

@@ -255,10 +255,31 @@ def _format_component_line(
     )
     _append_raw_loss_pair(
         parts,
+        "positive_gap_cap",
+        components,
+        raw_key="class_evidence_positive_gap_cap_regularization",
+        loss_key="class_evidence_positive_gap_cap_regularization_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
+        "interaction_gap_cap",
+        components,
+        raw_key="interaction_gap_cap_regularization",
+        loss_key="interaction_gap_cap_regularization_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
         "top_support",
         components,
         raw_key="top_support_score_margin",
         loss_key="top_support_score_margin_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
+        "top_support_min",
+        components,
+        raw_key="top_support_gap_min_constraint",
+        loss_key="top_support_gap_min_constraint_loss",
     )
     top_support_label_mult = _component_float(
         components,
@@ -302,6 +323,13 @@ def _format_component_line(
         components,
         raw_key="branch_path_dominance_constraint",
         loss_key="branch_path_dominance_constraint_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
+        "disagree_cap",
+        components,
+        raw_key="branch_support_disagreement_cap_regularization",
+        loss_key="branch_support_disagreement_cap_regularization_loss",
     )
     _append_raw_loss_pair(
         parts,

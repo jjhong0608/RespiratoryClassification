@@ -244,7 +244,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver28"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver30"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.model.encoder.architecture.hidden_size == 384
@@ -357,6 +357,8 @@ def test_retained_repo_configs_load() -> None:
     assert direct_path.relative_positive_scale_max == pytest.approx(1.5)
     assert direct_path.relative_negative_scale_init == pytest.approx(0.1)
     assert direct_path.relative_negative_scale_max == pytest.approx(0.5)
+    assert direct_path.residual_hidden_size == 64
+    assert direct_path.residual_scale_init == pytest.approx(0.05)
     assert direct_path.residual_scale_max == pytest.approx(0.3)
     assert current_training_cfg.train.loss.top_support_score_margin.enabled is True
     assert (
@@ -368,7 +370,7 @@ def test_retained_repo_configs_load() -> None:
         == {
             "normal": 1.0,
             "crackle": 1.0,
-            "wheeze": 1.0,
+            "wheeze": 2.0,
         }
     )
     hardness = (
@@ -385,10 +387,20 @@ def test_retained_repo_configs_load() -> None:
     assert support_multiplier.mode == "linear"
     assert support_multiplier.gain == pytest.approx(1.0)
     assert support_multiplier.cap == pytest.approx(2.0)
+    min_gap = current_training_cfg.train.loss.top_support_gap_min_constraint
+    assert min_gap.enabled is True
+    assert min_gap.weight == pytest.approx(0.05)
+    assert min_gap.base_min_gap_by_label == {
+        "normal": 0.0,
+        "crackle": 0.0,
+        "wheeze": 0.2,
+    }
+    assert min_gap.support_gain == pytest.approx(0.5)
+    assert min_gap.support_cap == pytest.approx(2.0)
     phase_schedule = (
         current_training_cfg.train.loss.top_branch_margin.phase_weight_schedule
     )
-    assert phase_schedule.enabled is False
+    assert phase_schedule.enabled is True
     assert phase_schedule.start_epoch == 21
     assert phase_schedule.end_epoch == 31
     assert phase_schedule.start_multiplier_by_label == {
@@ -399,7 +411,7 @@ def test_retained_repo_configs_load() -> None:
     assert phase_schedule.label_multiplier_by_label == {
         "normal": 1.0,
         "crackle": 1.0,
-        "wheeze": 1.0,
+        "wheeze": 2.0,
     }
     top_branch_hardness = (
         current_training_cfg.train.loss.top_branch_margin.hardness_weighting
@@ -423,6 +435,23 @@ def test_retained_repo_configs_load() -> None:
     assert dominance.enabled is True
     assert dominance.weight == pytest.approx(0.05)
     assert dominance.allowed_drop == pytest.approx(0.5)
+    assert dominance.label_weight_by_label == {
+        "normal": 0.75,
+        "crackle": 0.75,
+        "wheeze": 1.5,
+    }
+    disagreement_cap = (
+        current_training_cfg.train.loss.branch_support_disagreement_cap_regularization
+    )
+    assert disagreement_cap.enabled is True
+    assert disagreement_cap.weight == pytest.approx(0.02)
+    assert disagreement_cap.embedding_gap_cap == pytest.approx(6.0)
+    assert disagreement_cap.interaction_gap_cap == pytest.approx(4.0)
+    assert dominance.allowed_drop_by_label == {
+        "normal": 0.5,
+        "crackle": 0.75,
+        "wheeze": 0.3,
+    }
     assert dominance.support_weighting.enabled is True
     assert dominance.support_weighting.gain == pytest.approx(0.5)
     assert dominance.support_weighting.cap == pytest.approx(3.0)
@@ -473,6 +502,35 @@ def test_retained_repo_configs_load() -> None:
         current_training_cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap
         == pytest.approx(3.0)
     )
+    assert (
+        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.label_weight_by_label
+        == {
+            "normal": 1.0,
+            "crackle": 1.0,
+            "wheeze": 1.5,
+        }
+    )
+    assert (
+        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap_by_label
+        == {
+            "normal": 3.0,
+            "crackle": 3.0,
+            "wheeze": 2.5,
+        }
+    )
+    assert (
+        current_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.enabled
+        is True
+    )
+    assert (
+        current_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.positive_gap_cap
+        == pytest.approx(8.0)
+    )
+    assert current_training_cfg.train.loss.interaction_gap_cap_regularization.enabled
+    assert (
+        current_training_cfg.train.loss.interaction_gap_cap_regularization.gap_cap
+        == pytest.approx(6.0)
+    )
     assert current_training_cfg.model.classifier.hidden_dim == 1024
     assert current_training_cfg.model.classifier.fusion_projector.type == "mlp"
     assert current_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
@@ -482,7 +540,7 @@ def test_retained_repo_configs_load() -> None:
         current_class_gate.global_residual.correction.confidence_aware_gate.damping
         == pytest.approx(0.7)
     )
-    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER12"
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER14"
     assert disease_training_cfg.model.encoder.architecture.hidden_size == 384
     assert disease_training_cfg.model.encoder.architecture.adapter_depth == 6
     assert disease_training_cfg.model.classifier.hidden_dim == 1024
@@ -518,12 +576,19 @@ def test_retained_repo_configs_load() -> None:
     assert disease_training_cfg.train.loss.top_support_score_margin.weight == (
         pytest.approx(0.05)
     )
+    disease_min_gap = disease_training_cfg.train.loss.top_support_gap_min_constraint
+    assert disease_min_gap.enabled is True
+    assert disease_min_gap.base_min_gap_by_label == {
+        "Normal": 0.0,
+        "Lung_Parenchymal": 0.0,
+        "Airway": 0.2,
+    }
     assert (
         disease_training_cfg.train.loss.top_support_score_margin.label_weight_by_label
         == {
             "Normal": 1.0,
             "Lung_Parenchymal": 1.0,
-            "Airway": 1.0,
+            "Airway": 2.0,
         }
     )
     disease_hardness = (
@@ -539,12 +604,12 @@ def test_retained_repo_configs_load() -> None:
         == {
             "Normal": 1.0,
             "Lung_Parenchymal": 1.0,
-            "Airway": 1.0,
+            "Airway": 2.0,
         }
     )
     assert (
         disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.enabled
-        is False
+        is True
     )
     assert (
         disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.start_epoch
@@ -568,6 +633,57 @@ def test_retained_repo_configs_load() -> None:
     )
     assert (
         disease_training_cfg.train.loss.branch_path_dominance_constraint.enabled is True
+    )
+    assert (
+        disease_training_cfg.train.loss.branch_path_dominance_constraint.label_weight_by_label
+        == {
+            "Normal": 0.75,
+            "Lung_Parenchymal": 0.75,
+            "Airway": 1.5,
+        }
+    )
+    assert (
+        disease_training_cfg.train.loss.branch_path_dominance_constraint.allowed_drop_by_label
+        == {
+            "Normal": 0.5,
+            "Lung_Parenchymal": 0.75,
+            "Airway": 0.3,
+        }
+    )
+    disease_disagreement_cap = (
+        disease_training_cfg.train.loss.branch_support_disagreement_cap_regularization
+    )
+    assert disease_disagreement_cap.enabled is True
+    assert disease_disagreement_cap.embedding_gap_cap == pytest.approx(6.0)
+    assert disease_disagreement_cap.interaction_gap_cap == pytest.approx(4.0)
+    assert (
+        disease_training_cfg.train.loss.class_evidence_gap_cap_regularization.label_weight_by_label
+        == {
+            "Normal": 1.0,
+            "Lung_Parenchymal": 1.0,
+            "Airway": 1.5,
+        }
+    )
+    assert (
+        disease_training_cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap_by_label
+        == {
+            "Normal": 3.0,
+            "Lung_Parenchymal": 3.0,
+            "Airway": 2.5,
+        }
+    )
+    assert (
+        disease_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.enabled
+        is True
+    )
+    assert (
+        disease_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.positive_gap_cap
+        == pytest.approx(8.0)
+    )
+    assert disease_training_cfg.train.loss.interaction_gap_cap_regularization.enabled
+    assert (
+        disease_training_cfg.train.loss.interaction_gap_cap_regularization.gap_cap
+        == pytest.approx(6.0)
     )
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
     assert baseline_training_cfg.experiment.logging.terminal_width is None
@@ -1898,6 +2014,16 @@ def test_valid_class_evidence_gap_cap_regularization_config_loads(
         "target": "class_evidence_logits",
         "mode": "negative_gap_hinge",
         "negative_gap_cap": 3.0,
+        "negative_gap_cap_by_label": {
+            "normal": 3.0,
+            "crackle": 3.0,
+            "wheeze": 2.5,
+        },
+        "label_weight_by_label": {
+            "normal": 1.0,
+            "crackle": 1.0,
+            "wheeze": 1.5,
+        },
         "class_weighted": True,
         "reduction": "mean",
         "warmup_epochs": 10,
@@ -1912,9 +2038,76 @@ def test_valid_class_evidence_gap_cap_regularization_config_loads(
     assert gap_cap_cfg.target == "class_evidence_logits"
     assert gap_cap_cfg.mode == "negative_gap_hinge"
     assert gap_cap_cfg.negative_gap_cap == pytest.approx(3.0)
+    assert gap_cap_cfg.negative_gap_cap_by_label == {
+        "normal": 3.0,
+        "crackle": 3.0,
+        "wheeze": 2.5,
+    }
+    assert gap_cap_cfg.label_weight_by_label == {
+        "normal": 1.0,
+        "crackle": 1.0,
+        "wheeze": 1.5,
+    }
     assert gap_cap_cfg.class_weighted is True
     assert gap_cap_cfg.reduction == "mean"
     assert gap_cap_cfg.warmup_epochs == 10
+
+
+def test_valid_positive_and_interaction_gap_cap_configs_load(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "dropout": 0.1,
+        "use_class_embedding": True,
+        "logit_centering": True,
+        "score_decomposition": {"enabled": True},
+    }
+    payload["train"]["loss"]["class_evidence_positive_gap_cap_regularization"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "target": "class_evidence_logits",
+        "mode": "positive_gap_hinge",
+        "positive_gap_cap": 8.0,
+        "class_weighted": False,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["interaction_gap_cap_regularization"] = {
+        "enabled": True,
+        "weight": 0.01,
+        "target": "class_evidence_interaction_scores",
+        "mode": "absolute_gap_hinge",
+        "gap_cap": 6.0,
+        "class_weighted": False,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "positive_interaction_gap_cap.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    positive_cfg = cfg.train.loss.class_evidence_positive_gap_cap_regularization
+    assert positive_cfg.enabled is True
+    assert positive_cfg.target == "class_evidence_logits"
+    assert positive_cfg.mode == "positive_gap_hinge"
+    assert positive_cfg.positive_gap_cap == pytest.approx(8.0)
+    assert positive_cfg.reduction == "mean"
+    interaction_cfg = cfg.train.loss.interaction_gap_cap_regularization
+    assert interaction_cfg.enabled is True
+    assert interaction_cfg.target == "class_evidence_interaction_scores"
+    assert interaction_cfg.mode == "absolute_gap_hinge"
+    assert interaction_cfg.gap_cap == pytest.approx(6.0)
+    assert interaction_cfg.reduction == "mean"
 
 
 def test_valid_branch_direct_score_margin_config_loads(tmp_path: Path) -> None:

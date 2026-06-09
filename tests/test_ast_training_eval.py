@@ -50,12 +50,14 @@ from src.utils.config import (
     BranchBinaryPosWeightConfig,
     BranchDirectScoreMarginConfig,
     BranchPathDominanceConstraintConfig,
+    BranchSupportDisagreementCapRegularizationConfig,
     BranchSupportScoreMarginConfig,
     BranchToEvidenceRankingConsistencyConfig,
     CheckpointingConfig,
     CheckpointMonitorConfig,
     ClassEvidenceGapCapRegularizationConfig,
     ClassEvidenceMarginConfig,
+    ClassEvidencePositiveGapCapRegularizationConfig,
     ClassGatedBranchLogitMarginConfig,
     ClassGateDiversityRegularizationConfig,
     ClassifierConfig,
@@ -71,6 +73,7 @@ from src.utils.config import (
     GateEntropyRegularizationConfig,
     GateWeightedBranchMarginConfig,
     GlobalResidualAntiVetoConfig,
+    InteractionGapCapRegularizationConfig,
     LabelSmoothingConfig,
     MarginHardnessWeightingConfig,
     MarginSupportWeightingConfig,
@@ -83,6 +86,7 @@ from src.utils.config import (
     TopBranchMarginConfig,
     TopBranchMarginHardnessWeightingConfig,
     TopBranchMarginPhaseWeightScheduleConfig,
+    TopSupportGapMinConstraintConfig,
     TopSupportScoreMarginConfig,
 )
 
@@ -287,8 +291,20 @@ def _trainer_cfg(
     class_evidence_gap_cap_enabled: bool = False,
     class_evidence_gap_cap_weight: float = 0.0,
     class_evidence_gap_cap_negative_gap_cap: float = 3.0,
+    class_evidence_gap_cap_negative_cap_by_class: (tuple[float, ...] | None) = None,
+    class_evidence_gap_cap_label_weight_by_class: tuple[float, ...] | None = None,
     class_evidence_gap_cap_class_weighted: bool = False,
     class_evidence_gap_cap_warmup_epochs: int = 0,
+    class_evidence_positive_gap_cap_enabled: bool = False,
+    class_evidence_positive_gap_cap_weight: float = 0.0,
+    class_evidence_positive_gap_cap_positive_gap_cap: float = 8.0,
+    class_evidence_positive_gap_cap_class_weighted: bool = False,
+    class_evidence_positive_gap_cap_warmup_epochs: int = 0,
+    interaction_gap_cap_enabled: bool = False,
+    interaction_gap_cap_weight: float = 0.0,
+    interaction_gap_cap_gap_cap: float = 6.0,
+    interaction_gap_cap_class_weighted: bool = False,
+    interaction_gap_cap_warmup_epochs: int = 0,
     top_support_score_margin_enabled: bool = False,
     top_support_score_margin_weight: float = 0.0,
     top_support_score_margin_temperature: float = 1.0,
@@ -301,6 +317,14 @@ def _trainer_cfg(
     top_support_score_margin_hardness_weighting: (
         MarginHardnessWeightingConfig | None
     ) = None,
+    top_support_gap_min_enabled: bool = False,
+    top_support_gap_min_weight: float = 0.0,
+    top_support_gap_min_base_min_gap: float = 0.0,
+    top_support_gap_min_base_by_class: tuple[float, ...] | None = None,
+    top_support_gap_min_support_gain: float = 0.5,
+    top_support_gap_min_support_cap: float = 2.0,
+    top_support_gap_min_class_weighted: bool = False,
+    top_support_gap_min_warmup_epochs: int = 0,
     branch_support_score_margin_enabled: bool = False,
     branch_support_score_margin_weight: float = 0.0,
     branch_support_score_margin_temperature: float = 1.0,
@@ -314,11 +338,22 @@ def _trainer_cfg(
     branch_path_dominance_enabled: bool = False,
     branch_path_dominance_weight: float = 0.0,
     branch_path_dominance_allowed_drop: float = 0.5,
+    branch_path_dominance_allowed_drop_by_class: tuple[float, ...] | None = None,
+    branch_path_dominance_label_weight_by_class: tuple[float, ...] | None = None,
     branch_path_dominance_support_weighting: (
         MarginSupportWeightingConfig | None
     ) = None,
     branch_path_dominance_class_weighted: bool = False,
     branch_path_dominance_warmup_epochs: int = 0,
+    branch_support_disagreement_enabled: bool = False,
+    branch_support_disagreement_weight: float = 0.0,
+    branch_support_disagreement_threshold: float = 0.0,
+    branch_support_disagreement_condition_gain: float = 1.0,
+    branch_support_disagreement_condition_cap: float = 3.0,
+    branch_support_disagreement_embedding_gap_cap: float = 6.0,
+    branch_support_disagreement_interaction_gap_cap: float = 4.0,
+    branch_support_disagreement_class_weighted: bool = False,
+    branch_support_disagreement_warmup_epochs: int = 0,
     class_gated_branch_logit_margin_enabled: bool = False,
     class_gated_branch_logit_margin_weight: float = 0.0,
     class_gated_branch_logit_margin_value: float = 0.0,
@@ -544,6 +579,34 @@ def _trainer_cfg(
                 warmup_epochs=class_evidence_gap_cap_warmup_epochs,
             )
         ),
+        class_evidence_gap_cap_negative_cap_by_class=(
+            class_evidence_gap_cap_negative_cap_by_class
+        ),
+        class_evidence_gap_cap_label_weight_by_class=(
+            class_evidence_gap_cap_label_weight_by_class
+        ),
+        class_evidence_positive_gap_cap_regularization=(
+            ClassEvidencePositiveGapCapRegularizationConfig(
+                enabled=class_evidence_positive_gap_cap_enabled,
+                weight=class_evidence_positive_gap_cap_weight,
+                target="class_evidence_logits",
+                mode="positive_gap_hinge",
+                positive_gap_cap=(class_evidence_positive_gap_cap_positive_gap_cap),
+                class_weighted=class_evidence_positive_gap_cap_class_weighted,
+                reduction="mean",
+                warmup_epochs=class_evidence_positive_gap_cap_warmup_epochs,
+            )
+        ),
+        interaction_gap_cap_regularization=InteractionGapCapRegularizationConfig(
+            enabled=interaction_gap_cap_enabled,
+            weight=interaction_gap_cap_weight,
+            target="class_evidence_interaction_scores",
+            mode="absolute_gap_hinge",
+            gap_cap=interaction_gap_cap_gap_cap,
+            class_weighted=interaction_gap_cap_class_weighted,
+            reduction="mean",
+            warmup_epochs=interaction_gap_cap_warmup_epochs,
+        ),
         top_support_score_margin=TopSupportScoreMarginConfig(
             enabled=top_support_score_margin_enabled,
             weight=top_support_score_margin_weight,
@@ -566,6 +629,20 @@ def _trainer_cfg(
         top_support_score_margin_label_weight_by_class=(
             top_support_score_margin_label_weight_by_class
         ),
+        top_support_gap_min_constraint=TopSupportGapMinConstraintConfig(
+            enabled=top_support_gap_min_enabled,
+            weight=top_support_gap_min_weight,
+            target="class_evidence_top_support_scores",
+            mode="support_conditioned_min_gap",
+            base_min_gap=top_support_gap_min_base_min_gap,
+            support_source="top_branch_margin",
+            support_gain=top_support_gap_min_support_gain,
+            support_cap=top_support_gap_min_support_cap,
+            class_weighted=top_support_gap_min_class_weighted,
+            reduction="mean",
+            warmup_epochs=top_support_gap_min_warmup_epochs,
+        ),
+        top_support_gap_min_base_by_class=top_support_gap_min_base_by_class,
         branch_support_score_margin=BranchSupportScoreMarginConfig(
             enabled=branch_support_score_margin_enabled,
             weight=branch_support_score_margin_weight,
@@ -601,6 +678,30 @@ def _trainer_cfg(
             class_weighted=branch_path_dominance_class_weighted,
             reduction="mean",
             warmup_epochs=branch_path_dominance_warmup_epochs,
+        ),
+        branch_path_dominance_allowed_drop_by_class=(
+            branch_path_dominance_allowed_drop_by_class
+        ),
+        branch_path_dominance_label_weight_by_class=(
+            branch_path_dominance_label_weight_by_class
+        ),
+        branch_support_disagreement_cap_regularization=(
+            BranchSupportDisagreementCapRegularizationConfig(
+                enabled=branch_support_disagreement_enabled,
+                weight=branch_support_disagreement_weight,
+                branch_source="class_evidence_branch_support_scores",
+                embedding_source="class_evidence_embedding_scores",
+                interaction_source="class_evidence_interaction_scores",
+                mode="branch_gap_conditioned_abs_gap_cap",
+                disagreement_threshold=branch_support_disagreement_threshold,
+                condition_gain=branch_support_disagreement_condition_gain,
+                condition_cap=branch_support_disagreement_condition_cap,
+                embedding_gap_cap=branch_support_disagreement_embedding_gap_cap,
+                interaction_gap_cap=branch_support_disagreement_interaction_gap_cap,
+                class_weighted=branch_support_disagreement_class_weighted,
+                reduction="mean",
+                warmup_epochs=branch_support_disagreement_warmup_epochs,
+            )
         ),
         class_gated_branch_logit_margin=ClassGatedBranchLogitMarginConfig(
             enabled=class_gated_branch_logit_margin_enabled,
@@ -2121,6 +2222,8 @@ def test_trainer_class_evidence_gap_cap_regularization_hinges_large_negative_gap
             class_evidence_gap_cap_enabled=True,
             class_evidence_gap_cap_weight=0.02,
             class_evidence_gap_cap_negative_gap_cap=3.0,
+            class_evidence_gap_cap_negative_cap_by_class=(2.5, 3.0, 3.0),
+            class_evidence_gap_cap_label_weight_by_class=(2.0, 1.0, 1.0),
             class_evidence_gap_cap_class_weighted=True,
             class_evidence_gap_cap_warmup_epochs=10,
         )
@@ -2135,14 +2238,14 @@ def test_trainer_class_evidence_gap_cap_regularization_hinges_large_negative_gap
     )
     labels = torch.tensor([0, 1], dtype=torch.long)
 
-    raw_warmup, weighted_warmup = (
+    raw_warmup, weighted_warmup, warmup_label_mult, warmup_cap = (
         trainer._compute_class_evidence_gap_cap_regularization_loss(
             output,
             labels,
             epoch=10,
         )
     )
-    raw_loss, weighted_loss = (
+    raw_loss, weighted_loss, label_mult, cap_mean = (
         trainer._compute_class_evidence_gap_cap_regularization_loss(
             output,
             labels,
@@ -2151,12 +2254,108 @@ def test_trainer_class_evidence_gap_cap_regularization_hinges_large_negative_gap
     )
 
     gaps = torch.tensor([-4.0, -0.5], dtype=torch.float32)
-    penalties = torch.relu(-gaps - 3.0)
+    caps = torch.tensor([2.5, 3.0])
+    label_multipliers = torch.tensor([2.0, 1.0])
+    penalties = torch.relu(-gaps - caps) * label_multipliers
     expected_raw = torch.mean(penalties * torch.tensor([1.5, 2.0]))
     assert torch.isclose(raw_warmup, torch.tensor(0.0))
     assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(warmup_label_mult, torch.tensor(0.0))
+    assert torch.isclose(warmup_cap, torch.tensor(0.0))
     assert torch.isclose(raw_loss, expected_raw)
     assert torch.isclose(weighted_loss, 0.02 * expected_raw)
+    assert torch.isclose(label_mult, label_multipliers.mean())
+    assert torch.isclose(cap_mean, caps.mean())
+
+
+def test_trainer_class_evidence_positive_gap_cap_regularization_hinges_large_gap() -> (
+    None
+):
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_evidence_positive_gap_cap_enabled=True,
+            class_evidence_positive_gap_cap_weight=0.01,
+            class_evidence_positive_gap_cap_positive_gap_cap=2.0,
+            class_evidence_positive_gap_cap_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_logits=torch.tensor(
+            [[4.0, 1.0, 0.0], [0.2, 1.0, 0.6]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_warmup, weighted_warmup = (
+        trainer._compute_class_evidence_positive_gap_cap_regularization_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+    raw_loss, weighted_loss = (
+        trainer._compute_class_evidence_positive_gap_cap_regularization_loss(
+            output,
+            labels,
+            epoch=11,
+        )
+    )
+
+    gaps = torch.tensor([3.0, 0.4], dtype=torch.float32)
+    expected_raw = torch.relu(gaps - 2.0).mean()
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.01 * expected_raw)
+
+
+def test_trainer_interaction_gap_cap_regularization_hinges_abs_gap() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            interaction_gap_cap_enabled=True,
+            interaction_gap_cap_weight=0.01,
+            interaction_gap_cap_gap_cap=2.0,
+            interaction_gap_cap_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_interaction_scores=torch.tensor(
+            [[4.0, 1.0, 0.0], [0.2, 1.0, 4.0]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_warmup, weighted_warmup = (
+        trainer._compute_interaction_gap_cap_regularization_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+    raw_loss, weighted_loss = trainer._compute_interaction_gap_cap_regularization_loss(
+        output,
+        labels,
+        epoch=11,
+    )
+
+    gaps = torch.tensor([3.0, -3.0], dtype=torch.float32)
+    expected_raw = torch.relu(gaps.abs() - 2.0).mean()
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.01 * expected_raw)
 
 
 def test_trainer_top_support_score_margin_softplus_true_vs_hardest_negative() -> None:
@@ -2281,6 +2480,65 @@ def test_trainer_top_support_score_margin_applies_label_support_and_hardness_mul
     assert torch.isclose(hardness_mult, hardness_multipliers.mean())
 
 
+def test_trainer_top_support_gap_min_constraint_is_support_conditioned() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.5, 2.0, 0.5),
+            top_support_gap_min_enabled=True,
+            top_support_gap_min_weight=0.05,
+            top_support_gap_min_base_by_class=(0.0, 0.2, 0.0),
+            top_support_gap_min_support_gain=0.5,
+            top_support_gap_min_support_cap=2.0,
+            top_support_gap_min_class_weighted=True,
+            top_support_gap_min_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_top_support_scores=torch.tensor(
+            [[1.0, 0.4, 1.3], [0.2, 0.9, 0.6]],
+            dtype=torch.float32,
+        ),
+        class_top_branch_margin_features=torch.tensor(
+            [[0.6, 0.0, 1.0], [0.0, 1.4, 0.2]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_warmup, weighted_warmup, target_warmup = (
+        trainer._compute_top_support_gap_min_constraint_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+    raw_loss, weighted_loss, target_mean = (
+        trainer._compute_top_support_gap_min_constraint_loss(
+            output,
+            labels,
+            epoch=11,
+        )
+    )
+
+    target_min_gap = torch.tensor([0.3, 0.9], dtype=torch.float32)
+    top_support_gap = torch.tensor([-0.3, 0.3], dtype=torch.float32)
+    class_weights = torch.tensor([1.5, 2.0], dtype=torch.float32)
+    expected_raw = torch.mean(
+        torch.relu(target_min_gap - top_support_gap) * class_weights
+    )
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(target_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.05 * expected_raw)
+    assert torch.isclose(target_mean, target_min_gap.mean())
+
+
 def test_trainer_branch_direct_score_margin_softplus_true_vs_hardest_negative() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -2323,6 +2581,75 @@ def test_trainer_branch_direct_score_margin_softplus_true_vs_hardest_negative() 
     assert torch.isclose(weighted_warmup, torch.tensor(0.0))
     assert torch.isclose(raw_margin, expected_raw)
     assert torch.isclose(weighted_margin, 0.05 * expected_raw)
+
+
+def test_trainer_branch_support_disagreement_cap_regularization_is_conditioned() -> (
+    None
+):
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            branch_support_disagreement_enabled=True,
+            branch_support_disagreement_weight=0.02,
+            branch_support_disagreement_threshold=0.0,
+            branch_support_disagreement_condition_gain=1.0,
+            branch_support_disagreement_condition_cap=3.0,
+            branch_support_disagreement_embedding_gap_cap=6.0,
+            branch_support_disagreement_interaction_gap_cap=4.0,
+            branch_support_disagreement_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_evidence_branch_support_scores=torch.tensor(
+            [[1.0, 0.4, 1.3], [0.2, 0.9, 0.6]],
+            dtype=torch.float32,
+        ),
+        class_evidence_embedding_scores=torch.tensor(
+            [[8.0, 0.5, 0.0], [1.0, 0.0, 7.0]],
+            dtype=torch.float32,
+        ),
+        class_evidence_interaction_scores=torch.tensor(
+            [[4.5, 0.0, 0.0], [0.0, 5.0, 0.0]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_warmup, weighted_warmup, weight_warmup = (
+        trainer._compute_branch_support_disagreement_cap_regularization_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+    raw_loss, weighted_loss, weight_mean = (
+        trainer._compute_branch_support_disagreement_cap_regularization_loss(
+            output,
+            labels,
+            epoch=11,
+        )
+    )
+
+    disagreement = torch.tensor([1.3, 1.0], dtype=torch.float32)
+    embedding_gap = torch.tensor([7.5, -7.0], dtype=torch.float32)
+    interaction_gap = torch.tensor([4.5, 5.0], dtype=torch.float32)
+    expected_raw = torch.mean(
+        disagreement
+        * (
+            torch.relu(embedding_gap.abs() - 6.0)
+            + torch.relu(interaction_gap.abs() - 4.0)
+        )
+    )
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(weight_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.02 * expected_raw)
+    assert torch.isclose(weight_mean, disagreement.mean())
 
 
 def test_trainer_class_evidence_margin_applies_class_weights() -> None:
@@ -4371,6 +4698,8 @@ def test_trainer_branch_path_dominance_preserves_branch_gap() -> None:
             branch_path_dominance_enabled=True,
             branch_path_dominance_weight=0.05,
             branch_path_dominance_allowed_drop=0.5,
+            branch_path_dominance_allowed_drop_by_class=(0.25, 0.5, 0.5),
+            branch_path_dominance_label_weight_by_class=(2.0, 1.0, 1.0),
             branch_path_dominance_support_weighting=MarginSupportWeightingConfig(
                 enabled=True,
                 source="top_branch_margin",
@@ -4408,14 +4737,14 @@ def test_trainer_branch_path_dominance_preserves_branch_gap() -> None:
     )
     labels = torch.tensor([0, 1], dtype=torch.long)
 
-    warmup_raw, warmup_weighted, _ = (
+    warmup_raw, warmup_weighted, _, _, _ = (
         trainer._compute_branch_path_dominance_constraint_loss(
             output,
             labels,
             epoch=10,
         )
     )
-    raw_loss, weighted_loss, support_mean = (
+    raw_loss, weighted_loss, support_mean, label_mean, drop_mean = (
         trainer._compute_branch_path_dominance_constraint_loss(
             output,
             labels,
@@ -4423,12 +4752,14 @@ def test_trainer_branch_path_dominance_preserves_branch_gap() -> None:
         )
     )
 
-    expected_penalties = torch.tensor([0.5 * 1.5, 0.0])
+    expected_penalties = torch.tensor([0.75 * 1.5 * 2.0, 0.0])
     assert torch.isclose(warmup_raw, torch.tensor(0.0))
     assert torch.isclose(warmup_weighted, torch.tensor(0.0))
     assert torch.isclose(raw_loss, expected_penalties.mean())
     assert torch.isclose(weighted_loss, torch.tensor(0.05) * expected_penalties.mean())
     assert torch.isclose(support_mean, torch.tensor((1.5 + 1.3) / 2.0))
+    assert torch.isclose(label_mean, torch.tensor(1.5))
+    assert torch.isclose(drop_mean, torch.tensor(0.375))
 
 
 def test_trainer_adaptive_branch_objectives_update_train_state_only() -> None:

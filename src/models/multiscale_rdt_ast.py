@@ -266,7 +266,13 @@ class ClassGateTopSupportDirectPathConfig:
     relative_negative_scale_min: float = 0.0
     relative_negative_scale_init: float = 0.1
     relative_negative_scale_max: float = 0.5
+    residual_hidden_size: int = 64
+    residual_scale_mode: Literal["sigmoid_max", "bounded_sigmoid"] = "sigmoid_max"
+    residual_scale_min: float = 0.0
+    residual_scale_init: float = 0.05
     residual_scale_max: float = 0.3
+    residual_bound: float = 1.0
+    residual_temperature: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -499,6 +505,8 @@ class AstModelOutput:
     class_evidence_raw_embedding_scores: Tensor | None = None
     class_evidence_bounded_embedding_scores: Tensor | None = None
     class_evidence_top_support_scores: Tensor | None = None
+    class_evidence_direct_top_scores: Tensor | None = None
+    class_evidence_top_support_residual_scores: Tensor | None = None
     class_evidence_gated_support_scores: Tensor | None = None
     class_evidence_top_raw_existential_scores: Tensor | None = None
     class_evidence_top_relative_correction_scores: Tensor | None = None
@@ -508,6 +516,7 @@ class AstModelOutput:
     class_evidence_top_support_direct_raw_scale: Tensor | None = None
     class_evidence_top_support_direct_relative_positive_scale: Tensor | None = None
     class_evidence_top_support_direct_relative_negative_scale: Tensor | None = None
+    class_evidence_top_support_direct_residual_scale: Tensor | None = None
     class_evidence_top_relative_positive: Tensor | None = None
     class_evidence_top_relative_negative: Tensor | None = None
     class_evidence_gate_reliability: Tensor | None = None
@@ -606,6 +615,8 @@ class ClassEvidenceScoreOutput:
     raw_embedding_scores: Tensor | None = None
     bounded_embedding_scores: Tensor | None = None
     top_support_scores: Tensor | None = None
+    direct_top_scores: Tensor | None = None
+    top_support_residual_scores: Tensor | None = None
     gated_support_scores: Tensor | None = None
     top_raw_existential_scores: Tensor | None = None
     top_relative_correction_scores: Tensor | None = None
@@ -615,6 +626,7 @@ class ClassEvidenceScoreOutput:
     top_support_direct_raw_scale: Tensor | None = None
     top_support_direct_relative_positive_scale: Tensor | None = None
     top_support_direct_relative_negative_scale: Tensor | None = None
+    top_support_direct_residual_scale: Tensor | None = None
     top_relative_positive: Tensor | None = None
     top_relative_negative: Tensor | None = None
     gate_reliability: Tensor | None = None
@@ -893,6 +905,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         self.class_axis_top_support_direct_relative_negative_scale_param: (
             nn.Parameter | None
         )
+        self.class_axis_top_support_direct_residual_scale_param: nn.Parameter | None
+        self.class_axis_top_support_direct_residual_mlp: nn.Module | None
         self.class_axis_branch_direct_residual_mlp: nn.Module | None
         self.class_axis_interaction_scale_param: nn.Parameter | None
         if self.evidence_scorer_type == "two_tower_mlp":
@@ -919,6 +933,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             self.class_axis_top_support_direct_raw_scale_param = None
             self.class_axis_top_support_direct_relative_positive_scale_param = None
             self.class_axis_top_support_direct_relative_negative_scale_param = None
+            self.class_axis_top_support_direct_residual_scale_param = None
+            self.class_axis_top_support_direct_residual_mlp = None
             self.class_axis_branch_direct_residual_mlp = None
             self.class_axis_interaction_scale_param = None
             self.class_embedding_towers = nn.ModuleList(
@@ -1134,10 +1150,31 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                                 max_value=(top_direct_cfg.relative_negative_scale_max),
                             )
                         )
+                        self.class_axis_top_support_direct_residual_scale_param = (
+                            nn.Parameter(
+                                self._score_scale_parameter_init(
+                                    mode=top_direct_cfg.residual_scale_mode,
+                                    init_value=top_direct_cfg.residual_scale_init,
+                                    min_value=top_direct_cfg.residual_scale_min,
+                                    max_value=top_direct_cfg.residual_scale_max,
+                                )
+                            )
+                        )
+                        self.class_axis_top_support_direct_residual_mlp = nn.Sequential(
+                            nn.Linear(
+                                self.scorer_branch_feature_count,
+                                top_direct_cfg.residual_hidden_size,
+                            ),
+                            nn.GELU(),
+                            nn.Dropout(self.evidence_scorer_cfg.dropout),
+                            nn.Linear(top_direct_cfg.residual_hidden_size, 1),
+                        )
                     else:
                         self.class_axis_top_support_direct_raw_scale_param = None
                         self.class_axis_top_support_direct_relative_positive_scale_param = None
                         self.class_axis_top_support_direct_relative_negative_scale_param = None
+                        self.class_axis_top_support_direct_residual_scale_param = None
+                        self.class_axis_top_support_direct_residual_mlp = None
                     self.class_axis_branch_direct_residual_mlp = nn.Sequential(
                         nn.Linear(
                             self.scorer_branch_feature_count,
@@ -1162,6 +1199,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                     self.class_axis_top_support_direct_relative_negative_scale_param = (
                         None
                     )
+                    self.class_axis_top_support_direct_residual_scale_param = None
+                    self.class_axis_top_support_direct_residual_mlp = None
                     self.class_axis_branch_direct_residual_mlp = None
             else:
                 self.class_axis_embedding_score_head = None
@@ -1177,6 +1216,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 self.class_axis_top_support_direct_raw_scale_param = None
                 self.class_axis_top_support_direct_relative_positive_scale_param = None
                 self.class_axis_top_support_direct_relative_negative_scale_param = None
+                self.class_axis_top_support_direct_residual_scale_param = None
+                self.class_axis_top_support_direct_residual_mlp = None
                 self.class_axis_branch_direct_residual_mlp = None
                 self.class_axis_interaction_scale_param = None
             self.class_axis_class_embeddings = (
@@ -1218,6 +1259,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             self.class_axis_top_support_direct_raw_scale_param = None
             self.class_axis_top_support_direct_relative_positive_scale_param = None
             self.class_axis_top_support_direct_relative_negative_scale_param = None
+            self.class_axis_top_support_direct_residual_scale_param = None
+            self.class_axis_top_support_direct_residual_mlp = None
             self.class_axis_branch_direct_residual_mlp = None
             self.class_axis_interaction_scale_param = None
         elif self.class_gate_scorer == "normalized_mlp":
@@ -1263,6 +1306,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             self.class_axis_top_support_direct_raw_scale_param = None
             self.class_axis_top_support_direct_relative_positive_scale_param = None
             self.class_axis_top_support_direct_relative_negative_scale_param = None
+            self.class_axis_top_support_direct_residual_scale_param = None
+            self.class_axis_top_support_direct_residual_mlp = None
             self.class_axis_branch_direct_residual_mlp = None
             self.class_axis_interaction_scale_param = None
         else:
@@ -1445,12 +1490,13 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         *,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         cfg = self.evidence_scorer_cfg.branch_direct_score.top_support_direct_path
         if (
             self.class_axis_top_support_direct_raw_scale_param is None
             or self.class_axis_top_support_direct_relative_positive_scale_param is None
             or self.class_axis_top_support_direct_relative_negative_scale_param is None
+            or self.class_axis_top_support_direct_residual_scale_param is None
         ):
             raise RuntimeError("top support direct path scales are not initialized")
         raw_scale = self._score_scale_from_parameter(
@@ -1480,7 +1526,21 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             min_value=float(cfg.relative_negative_scale_min),
             max_value=float(cfg.relative_negative_scale_max),
         )
-        return raw_scale, relative_positive_scale, relative_negative_scale
+        residual_scale = self._score_scale_from_parameter(
+            self.class_axis_top_support_direct_residual_scale_param.to(
+                device=device,
+                dtype=dtype,
+            ),
+            mode=cfg.residual_scale_mode,
+            min_value=float(cfg.residual_scale_min),
+            max_value=float(cfg.residual_scale_max),
+        )
+        return (
+            raw_scale,
+            relative_positive_scale,
+            relative_negative_scale,
+            residual_scale,
+        )
 
     def _branch_direct_score_components(
         self,
@@ -1504,6 +1564,9 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         Tensor,
         Tensor,
         Tensor,
+        Tensor,
+        Tensor,
+        Tensor | None,
         Tensor | None,
         Tensor | None,
         Tensor | None,
@@ -1522,7 +1585,20 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             or self.class_axis_branch_direct_residual_mlp is None
         ):
             raise RuntimeError("branch direct score modules are not initialized")
-        top_features = branch_feature_inputs[..., (2, 3)]
+        correction_cfg = cfg.top_relative_correction
+        top_direct_cfg = cfg.top_support_direct_path
+        top_feature_inputs = branch_feature_inputs
+        if top_direct_cfg.enabled and branch_feature_raw_inputs is not None:
+            top_feature_inputs = branch_feature_raw_inputs.to(
+                device=branch_feature_inputs.device,
+                dtype=branch_feature_inputs.dtype,
+            )
+            if tuple(top_feature_inputs.shape) != tuple(branch_feature_inputs.shape):
+                raise ValueError(
+                    "branch_feature_raw_inputs must match branch_feature_inputs "
+                    "shape for top support direct scoring"
+                )
+        top_features = top_feature_inputs[..., (2, 3)]
         gated_features = branch_feature_inputs[..., (0, 1)]
         top_weights = F.softplus(
             self.class_axis_branch_direct_existential_weight_param.to(
@@ -1545,14 +1621,14 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         top_raw_existential_scores = (top_raw_feature * top_weights[0]) + top_bias
         top_relative_positive = torch.relu(top_relative_feature)
         top_relative_negative = torch.clamp(top_relative_feature, max=0.0)
-        correction_cfg = cfg.top_relative_correction
-        top_direct_cfg = cfg.top_support_direct_path
         top_support_raw_positive_component: Tensor | None = None
         top_support_relative_positive_component: Tensor | None = None
         top_support_relative_negative_component: Tensor | None = None
         top_support_direct_raw_scale: Tensor | None = None
         top_support_direct_relative_positive_scale: Tensor | None = None
         top_support_direct_relative_negative_scale: Tensor | None = None
+        top_support_direct_residual_scale: Tensor | None = None
+        top_support_residual_scores = torch.zeros_like(top_raw_feature)
         if top_direct_cfg.enabled:
             if top_direct_cfg.mode != "monotonic_raw_relative":
                 raise ValueError("top support direct path mode is unsupported")
@@ -1560,16 +1636,21 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 raise ValueError(
                     "top support direct path positive_transform is unsupported"
                 )
+            if self.class_axis_top_support_direct_residual_mlp is None:
+                raise RuntimeError(
+                    "top support direct residual module is not initialized"
+                )
             (
                 top_support_direct_raw_scale,
                 top_support_direct_relative_positive_scale,
                 top_support_direct_relative_negative_scale,
+                top_support_direct_residual_scale,
             ) = self._top_support_direct_scales(
                 device=branch_feature_inputs.device,
                 dtype=branch_feature_inputs.dtype,
             )
             top_support_raw_positive_component = (
-                top_support_direct_raw_scale * F.softplus(top_raw_feature)
+                top_support_direct_raw_scale * top_raw_feature
             )
             top_support_relative_positive_component = (
                 top_support_direct_relative_positive_scale
@@ -1579,19 +1660,33 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 top_support_direct_relative_negative_scale
                 * F.softplus(-top_relative_feature)
             )
-            top_raw_existential_scores = top_support_raw_positive_component
+            top_raw_existential_scores = top_support_raw_positive_component + top_bias
             top_relative_correction_scores = (
                 top_support_relative_positive_component
                 - top_support_relative_negative_component
             )
-            top_support_scores = (
+            direct_top_scores = (
                 top_raw_existential_scores + top_relative_correction_scores
+            )
+            top_support_residual_logits = (
+                self.class_axis_top_support_direct_residual_mlp(
+                    branch_feature_inputs
+                ).squeeze(-1)
+            )
+            top_support_residual_scores = float(
+                top_direct_cfg.residual_bound
+            ) * torch.tanh(
+                top_support_residual_logits / float(top_direct_cfg.residual_temperature)
+            )
+            top_support_scores = direct_top_scores + (
+                top_support_direct_residual_scale * top_support_residual_scores
             )
         elif cfg.top_support_mode == "learned_weighted_sum":
             top_relative_correction_scores = top_relative_feature * top_weights[1]
             top_support_scores = (
                 top_raw_existential_scores + top_relative_correction_scores
             )
+            direct_top_scores = top_support_scores
         elif cfg.top_support_mode == "raw_existential_plus_relative_correction":
             if not correction_cfg.enabled:
                 top_relative_correction_scores = torch.zeros_like(top_raw_feature)
@@ -1607,6 +1702,7 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             top_support_scores = (
                 top_raw_existential_scores + top_relative_correction_scores
             )
+            direct_top_scores = top_support_scores
         else:
             raise ValueError(
                 "branch direct score top_support_mode is unsupported: "
@@ -1673,6 +1769,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         )
         return (
             top_support_scores,
+            direct_top_scores,
+            top_support_residual_scores,
             gated_support_scores,
             direct_scores,
             residual_scores,
@@ -1700,6 +1798,9 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             else None,
             top_support_direct_relative_negative_scale.detach()
             if top_support_direct_relative_negative_scale is not None
+            else None,
+            top_support_direct_residual_scale.detach()
+            if top_support_direct_residual_scale is not None
             else None,
         )
 
@@ -1772,6 +1873,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 ).squeeze(-1)
                 embedding_scores = raw_embedding_scores
                 top_support_scores: Tensor | None = None
+                direct_top_scores: Tensor | None = None
+                top_support_residual_scores: Tensor | None = None
                 gated_support_scores: Tensor | None = None
                 gate_reliability: Tensor | None = None
                 gate_reliability_regret: Tensor | None = None
@@ -1787,6 +1890,7 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 top_support_direct_raw_scale: Tensor | None = None
                 top_support_direct_relative_positive_scale: Tensor | None = None
                 top_support_direct_relative_negative_scale: Tensor | None = None
+                top_support_direct_residual_scale: Tensor | None = None
                 top_relative_positive: Tensor | None = None
                 top_relative_negative: Tensor | None = None
                 branch_direct_top_scale: Tensor | None = None
@@ -1797,6 +1901,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 if self.evidence_scorer_cfg.branch_direct_score.enabled:
                     (
                         top_support_scores,
+                        direct_top_scores,
+                        top_support_residual_scores,
                         gated_support_scores,
                         branch_direct_scores,
                         branch_residual_scores,
@@ -1819,6 +1925,7 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                         top_support_direct_raw_scale,
                         top_support_direct_relative_positive_scale,
                         top_support_direct_relative_negative_scale,
+                        top_support_direct_residual_scale,
                     ) = self._branch_direct_score_components(
                         branch_feature_inputs,
                         branch_feature_raw_inputs=branch_feature_raw_inputs,
@@ -1851,6 +1958,15 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                         top_support_scores = self._center_class_scores(
                             top_support_scores
                         )
+                        direct_top_scores = self._center_class_scores(direct_top_scores)
+                        top_support_residual_scores = self._center_class_scores(
+                            top_support_residual_scores
+                        )
+                        if top_support_direct_residual_scale is not None:
+                            top_support_scores = direct_top_scores + (
+                                top_support_direct_residual_scale
+                                * top_support_residual_scores
+                            )
                         gated_support_scores = self._center_class_scores(
                             gated_support_scores
                         )
@@ -1932,6 +2048,8 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                     raw_embedding_scores=raw_embedding_scores,
                     bounded_embedding_scores=bounded_embedding_scores,
                     top_support_scores=top_support_scores,
+                    direct_top_scores=direct_top_scores,
+                    top_support_residual_scores=top_support_residual_scores,
                     gated_support_scores=gated_support_scores,
                     top_raw_existential_scores=top_raw_existential_scores,
                     top_relative_correction_scores=top_relative_correction_scores,
@@ -1950,6 +2068,9 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                     ),
                     top_support_direct_relative_negative_scale=(
                         top_support_direct_relative_negative_scale
+                    ),
+                    top_support_direct_residual_scale=(
+                        top_support_direct_residual_scale
                     ),
                     top_relative_positive=top_relative_positive,
                     top_relative_negative=top_relative_negative,
@@ -3255,6 +3376,8 @@ class MultiScaleRdtAstModel(nn.Module):
         class_evidence_raw_embedding_scores: Tensor | None = None
         class_evidence_bounded_embedding_scores: Tensor | None = None
         class_evidence_top_support_scores: Tensor | None = None
+        class_evidence_direct_top_scores: Tensor | None = None
+        class_evidence_top_support_residual_scores: Tensor | None = None
         class_evidence_gated_support_scores: Tensor | None = None
         class_evidence_top_raw_existential_scores: Tensor | None = None
         class_evidence_top_relative_correction_scores: Tensor | None = None
@@ -3264,6 +3387,7 @@ class MultiScaleRdtAstModel(nn.Module):
         class_evidence_top_support_direct_raw_scale: Tensor | None = None
         class_evidence_top_support_direct_relative_positive_scale: Tensor | None = None
         class_evidence_top_support_direct_relative_negative_scale: Tensor | None = None
+        class_evidence_top_support_direct_residual_scale: Tensor | None = None
         class_evidence_top_relative_positive: Tensor | None = None
         class_evidence_top_relative_negative: Tensor | None = None
         class_evidence_gate_reliability: Tensor | None = None
@@ -3405,6 +3529,12 @@ class MultiScaleRdtAstModel(nn.Module):
                 class_evidence_top_support_scores = (
                     class_evidence_score_output.top_support_scores
                 )
+                class_evidence_direct_top_scores = (
+                    class_evidence_score_output.direct_top_scores
+                )
+                class_evidence_top_support_residual_scores = (
+                    class_evidence_score_output.top_support_residual_scores
+                )
                 class_evidence_gated_support_scores = (
                     class_evidence_score_output.gated_support_scores
                 )
@@ -3428,6 +3558,9 @@ class MultiScaleRdtAstModel(nn.Module):
                 )
                 class_evidence_top_support_direct_relative_positive_scale = class_evidence_score_output.top_support_direct_relative_positive_scale
                 class_evidence_top_support_direct_relative_negative_scale = class_evidence_score_output.top_support_direct_relative_negative_scale
+                class_evidence_top_support_direct_residual_scale = (
+                    class_evidence_score_output.top_support_direct_residual_scale
+                )
                 class_evidence_top_relative_positive = (
                     class_evidence_score_output.top_relative_positive
                 )
@@ -3541,6 +3674,12 @@ class MultiScaleRdtAstModel(nn.Module):
                 class_evidence_top_support_scores = (
                     class_evidence_score_output.top_support_scores
                 )
+                class_evidence_direct_top_scores = (
+                    class_evidence_score_output.direct_top_scores
+                )
+                class_evidence_top_support_residual_scores = (
+                    class_evidence_score_output.top_support_residual_scores
+                )
                 class_evidence_gated_support_scores = (
                     class_evidence_score_output.gated_support_scores
                 )
@@ -3564,6 +3703,9 @@ class MultiScaleRdtAstModel(nn.Module):
                 )
                 class_evidence_top_support_direct_relative_positive_scale = class_evidence_score_output.top_support_direct_relative_positive_scale
                 class_evidence_top_support_direct_relative_negative_scale = class_evidence_score_output.top_support_direct_relative_negative_scale
+                class_evidence_top_support_direct_residual_scale = (
+                    class_evidence_score_output.top_support_direct_residual_scale
+                )
                 class_evidence_top_relative_positive = (
                     class_evidence_score_output.top_relative_positive
                 )
@@ -3810,6 +3952,10 @@ class MultiScaleRdtAstModel(nn.Module):
                 class_evidence_bounded_embedding_scores
             ),
             class_evidence_top_support_scores=class_evidence_top_support_scores,
+            class_evidence_direct_top_scores=class_evidence_direct_top_scores,
+            class_evidence_top_support_residual_scores=(
+                class_evidence_top_support_residual_scores
+            ),
             class_evidence_gated_support_scores=class_evidence_gated_support_scores,
             class_evidence_top_raw_existential_scores=(
                 class_evidence_top_raw_existential_scores
@@ -3834,6 +3980,9 @@ class MultiScaleRdtAstModel(nn.Module):
             ),
             class_evidence_top_support_direct_relative_negative_scale=(
                 class_evidence_top_support_direct_relative_negative_scale
+            ),
+            class_evidence_top_support_direct_residual_scale=(
+                class_evidence_top_support_direct_residual_scale
             ),
             class_evidence_top_relative_positive=class_evidence_top_relative_positive,
             class_evidence_top_relative_negative=class_evidence_top_relative_negative,

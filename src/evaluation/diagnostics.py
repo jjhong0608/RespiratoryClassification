@@ -176,6 +176,16 @@ def build_diagnostic_rows(
         if output.class_evidence_top_support_scores is not None
         else None
     )
+    class_evidence_direct_top_scores = (
+        output.class_evidence_direct_top_scores.detach().cpu()
+        if output.class_evidence_direct_top_scores is not None
+        else None
+    )
+    class_evidence_top_support_residual_scores = (
+        output.class_evidence_top_support_residual_scores.detach().cpu()
+        if output.class_evidence_top_support_residual_scores is not None
+        else None
+    )
     class_evidence_gated_support_scores = (
         output.class_evidence_gated_support_scores.detach().cpu()
         if output.class_evidence_gated_support_scores is not None
@@ -219,6 +229,11 @@ def build_diagnostic_rows(
     class_evidence_top_support_direct_relative_negative_scale = (
         output.class_evidence_top_support_direct_relative_negative_scale.detach().cpu()
         if output.class_evidence_top_support_direct_relative_negative_scale is not None
+        else None
+    )
+    class_evidence_top_support_direct_residual_scale = (
+        output.class_evidence_top_support_direct_residual_scale.detach().cpu()
+        if output.class_evidence_top_support_direct_residual_scale is not None
         else None
     )
     class_evidence_top_relative_positive = (
@@ -600,6 +615,30 @@ def build_diagnostic_rows(
                     row["class_evidence_top_support_score_negative_class"] = (
                         negative_class
                     )
+            if class_evidence_direct_top_scores is not None:
+                row["class_evidence_direct_top_scores"] = (
+                    class_evidence_direct_top_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_direct_top_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["direct_top_score_gap"] = gap
+                    row["direct_top_score_negative_class"] = negative_class
+            if class_evidence_top_support_residual_scores is not None:
+                row["class_evidence_top_support_residual_scores"] = (
+                    class_evidence_top_support_residual_scores[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_evidence_top_support_residual_scores[index],
+                    true_label,
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["top_support_residual_gap"] = gap
+                    row["top_support_residual_negative_class"] = negative_class
             if class_evidence_gated_support_scores is not None:
                 row["class_evidence_gated_support_scores"] = (
                     class_evidence_gated_support_scores[index].tolist()
@@ -876,6 +915,10 @@ def build_diagnostic_rows(
                     float(
                         class_evidence_top_support_direct_relative_negative_scale.item()
                     )
+                )
+            if class_evidence_top_support_direct_residual_scale is not None:
+                row["class_evidence_top_support_direct_residual_scale"] = float(
+                    class_evidence_top_support_direct_residual_scale.item()
                 )
             if class_evidence_branch_direct_top_weights is not None:
                 row["class_evidence_branch_direct_top_weights"] = (
