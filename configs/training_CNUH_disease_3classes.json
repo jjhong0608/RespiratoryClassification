@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "CNUH_DISEASE_VER14",
+    "name": "CNUH_DISEASE_VER16",
     "task": "Normal_vs_LungParenchymal_vs_Airway",
     "mode": "clip",
     "seed": 1337,
@@ -120,14 +120,14 @@
         "num_layers": 0
       },
       "architecture": {
-        "hidden_size": 384,
+        "hidden_size": 512,
         "num_attention_heads": 8,
         "mlp_ratio": 2.0,
         "hidden_dropout_prob": 0.1,
         "attention_probs_dropout_prob": 0.1,
         "layer_norm_eps": 1e-06,
         "shared_stem_depth": 1,
-        "adapter_depth": 6,
+        "adapter_depth": 8,
         "rdt": {
           "enabled": true,
           "steps": 3,
@@ -451,7 +451,7 @@
       },
       "class_evidence_positive_gap_cap_regularization": {
         "enabled": true,
-        "weight": 0.01,
+        "weight": 0.015,
         "target": "class_evidence_logits",
         "mode": "positive_gap_hinge",
         "positive_gap_cap": 8.0,
@@ -461,7 +461,7 @@
       },
       "interaction_gap_cap_regularization": {
         "enabled": true,
-        "weight": 0.01,
+        "weight": 0.015,
         "target": "class_evidence_interaction_scores",
         "mode": "absolute_gap_hinge",
         "gap_cap": 6.0,
@@ -521,6 +521,43 @@
         },
         "support_source": "top_branch_margin",
         "support_gain": 0.5,
+        "support_cap": 2.0,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
+      "class_top_branch_relative_margin": {
+        "enabled": true,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "true_vs_hardest_negative_hinge",
+        "margin": 0.3,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+        "support_weighting": {
+          "enabled": true,
+          "source": "top_branch_margin",
+          "mode": "linear",
+          "gain": 0.5,
+          "cap": 3.0
+        },
+        "hardness_weighting": {
+          "enabled": true,
+          "source": "teacher_gap_deficit",
+          "mode": "linear",
+          "gain": 0.5,
+          "cap": 2.0
+        }
+      },
+      "top_teacher_gap_min_constraint": {
+        "enabled": true,
+        "weight": 0.075,
+        "target": "class_top_branch_margin_features",
+        "mode": "support_conditioned_min_gap",
+        "base_min_gap": 0.0,
+        "support_source": "top_branch_margin",
+        "support_gain": 0.75,
         "support_cap": 2.0,
         "class_weighted": true,
         "reduction": "mean",

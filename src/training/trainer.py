@@ -45,6 +45,7 @@ from src.utils.config import (
     ClassEvidencePositiveGapCapRegularizationConfig,
     ClassGatedBranchLogitMarginConfig,
     ClassGateDiversityRegularizationConfig,
+    ClassTopBranchRelativeMarginConfig,
     EarlyStoppingConfig,
     GateBadBranchSuppressionConfig,
     GateBranchRegretConfig,
@@ -58,6 +59,7 @@ from src.utils.config import (
     TopBranchMarginConfig,
     TopSupportGapMinConstraintConfig,
     TopSupportScoreMarginConfig,
+    TopTeacherGapMinConstraintConfig,
 )
 from src.utils.fs import Fs
 from src.utils.logging import LoggingMixin
@@ -124,6 +126,12 @@ class TrainerConfig:
         default_factory=TopSupportGapMinConstraintConfig
     )
     top_support_gap_min_base_by_class: tuple[float, ...] | None = None
+    class_top_branch_relative_margin: ClassTopBranchRelativeMarginConfig = field(
+        default_factory=ClassTopBranchRelativeMarginConfig
+    )
+    top_teacher_gap_min_constraint: TopTeacherGapMinConstraintConfig = field(
+        default_factory=TopTeacherGapMinConstraintConfig
+    )
     branch_support_score_margin: BranchSupportScoreMarginConfig = field(
         default_factory=BranchSupportScoreMarginConfig
     )
@@ -205,6 +213,13 @@ class LossComponents:
     top_support_gap_min_constraint: Tensor | None = None
     top_support_gap_min_constraint_loss: Tensor | None = None
     top_support_gap_min_target: Tensor | None = None
+    class_top_branch_relative_margin: Tensor | None = None
+    class_top_branch_relative_margin_loss: Tensor | None = None
+    class_top_branch_relative_margin_support_multiplier: Tensor | None = None
+    class_top_branch_relative_margin_hardness_multiplier: Tensor | None = None
+    top_teacher_gap_min_constraint: Tensor | None = None
+    top_teacher_gap_min_constraint_loss: Tensor | None = None
+    top_teacher_gap_min_target: Tensor | None = None
     branch_direct_score_margin: Tensor | None = None
     branch_direct_score_margin_loss: Tensor | None = None
     branch_path_dominance_constraint: Tensor | None = None
@@ -1840,6 +1855,178 @@ class Trainer(LoggingMixin):
         weighted_loss = float(cfg.weight) * raw_loss
         return raw_loss, weighted_loss, target_min_gap.detach().mean()
 
+    def _teacher_gap_deficit_hardness_weights(
+        self,
+        margin_deficit: Tensor,
+        cfg: Any,
+        *,
+        loss_name: str,
+    ) -> tuple[Tensor, Tensor]:
+        if not cfg.enabled:
+            return torch.ones_like(margin_deficit), torch.zeros_like(margin_deficit)
+        if cfg.source != "teacher_gap_deficit":
+            raise ValueError(
+                f"{loss_name} hardness weighting supports only "
+                "source='teacher_gap_deficit'"
+            )
+        if cfg.mode != "linear":
+            raise ValueError(
+                f"{loss_name} hardness weighting supports only mode='linear'"
+            )
+        hardness = torch.relu(margin_deficit.detach())
+        weights = 1.0 + float(cfg.gain) * torch.clamp(
+            hardness,
+            max=float(cfg.cap),
+        )
+        return weights, hardness
+
+    def _compute_class_top_branch_relative_margin_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        cfg = self.cfg.class_top_branch_relative_margin
+        if cfg.target != "class_top_branch_margin_features":
+            raise ValueError(
+                "class top branch relative margin supports only "
+                "target='class_top_branch_margin_features'"
+            )
+        if cfg.mode != "true_vs_hardest_negative_hinge":
+            raise ValueError(
+                "class top branch relative margin supports only "
+                "mode='true_vs_hardest_negative_hinge'"
+            )
+        if output.class_top_branch_margin_features is None:
+            raise ValueError(
+                "class top branch relative margin enabled but model did not return "
+                "class_top_branch_margin_features"
+            )
+        teacher_logits = output.class_top_branch_margin_features
+        label_indices = self._validate_class_margin_inputs(
+            teacher_logits,
+            labels,
+            logits_name="class_top_branch_margin_features",
+            loss_name="class top branch relative margin",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = teacher_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss, raw_loss
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = teacher_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss, raw_loss
+        teacher_gap, _ = self._true_vs_hardest_negative_gap(
+            teacher_logits,
+            label_indices,
+        )
+        margin_deficit = torch.relu(float(cfg.margin) - teacher_gap)
+        support_weight, _ = self._margin_support_weights(
+            output,
+            labels,
+            label_indices,
+            teacher_gap,
+            cfg.support_weighting,
+            loss_name="class_top_branch_relative_margin",
+        )
+        hardness_weight, _ = self._teacher_gap_deficit_hardness_weights(
+            margin_deficit,
+            cfg.hardness_weighting,
+            loss_name="class_top_branch_relative_margin",
+        )
+        penalties = margin_deficit * support_weight * hardness_weight
+        class_weights = self._class_margin_weights(
+            label_indices,
+            teacher_logits,
+            enabled=cfg.class_weighted,
+            loss_name="class_top_branch_relative_margin",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return (
+            raw_loss,
+            weighted_loss,
+            support_weight.detach().mean(),
+            hardness_weight.detach().mean(),
+        )
+
+    def _compute_top_teacher_gap_min_constraint_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        cfg = self.cfg.top_teacher_gap_min_constraint
+        if cfg.target != "class_top_branch_margin_features":
+            raise ValueError(
+                "top teacher gap min constraint supports only "
+                "target='class_top_branch_margin_features'"
+            )
+        if cfg.mode != "support_conditioned_min_gap":
+            raise ValueError(
+                "top teacher gap min constraint supports only "
+                "mode='support_conditioned_min_gap'"
+            )
+        if cfg.support_source != "top_branch_margin":
+            raise ValueError(
+                "top teacher gap min constraint supports only "
+                "support_source='top_branch_margin'"
+            )
+        if output.class_top_branch_margin_features is None:
+            raise ValueError(
+                "top teacher gap min constraint enabled but model did not return "
+                "class_top_branch_margin_features"
+            )
+        teacher_logits = output.class_top_branch_margin_features
+        label_indices = self._validate_class_margin_inputs(
+            teacher_logits,
+            labels,
+            logits_name="class_top_branch_margin_features",
+            loss_name="top teacher gap min constraint",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = teacher_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = teacher_logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss
+        teacher_gap, _ = self._true_vs_hardest_negative_gap(
+            teacher_logits,
+            label_indices,
+        )
+        support_gap = self._top_branch_support_gap(
+            output,
+            labels,
+            label_indices,
+            loss_name="top_teacher_gap_min_constraint",
+        ).detach()
+        support = torch.clamp(
+            torch.relu(support_gap),
+            max=float(cfg.support_cap),
+        )
+        target_min_gap = float(cfg.base_min_gap) + float(cfg.support_gain) * support
+        penalties = torch.relu(target_min_gap - teacher_gap)
+        class_weights = self._class_margin_weights(
+            label_indices,
+            teacher_logits,
+            enabled=cfg.class_weighted,
+            loss_name="top_teacher_gap_min_constraint",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return raw_loss, weighted_loss, target_min_gap.detach().mean()
+
     def _compute_branch_direct_score_margin_loss(
         self,
         output: AstModelOutput,
@@ -3352,6 +3539,38 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + interaction_gap_cap_regularization_loss
             monitor_total = monitor_total + interaction_gap_cap_regularization_loss
+        class_top_branch_relative_margin: Tensor | None = None
+        class_top_branch_relative_margin_loss: Tensor | None = None
+        class_top_branch_relative_margin_support_multiplier: Tensor | None = None
+        class_top_branch_relative_margin_hardness_multiplier: Tensor | None = None
+        if self.cfg.class_top_branch_relative_margin.enabled:
+            (
+                class_top_branch_relative_margin,
+                class_top_branch_relative_margin_loss,
+                class_top_branch_relative_margin_support_multiplier,
+                class_top_branch_relative_margin_hardness_multiplier,
+            ) = self._compute_class_top_branch_relative_margin_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + class_top_branch_relative_margin_loss
+            monitor_total = monitor_total + class_top_branch_relative_margin_loss
+        top_teacher_gap_min_constraint: Tensor | None = None
+        top_teacher_gap_min_constraint_loss: Tensor | None = None
+        top_teacher_gap_min_target: Tensor | None = None
+        if self.cfg.top_teacher_gap_min_constraint.enabled:
+            (
+                top_teacher_gap_min_constraint,
+                top_teacher_gap_min_constraint_loss,
+                top_teacher_gap_min_target,
+            ) = self._compute_top_teacher_gap_min_constraint_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + top_teacher_gap_min_constraint_loss
+            monitor_total = monitor_total + top_teacher_gap_min_constraint_loss
         top_support_score_margin: Tensor | None = None
         top_support_score_margin_loss: Tensor | None = None
         top_support_score_margin_label_multiplier: Tensor | None = None
@@ -3620,6 +3839,19 @@ class Trainer(LoggingMixin):
             top_support_gap_min_constraint=top_support_gap_min_constraint,
             top_support_gap_min_constraint_loss=top_support_gap_min_constraint_loss,
             top_support_gap_min_target=top_support_gap_min_target,
+            class_top_branch_relative_margin=class_top_branch_relative_margin,
+            class_top_branch_relative_margin_loss=(
+                class_top_branch_relative_margin_loss
+            ),
+            class_top_branch_relative_margin_support_multiplier=(
+                class_top_branch_relative_margin_support_multiplier
+            ),
+            class_top_branch_relative_margin_hardness_multiplier=(
+                class_top_branch_relative_margin_hardness_multiplier
+            ),
+            top_teacher_gap_min_constraint=top_teacher_gap_min_constraint,
+            top_teacher_gap_min_constraint_loss=top_teacher_gap_min_constraint_loss,
+            top_teacher_gap_min_target=top_teacher_gap_min_target,
             branch_direct_score_margin=branch_direct_score_margin,
             branch_direct_score_margin_loss=branch_direct_score_margin_loss,
             branch_path_dominance_constraint=branch_path_dominance_constraint,
@@ -4061,6 +4293,109 @@ class Trainer(LoggingMixin):
                 row["top_branch_margin_effective_weight"] = float(
                     effective_weights[index].detach().cpu().item()
                 )
+        if (
+            self.cfg.class_top_branch_relative_margin.enabled
+            and output.class_top_branch_margin_features is not None
+        ):
+            rel_cfg = self.cfg.class_top_branch_relative_margin
+            teacher_logits = output.class_top_branch_margin_features.detach()
+            if tuple(teacher_logits.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
+                teacher_gap, teacher_negative = self._true_vs_hardest_negative_gap(
+                    teacher_logits,
+                    label_indices,
+                )
+                active = int(epoch) > int(rel_cfg.warmup_epochs)
+                margin_deficit = torch.relu(float(rel_cfg.margin) - teacher_gap)
+                support_weight, _ = self._margin_support_weights(
+                    output,
+                    labels,
+                    label_indices,
+                    teacher_gap,
+                    rel_cfg.support_weighting,
+                    loss_name="class_top_branch_relative_margin",
+                )
+                hardness_weight, hardness = self._teacher_gap_deficit_hardness_weights(
+                    margin_deficit,
+                    rel_cfg.hardness_weighting,
+                    loss_name="class_top_branch_relative_margin",
+                )
+                penalties = margin_deficit * support_weight * hardness_weight
+                if not active:
+                    penalties = torch.zeros_like(penalties)
+                for index, row in enumerate(rows):
+                    row["class_top_branch_relative_gap"] = float(
+                        teacher_gap[index].detach().cpu().item()
+                    )
+                    row["class_top_branch_relative_negative_class"] = int(
+                        teacher_negative[index].detach().cpu().item()
+                    )
+                    row["class_top_branch_relative_margin_target"] = float(
+                        rel_cfg.margin
+                    )
+                    row["class_top_branch_relative_margin_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
+                    row["class_top_branch_relative_margin_support_weight"] = float(
+                        support_weight[index].detach().cpu().item()
+                    )
+                    row["class_top_branch_relative_margin_hardness"] = float(
+                        hardness[index].detach().cpu().item()
+                    )
+                    row["class_top_branch_relative_margin_hardness_weight"] = float(
+                        hardness_weight[index].detach().cpu().item()
+                    )
+                    row["class_top_branch_relative_margin_eligible"] = bool(active)
+        if (
+            self.cfg.top_teacher_gap_min_constraint.enabled
+            and output.class_top_branch_margin_features is not None
+        ):
+            teacher_min_cfg = self.cfg.top_teacher_gap_min_constraint
+            teacher_logits = output.class_top_branch_margin_features.detach()
+            if tuple(teacher_logits.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
+                teacher_gap, teacher_negative = self._true_vs_hardest_negative_gap(
+                    teacher_logits,
+                    label_indices,
+                )
+                support_gap = self._top_branch_support_gap(
+                    output,
+                    labels,
+                    label_indices,
+                    loss_name="top_teacher_gap_min_constraint",
+                ).detach()
+                support = torch.clamp(
+                    torch.relu(support_gap),
+                    max=float(teacher_min_cfg.support_cap),
+                )
+                target_min_gap = float(teacher_min_cfg.base_min_gap) + (
+                    float(teacher_min_cfg.support_gain) * support
+                )
+                active = int(epoch) > int(teacher_min_cfg.warmup_epochs)
+                penalties = torch.relu(target_min_gap - teacher_gap)
+                if not active:
+                    penalties = torch.zeros_like(penalties)
+                for index, row in enumerate(rows):
+                    row["top_teacher_gap_min_gap"] = float(
+                        teacher_gap[index].detach().cpu().item()
+                    )
+                    row["top_teacher_gap_min_negative_class"] = int(
+                        teacher_negative[index].detach().cpu().item()
+                    )
+                    row["top_teacher_gap_min_target"] = float(
+                        target_min_gap[index].detach().cpu().item()
+                    )
+                    row["top_teacher_gap_min_support_value"] = float(
+                        support_gap[index].detach().cpu().item()
+                    )
+                    row["top_teacher_gap_min_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
+                    row["top_teacher_gap_min_eligible"] = bool(active)
         if (
             self.cfg.class_evidence_margin.enabled
             and output.class_evidence_logits is not None
@@ -4909,8 +5244,8 @@ class Trainer(LoggingMixin):
                     label_indices,
                     top_margin,
                 ).detach()
-                teacher_gap: Tensor | None = None
-                teacher_negative: Tensor | None = None
+                b2e_teacher_gap: Tensor | None = None
+                b2e_teacher_negative: Tensor | None = None
                 teacher_branch_indices: Tensor | None = None
                 if (
                     cfg.source == "class_gated_branch_logits"
@@ -4918,21 +5253,21 @@ class Trainer(LoggingMixin):
                 ):
                     source_logits = output.class_gated_branch_logits.detach()
                     if tuple(source_logits.shape) == tuple(evidence_logits.shape):
-                        teacher_gap, teacher_negative = (
+                        b2e_teacher_gap, b2e_teacher_negative = (
                             self._true_vs_hardest_negative_gap(
                                 source_logits,
                                 label_indices,
                             )
                         )
                 elif cfg.source == "top_branch_margin":
-                    teacher_gap = top_margin
-                    teacher_negative = top_negative_indices
+                    b2e_teacher_gap = top_margin
+                    b2e_teacher_negative = top_negative_indices
                     teacher_branch_indices = top_branch_indices
-                if teacher_gap is not None and teacher_negative is not None:
-                    teacher_gap = torch.maximum(teacher_gap, teacher_floor)
+                if b2e_teacher_gap is not None and b2e_teacher_negative is not None:
+                    b2e_teacher_gap = torch.maximum(b2e_teacher_gap, teacher_floor)
                     if cfg.teacher_gap_cap is not None:
-                        teacher_gap = torch.clamp(
-                            teacher_gap,
+                        b2e_teacher_gap = torch.clamp(
+                            b2e_teacher_gap,
                             max=float(cfg.teacher_gap_cap),
                         )
                     evidence_gap, evidence_negative = (
@@ -4955,17 +5290,17 @@ class Trainer(LoggingMixin):
                         loss_name="branch_to_evidence_ranking_consistency",
                     )
                     base_penalties = torch.relu(
-                        teacher_gap - evidence_gap + float(cfg.tolerance)
+                        b2e_teacher_gap - evidence_gap + float(cfg.tolerance)
                     )
                     penalties = base_penalties * support_weight * hard_weight
                     for index, row in enumerate(rows):
                         row["branch_to_evidence_mode"] = cfg.mode
                         row["branch_to_evidence_source"] = cfg.source
                         row["branch_to_evidence_branch_gap"] = float(
-                            teacher_gap[index].detach().cpu().item()
+                            b2e_teacher_gap[index].detach().cpu().item()
                         )
                         row["branch_to_evidence_teacher_gap"] = float(
-                            teacher_gap[index].detach().cpu().item()
+                            b2e_teacher_gap[index].detach().cpu().item()
                         )
                         row["branch_to_evidence_teacher_floor"] = float(
                             teacher_floor[index].detach().cpu().item()
@@ -4991,7 +5326,7 @@ class Trainer(LoggingMixin):
                             hard_weight[index].detach().cpu().item()
                         )
                         row["branch_to_evidence_branch_negative_class"] = int(
-                            teacher_negative[index].detach().cpu().item()
+                            b2e_teacher_negative[index].detach().cpu().item()
                         )
                         if teacher_branch_indices is not None:
                             row["branch_to_evidence_teacher_branch_index"] = int(
@@ -5220,6 +5555,13 @@ class Trainer(LoggingMixin):
             "top_support_gap_min_constraint": 0.0,
             "top_support_gap_min_constraint_loss": 0.0,
             "top_support_gap_min_target": 0.0,
+            "class_top_branch_relative_margin": 0.0,
+            "class_top_branch_relative_margin_loss": 0.0,
+            "class_top_branch_relative_margin_support_multiplier": 0.0,
+            "class_top_branch_relative_margin_hardness_multiplier": 0.0,
+            "top_teacher_gap_min_constraint": 0.0,
+            "top_teacher_gap_min_constraint_loss": 0.0,
+            "top_teacher_gap_min_target": 0.0,
             "branch_direct_score_margin": 0.0,
             "branch_direct_score_margin_loss": 0.0,
             "branch_path_dominance_constraint": 0.0,
@@ -5387,6 +5729,27 @@ class Trainer(LoggingMixin):
                 ),
                 "top_support_gap_min_target": (
                     loss_components.top_support_gap_min_target
+                ),
+                "class_top_branch_relative_margin": (
+                    loss_components.class_top_branch_relative_margin
+                ),
+                "class_top_branch_relative_margin_loss": (
+                    loss_components.class_top_branch_relative_margin_loss
+                ),
+                "class_top_branch_relative_margin_support_multiplier": (
+                    loss_components.class_top_branch_relative_margin_support_multiplier
+                ),
+                "class_top_branch_relative_margin_hardness_multiplier": (
+                    loss_components.class_top_branch_relative_margin_hardness_multiplier
+                ),
+                "top_teacher_gap_min_constraint": (
+                    loss_components.top_teacher_gap_min_constraint
+                ),
+                "top_teacher_gap_min_constraint_loss": (
+                    loss_components.top_teacher_gap_min_constraint_loss
+                ),
+                "top_teacher_gap_min_target": (
+                    loss_components.top_teacher_gap_min_target
                 ),
                 "branch_direct_score_margin": (
                     loss_components.branch_direct_score_margin
@@ -5824,6 +6187,42 @@ class Trainer(LoggingMixin):
                         "top_support_gap_min_target",
                         0.0,
                     ),
+                    "train_class_top_branch_relative_margin": train_components.get(
+                        "class_top_branch_relative_margin",
+                        0.0,
+                    ),
+                    "train_loss_class_top_branch_relative_margin": (
+                        train_components.get(
+                            "class_top_branch_relative_margin_loss",
+                            0.0,
+                        )
+                    ),
+                    "train_class_top_branch_relative_margin_support_multiplier": (
+                        train_components.get(
+                            "class_top_branch_relative_margin_support_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "train_class_top_branch_relative_margin_hardness_multiplier": (
+                        train_components.get(
+                            "class_top_branch_relative_margin_hardness_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "train_top_teacher_gap_min_constraint": train_components.get(
+                        "top_teacher_gap_min_constraint",
+                        0.0,
+                    ),
+                    "train_loss_top_teacher_gap_min_constraint": (
+                        train_components.get(
+                            "top_teacher_gap_min_constraint_loss",
+                            0.0,
+                        )
+                    ),
+                    "train_top_teacher_gap_min_target": train_components.get(
+                        "top_teacher_gap_min_target",
+                        0.0,
+                    ),
                     "train_branch_direct_score_margin": train_components.get(
                         "branch_direct_score_margin",
                         0.0,
@@ -6154,6 +6553,38 @@ class Trainer(LoggingMixin):
                     ),
                     "val_top_support_gap_min_target": val_components.get(
                         "top_support_gap_min_target",
+                        0.0,
+                    ),
+                    "val_class_top_branch_relative_margin": val_components.get(
+                        "class_top_branch_relative_margin",
+                        0.0,
+                    ),
+                    "val_loss_class_top_branch_relative_margin": val_components.get(
+                        "class_top_branch_relative_margin_loss",
+                        0.0,
+                    ),
+                    "val_class_top_branch_relative_margin_support_multiplier": (
+                        val_components.get(
+                            "class_top_branch_relative_margin_support_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "val_class_top_branch_relative_margin_hardness_multiplier": (
+                        val_components.get(
+                            "class_top_branch_relative_margin_hardness_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "val_top_teacher_gap_min_constraint": val_components.get(
+                        "top_teacher_gap_min_constraint",
+                        0.0,
+                    ),
+                    "val_loss_top_teacher_gap_min_constraint": val_components.get(
+                        "top_teacher_gap_min_constraint_loss",
+                        0.0,
+                    ),
+                    "val_top_teacher_gap_min_target": val_components.get(
+                        "top_teacher_gap_min_target",
                         0.0,
                     ),
                     "val_branch_direct_score_margin": val_components.get(

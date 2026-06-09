@@ -261,8 +261,12 @@ class MarginSupportWeightingConfig:
 @dataclass(frozen=True)
 class MarginHardnessWeightingConfig:
     enabled: bool = False
-    source: Literal["evidence_gap", "top_support_gap"] = "evidence_gap"
-    mode: Literal["negative_gap"] = "negative_gap"
+    source: Literal[
+        "evidence_gap",
+        "top_support_gap",
+        "teacher_gap_deficit",
+    ] = "evidence_gap"
+    mode: Literal["negative_gap", "linear"] = "negative_gap"
     gain: float = 1.0
     cap: float = 3.0
 
@@ -360,6 +364,43 @@ class TopSupportGapMinConstraintConfig:
     mode: Literal["support_conditioned_min_gap"] = "support_conditioned_min_gap"
     base_min_gap: float = 0.0
     base_min_gap_by_label: Mapping[str, float] = field(default_factory=dict)
+    support_source: Literal["top_branch_margin"] = "top_branch_margin"
+    support_gain: float = 0.5
+    support_cap: float = 2.0
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
+class ClassTopBranchRelativeMarginConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_top_branch_margin_features"] = (
+        "class_top_branch_margin_features"
+    )
+    mode: Literal["true_vs_hardest_negative_hinge"] = "true_vs_hardest_negative_hinge"
+    margin: float = 0.3
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+    support_weighting: MarginSupportWeightingConfig = field(
+        default_factory=MarginSupportWeightingConfig
+    )
+    hardness_weighting: MarginHardnessWeightingConfig = field(
+        default_factory=MarginHardnessWeightingConfig
+    )
+
+
+@dataclass(frozen=True)
+class TopTeacherGapMinConstraintConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_top_branch_margin_features"] = (
+        "class_top_branch_margin_features"
+    )
+    mode: Literal["support_conditioned_min_gap"] = "support_conditioned_min_gap"
+    base_min_gap: float = 0.0
     support_source: Literal["top_branch_margin"] = "top_branch_margin"
     support_gain: float = 0.5
     support_cap: float = 2.0
@@ -767,6 +808,12 @@ class LossConfig:
     top_support_gap_min_constraint: TopSupportGapMinConstraintConfig = field(
         default_factory=TopSupportGapMinConstraintConfig
     )
+    class_top_branch_relative_margin: ClassTopBranchRelativeMarginConfig = field(
+        default_factory=ClassTopBranchRelativeMarginConfig
+    )
+    top_teacher_gap_min_constraint: TopTeacherGapMinConstraintConfig = field(
+        default_factory=TopTeacherGapMinConstraintConfig
+    )
     branch_support_score_margin: BranchSupportScoreMarginConfig = field(
         default_factory=BranchSupportScoreMarginConfig
     )
@@ -981,8 +1028,12 @@ class JsonConfigLoader:
     _GLOBAL_RESIDUAL_CONFIDENCE_GATE_MODES = {"damped_sigmoid"}
     _MARGIN_SUPPORT_WEIGHTING_SOURCES = {"top_branch_margin", "same_as_source"}
     _MARGIN_SUPPORT_WEIGHTING_MODES = {"linear", "positive_linear"}
-    _MARGIN_HARDNESS_WEIGHTING_SOURCES = {"evidence_gap", "top_support_gap"}
-    _MARGIN_HARDNESS_WEIGHTING_MODES = {"negative_gap"}
+    _MARGIN_HARDNESS_WEIGHTING_SOURCES = {
+        "evidence_gap",
+        "top_support_gap",
+        "teacher_gap_deficit",
+    }
+    _MARGIN_HARDNESS_WEIGHTING_MODES = {"negative_gap", "linear"}
     _GATE_ENTROPY_TARGETS = {
         "evidence_gate",
         "class_evidence_gate",
@@ -1016,6 +1067,13 @@ class JsonConfigLoader:
     _TOP_SUPPORT_GAP_MIN_CONSTRAINT_MODES = {"support_conditioned_min_gap"}
     _TOP_SUPPORT_GAP_MIN_CONSTRAINT_SUPPORT_SOURCES = {"top_branch_margin"}
     _TOP_SUPPORT_GAP_MIN_CONSTRAINT_REDUCTIONS = {"mean"}
+    _CLASS_TOP_BRANCH_RELATIVE_MARGIN_TARGETS = {"class_top_branch_margin_features"}
+    _CLASS_TOP_BRANCH_RELATIVE_MARGIN_MODES = {"true_vs_hardest_negative_hinge"}
+    _CLASS_TOP_BRANCH_RELATIVE_MARGIN_REDUCTIONS = {"mean"}
+    _TOP_TEACHER_GAP_MIN_CONSTRAINT_TARGETS = {"class_top_branch_margin_features"}
+    _TOP_TEACHER_GAP_MIN_CONSTRAINT_MODES = {"support_conditioned_min_gap"}
+    _TOP_TEACHER_GAP_MIN_CONSTRAINT_SUPPORT_SOURCES = {"top_branch_margin"}
+    _TOP_TEACHER_GAP_MIN_CONSTRAINT_REDUCTIONS = {"mean"}
     _BRANCH_SUPPORT_SCORE_MARGIN_TARGETS = {"class_evidence_branch_support_scores"}
     _BRANCH_SUPPORT_SCORE_MARGIN_MODES = {"softplus_true_vs_hardest_negative"}
     _BRANCH_SUPPORT_SCORE_MARGIN_REDUCTIONS = {"mean"}
@@ -3648,6 +3706,216 @@ class JsonConfigLoader:
                     "train.loss.top_support_gap_min_constraint.class_weighted "
                     "requires train.loss.class_weighting.enabled=true"
                 )
+        class_top_branch_relative_cfg = cfg.loss.class_top_branch_relative_margin
+        if not isinstance(class_top_branch_relative_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.class_top_branch_relative_margin.enabled must be a boolean"
+            )
+        if not isinstance(class_top_branch_relative_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.class_top_branch_relative_margin.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            class_top_branch_relative_cfg.target
+            not in JsonConfigLoader._CLASS_TOP_BRANCH_RELATIVE_MARGIN_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.class_top_branch_relative_margin.target must be "
+                "'class_top_branch_margin_features'"
+            )
+        if (
+            class_top_branch_relative_cfg.mode
+            not in JsonConfigLoader._CLASS_TOP_BRANCH_RELATIVE_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.class_top_branch_relative_margin.mode must be "
+                "'true_vs_hardest_negative_hinge'"
+            )
+        if (
+            class_top_branch_relative_cfg.reduction
+            not in JsonConfigLoader._CLASS_TOP_BRANCH_RELATIVE_MARGIN_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.class_top_branch_relative_margin.reduction must be 'mean'"
+            )
+        if (
+            not isinstance(class_top_branch_relative_cfg.margin, int | float)
+            or isinstance(class_top_branch_relative_cfg.margin, bool)
+            or float(class_top_branch_relative_cfg.margin) <= 0.0
+        ):
+            raise ValueError(
+                "train.loss.class_top_branch_relative_margin.margin must be "
+                "greater than zero"
+            )
+        if not isinstance(
+            class_top_branch_relative_cfg.warmup_epochs,
+            int,
+        ) or isinstance(class_top_branch_relative_cfg.warmup_epochs, bool):
+            raise TypeError(
+                "train.loss.class_top_branch_relative_margin.warmup_epochs "
+                "must be an integer"
+            )
+        if int(class_top_branch_relative_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.class_top_branch_relative_margin.warmup_epochs "
+                "must be non-negative"
+            )
+        JsonConfigLoader._validate_margin_support_weighting(
+            class_top_branch_relative_cfg.support_weighting,
+            field_name=(
+                "train.loss.class_top_branch_relative_margin.support_weighting"
+            ),
+        )
+        if class_top_branch_relative_cfg.support_weighting.enabled and (
+            class_top_branch_relative_cfg.support_weighting.source
+            != "top_branch_margin"
+            or class_top_branch_relative_cfg.support_weighting.mode != "linear"
+        ):
+            raise ValueError(
+                "train.loss.class_top_branch_relative_margin.support_weighting "
+                "supports only source='top_branch_margin' and mode='linear'"
+            )
+        JsonConfigLoader._validate_margin_hardness_weighting(
+            class_top_branch_relative_cfg.hardness_weighting,
+            field_name=(
+                "train.loss.class_top_branch_relative_margin.hardness_weighting"
+            ),
+        )
+        if class_top_branch_relative_cfg.hardness_weighting.enabled and (
+            class_top_branch_relative_cfg.hardness_weighting.source
+            != "teacher_gap_deficit"
+            or class_top_branch_relative_cfg.hardness_weighting.mode != "linear"
+        ):
+            raise ValueError(
+                "train.loss.class_top_branch_relative_margin.hardness_weighting "
+                "supports only source='teacher_gap_deficit' and mode='linear'"
+            )
+        if class_top_branch_relative_cfg.enabled:
+            if class_top_branch_relative_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.class_top_branch_relative_margin.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.class_top_branch_relative_margin is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.class_top_branch_relative_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if (
+                class_top_branch_relative_cfg.class_weighted
+                and not cfg.loss.class_weighting.enabled
+            ):
+                raise ValueError(
+                    "train.loss.class_top_branch_relative_margin.class_weighted "
+                    "requires train.loss.class_weighting.enabled=true"
+                )
+        top_teacher_min_cfg = cfg.loss.top_teacher_gap_min_constraint
+        if not isinstance(top_teacher_min_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.top_teacher_gap_min_constraint.enabled must be a boolean"
+            )
+        if not isinstance(top_teacher_min_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.top_teacher_gap_min_constraint.class_weighted "
+                "must be a boolean"
+            )
+        if (
+            top_teacher_min_cfg.target
+            not in JsonConfigLoader._TOP_TEACHER_GAP_MIN_CONSTRAINT_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.top_teacher_gap_min_constraint.target must be "
+                "'class_top_branch_margin_features'"
+            )
+        if (
+            top_teacher_min_cfg.mode
+            not in JsonConfigLoader._TOP_TEACHER_GAP_MIN_CONSTRAINT_MODES
+        ):
+            raise ValueError(
+                "train.loss.top_teacher_gap_min_constraint.mode must be "
+                "'support_conditioned_min_gap'"
+            )
+        if (
+            top_teacher_min_cfg.support_source
+            not in JsonConfigLoader._TOP_TEACHER_GAP_MIN_CONSTRAINT_SUPPORT_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.top_teacher_gap_min_constraint.support_source must be "
+                "'top_branch_margin'"
+            )
+        if (
+            top_teacher_min_cfg.reduction
+            not in JsonConfigLoader._TOP_TEACHER_GAP_MIN_CONSTRAINT_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.top_teacher_gap_min_constraint.reduction must be 'mean'"
+            )
+        for field_name, value, min_value, strict_min in (
+            ("base_min_gap", top_teacher_min_cfg.base_min_gap, 0.0, False),
+            ("support_gain", top_teacher_min_cfg.support_gain, 0.0, False),
+            ("support_cap", top_teacher_min_cfg.support_cap, 0.0, True),
+        ):
+            if (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or (
+                    float(value) <= min_value
+                    if strict_min
+                    else float(value) < min_value
+                )
+            ):
+                comparator = (
+                    "greater than" if strict_min else "greater than or equal to"
+                )
+                raise ValueError(
+                    f"train.loss.top_teacher_gap_min_constraint.{field_name} "
+                    f"must be {comparator} {min_value}"
+                )
+        if not isinstance(top_teacher_min_cfg.warmup_epochs, int) or isinstance(
+            top_teacher_min_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.top_teacher_gap_min_constraint.warmup_epochs "
+                "must be an integer"
+            )
+        if int(top_teacher_min_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.top_teacher_gap_min_constraint.warmup_epochs "
+                "must be non-negative"
+            )
+        if top_teacher_min_cfg.enabled:
+            if top_teacher_min_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.top_teacher_gap_min_constraint.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.top_teacher_gap_min_constraint is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.top_teacher_gap_min_constraint requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if (
+                top_teacher_min_cfg.class_weighted
+                and not cfg.loss.class_weighting.enabled
+            ):
+                raise ValueError(
+                    "train.loss.top_teacher_gap_min_constraint.class_weighted "
+                    "requires train.loss.class_weighting.enabled=true"
+                )
         branch_support_cfg = cfg.loss.branch_support_score_margin
         if not isinstance(branch_support_cfg.enabled, bool):
             raise ValueError(
@@ -5871,6 +6139,35 @@ class JsonConfigLoader:
         )
         loss["top_support_gap_min_constraint"] = TopSupportGapMinConstraintConfig(
             **top_support_gap_min_constraint
+        )
+        class_top_branch_relative_margin = dict(
+            loss.get("class_top_branch_relative_margin", {})
+        )
+        class_top_branch_relative_margin["support_weighting"] = (
+            MarginSupportWeightingConfig(
+                **dict(
+                    class_top_branch_relative_margin.get(
+                        "support_weighting",
+                        {},
+                    )
+                )
+            )
+        )
+        class_top_branch_relative_margin["hardness_weighting"] = (
+            MarginHardnessWeightingConfig(
+                **dict(
+                    class_top_branch_relative_margin.get(
+                        "hardness_weighting",
+                        {},
+                    )
+                )
+            )
+        )
+        loss["class_top_branch_relative_margin"] = ClassTopBranchRelativeMarginConfig(
+            **class_top_branch_relative_margin
+        )
+        loss["top_teacher_gap_min_constraint"] = TopTeacherGapMinConstraintConfig(
+            **dict(loss.get("top_teacher_gap_min_constraint", {}))
         )
         loss["branch_support_score_margin"] = BranchSupportScoreMarginConfig(
             **dict(loss.get("branch_support_score_margin", {}))

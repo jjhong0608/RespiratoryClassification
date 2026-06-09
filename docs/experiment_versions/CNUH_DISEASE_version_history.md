@@ -867,3 +867,254 @@ top_branch_margin
 `VER14`는 loss weight를 단순히 키우는 실험이 아니다. `VER13`에서 이미 penalty가 커도 `top_support_gap` sign이 해결되지 않는 현상이 확인되었기 때문에, primary 수정은 top-support score 구조 자체에 있다.
 
 또한 label-aware 설정은 유지할 수 있지만, 핵심 구조는 label-agnostic이어야 한다. 즉 Airway만 따로 처리하는 것이 아니라 모든 label에 동일한 teacher-derived top-support path와 disagreement-conditioned cap을 적용하고, label별 난이도는 config multiplier와 min-gap 값으로만 조절한다.
+
+## CNUH_DISEASE_VER14 -> CNUH_DISEASE_VER15
+
+### 목적
+
+`VER14` diagnostics에서 hard FN의 병목이 top-support/evidence 뒤쪽이 아니라 더 앞단의 teacher-relative branch path에서 시작되는 것이 확인됐다.
+
+핵심 관찰은 다음이다.
+
+- `top_branch_margin`이 일부 hard sample에서 약하거나 양수여도, `class_top_branch_margin_features[true] - max(negative)`가 먼저 음수로 무너진다.
+- 이 상태에서는 `top_support_score_gap`, `branch_direct_score_gap`, `branch_support_score_gap`, `class_evidence_gap`, `final_gap`이 연쇄적으로 음수로 내려간다.
+- `final_gap`은 대부분 `class_evidence_gap`을 따라가므로 final combiner를 더 수정하는 우선순위는 낮다.
+
+따라서 `VER15`는 teacher 자체의 class-relative ranking을 직접 보정하는 실험으로 분리한다.
+
+### 설정 변경
+
+#### 1. Branch/adaptor teacher capacity 증가
+
+```json
+"architecture": {
+  "hidden_size": 512,
+  "adapter_depth": 8,
+  "shared_stem_depth": 1
+}
+```
+
+`hidden_size`와 `adapter_depth`를 키워 branch/adaptor teacher가 hard sample에서 class-relative support를 더 잘 만들 수 있는지 확인한다. `shared_stem_depth`는 유지해 class/branch-specific adaptor capacity 증가를 우선한다.
+
+#### 2. `class_top_branch_relative_margin` 추가
+
+새 loss는 `class_top_branch_margin_features` 자체의 true-vs-hardest-negative gap을 직접 본다.
+
+```text
+teacher_gap =
+  class_top_branch_margin_features[true]
+  - max(class_top_branch_margin_features[negative])
+
+penalty = relu(margin - teacher_gap)
+```
+
+실험값은 다음으로 둔다.
+
+```json
+"class_top_branch_relative_margin": {
+  "enabled": true,
+  "weight": 0.05,
+  "target": "class_top_branch_margin_features",
+  "mode": "true_vs_hardest_negative_hinge",
+  "margin": 0.3,
+  "class_weighted": true,
+  "reduction": "mean",
+  "warmup_epochs": 10,
+  "support_weighting": {
+    "enabled": true,
+    "source": "top_branch_margin",
+    "mode": "linear",
+    "gain": 0.5,
+    "cap": 3.0
+  },
+  "hardness_weighting": {
+    "enabled": true,
+    "source": "teacher_gap_deficit",
+    "mode": "linear",
+    "gain": 1.0,
+    "cap": 3.0
+  }
+}
+```
+
+`support_weighting`은 true class top branch support가 있는 sample을 더 중요하게 본다.
+`hardness_weighting`은 `teacher_gap`이 목표 margin보다 부족한 sample을 hard-FN proxy로 보고 penalty를 키운다.
+
+#### 3. `top_teacher_gap_min_constraint` 추가
+
+`top_support_gap_min_constraint`가 top-support scorer 뒤쪽을 보정했다면, 새 constraint는 teacher 앞단에 직접 최소 gap을 요구한다.
+
+```text
+target_min_gap =
+  base_min_gap
+  + support_gain * clamp(max(class_top_branch_margin_features[true], 0), 0, support_cap)
+
+penalty = relu(target_min_gap - teacher_gap)
+```
+
+실험값은 다음이다.
+
+```json
+"top_teacher_gap_min_constraint": {
+  "enabled": true,
+  "weight": 0.05,
+  "target": "class_top_branch_margin_features",
+  "mode": "support_conditioned_min_gap",
+  "base_min_gap": 0.0,
+  "support_source": "top_branch_margin",
+  "support_gain": 0.5,
+  "support_cap": 2.0,
+  "class_weighted": true,
+  "reduction": "mean",
+  "warmup_epochs": 10
+}
+```
+
+#### 4. Positive/interaction cap 보조 강화
+
+`class_evidence_positive_gap_cap_regularization.weight`와 `interaction_gap_cap_regularization.weight`는 `0.01 -> 0.015`로 올린다.
+cap 값은 그대로 둔다.
+
+- `positive_gap_cap=8.0`
+- `interaction_gap_cap=6.0`
+
+이 변경은 primary fix가 아니라, teacher-relative 보정 이후 남는 evidence overconfidence를 약하게 정리하기 위한 보조 장치다.
+
+### Code Impact
+
+- `src/utils/config.py`
+  - `ClassTopBranchRelativeMarginConfig`
+  - `TopTeacherGapMinConstraintConfig`
+  - `teacher_gap_deficit` hardness weighting
+- `src/training/trainer.py`
+  - `_compute_class_top_branch_relative_margin_loss()`
+  - `_compute_top_teacher_gap_min_constraint_loss()`
+  - epoch aggregation/history/diagnostics component 추가
+- `src/training/epoch_logging.py`
+  - `top_teacher_rel raw/loss`
+  - `top_teacher_min raw/loss`
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER15`
+  - `hidden_size=512`, `adapter_depth=8`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver31`
+
+### Diagnostics Checkpoints
+
+`VER15` 분석에서는 다음 chain을 집중적으로 확인한다.
+
+```text
+top_branch_margin
+-> class_top_branch_relative_gap
+-> top_teacher_gap_min_target
+-> direct_top_score_gap
+-> top_support_score_gap
+-> branch_direct_score_gap
+-> branch_support_score_gap
+-> class_evidence_gap
+-> final_gap
+```
+
+성공 기준은 다음이다.
+
+- hard FN에서 `class_top_branch_relative_gap < 0` 비율이 줄어든다.
+- `class_top_branch_relative_margin_penalty`와 `top_teacher_gap_min_penalty`가 후반으로 갈수록 감소한다.
+- `class_top_branch_relative_gap`이 양수인 sample에서 downstream `top_support_score_gap`이 음수로 뒤집히는 빈도가 줄어든다.
+- `final_gap`은 계속 `class_evidence_gap`을 크게 뒤집지 않는다.
+
+### 주의점
+
+`VER15`는 downstream support scorer를 더 세게 누르는 실험이 아니라 teacher 앞단을 보정하는 실험이다. 따라서 새 loss가 줄지 않거나 `class_top_branch_relative_gap`이 개선되지 않으면, 다음 병목은 branch/adaptor teacher 구조 또는 데이터 자체의 class-relative signal 한계로 봐야 한다.
+
+## CNUH_DISEASE_VER15 -> CNUH_DISEASE_VER16
+
+### 수정 이유
+
+`VER15` 최종 분석에서는 모델 capacity 자체보다 teacher-relative objective의 힘 배분이 더 직접적인 병목으로 확인됐다. 대표 hard sample에서는 `top_branch_margin_value > 0`으로 true class branch 내부 support가 약하게 살아 있는데도 `class_top_branch_relative_gap < 0`으로 class-wise teacher ranking이 먼저 무너졌고, 이후 `direct_top_score_gap -> top_support_score_gap -> branch_support_score_gap -> class_evidence_gap -> final_gap`이 같은 방향으로 따라갔다.
+
+따라서 `VER16`에서는 capacity 증가는 후순위로 두고, 기존 teacher-relative loss 2개의 역할을 분리한다.
+
+- `top_teacher_gap_min_constraint`: primary correction
+- `class_top_branch_relative_margin.hardness_weighting`: auxiliary hard-sample weighting
+
+### Config 변경
+
+#### 1. `top_teacher_gap_min_constraint` 강화
+
+`top_teacher_gap_min_constraint`는 `top_branch_margin_value`가 양수인 sample에서 `class_top_branch_relative_gap`의 최소 목표를 더 강하게 요구한다.
+
+```text
+teacher_gap =
+  class_top_branch_margin_features[true]
+  - max(class_top_branch_margin_features[negative])
+
+support =
+  clamp(relu(top_branch_margin_value), 0, support_cap)
+
+target_min_gap =
+  base_min_gap + support_gain * support
+
+penalty =
+  relu(target_min_gap - teacher_gap)
+```
+
+실험값은 다음이다.
+
+```json
+"top_teacher_gap_min_constraint": {
+  "enabled": true,
+  "weight": 0.075,
+  "target": "class_top_branch_margin_features",
+  "mode": "support_conditioned_min_gap",
+  "base_min_gap": 0.0,
+  "support_source": "top_branch_margin",
+  "support_gain": 0.75,
+  "support_cap": 2.0,
+  "class_weighted": true,
+  "reduction": "mean",
+  "warmup_epochs": 10
+}
+```
+
+별도 weak-positive band multiplier는 추가하지 않는다. `top_branch_margin_value`가 약하게 양수인 sample도 `support_gain=0.75`를 통해 `target_min_gap`을 직접 키우도록 처리한다.
+
+#### 2. `class_top_branch_relative_margin` hardness 완화
+
+`class_top_branch_relative_margin`은 teacher gap이 크게 무너진 sample을 더 보게 하는 보조 loss로 유지한다. outlier 과집중을 줄이기 위해 hardness multiplier는 완화한다.
+
+```json
+"hardness_weighting": {
+  "enabled": true,
+  "source": "teacher_gap_deficit",
+  "mode": "linear",
+  "gain": 0.5,
+  "cap": 2.0
+}
+```
+
+`weight=0.05`, `margin=0.3`, `support_weighting.gain=0.5`, `support_weighting.cap=3.0`은 유지한다.
+
+### Code Impact
+
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER16`
+  - teacher-relative loss 계수 조정
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver32`
+  - 동일 설정 반영
+- `src/training/trainer.py`
+  - `top_teacher_gap_min_constraint.support_source="top_branch_margin"` 의미에 맞게 support 계산을 `_top_branch_support_gap()` 기반으로 통일
+  - `top_teacher_gap_min_support_value` diagnostics도 같은 source로 기록
+
+### Diagnostics Checkpoints
+
+`VER16` 분석에서는 다음을 우선 확인한다.
+
+- `top_branch_margin_value > 0`인데 `class_top_branch_relative_gap < 0`인 sample 비율이 줄어드는가?
+- `top_teacher_gap_min_target`이 weak-positive support sample에서 충분히 커지는가?
+- `top_teacher_gap_min_penalty`와 `class_top_branch_relative_margin_penalty`가 후반으로 갈수록 같이 줄어드는가?
+- downstream `top_support_score_gap`, `branch_support_score_gap`, `class_evidence_gap`, `final_gap`이 teacher gap 개선을 따라오는가?
+
+### 주의점
+
+`VER16`은 새 loss를 추가하지 않는다. 같은 teacher-relative objective 안에서 primary loss와 auxiliary hard-sample weighting의 역할을 재조정하는 실험이다.

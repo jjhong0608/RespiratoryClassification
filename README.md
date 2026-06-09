@@ -465,6 +465,30 @@ Use it when diagnostics show `top_branch_margin` supports the true class but
 `top_support_score_gap` remains negative. The effective `top_support_gap_min_target`
 and per-sample `top_support_gap_min_penalty` are written to diagnostics.
 
+`class_top_branch_relative_margin` moves the teacher correction one step earlier.
+It applies a hinge ranking loss directly to
+`class_top_branch_margin_features[true] - max(class_top_branch_margin_features[negative])`,
+so the class-wise top-branch teacher must rank the true class above the hardest
+negative before the signal enters the top-support scorer. It can multiply the
+penalty by true-class top-branch support and by teacher-gap deficit. In the
+current teacher-relative setup this is an auxiliary hard-sample pressure; the
+minimum-gap constraint below is the primary correction.
+
+`top_teacher_gap_min_constraint` is the minimum-gap companion for the teacher
+itself. It enforces:
+
+```text
+target_min_gap =
+  base_min_gap
+  + support_gain * clamp(relu(top_branch_margin_value), max=support_cap)
+loss = relu(target_min_gap - class_top_branch_relative_gap)
+```
+
+Use it when diagnostics show `top_branch_margin_value > 0` but
+`class_top_branch_relative_gap < 0`. Weak-positive support samples are handled
+directly through the support-conditioned target, without adding a separate
+weak-positive band multiplier for the first pass.
+
 `class_evidence_gap_cap_regularization` limits overconfident wrong evidence
 rankings with a label-agnostic hinge on `class_evidence_logits`: `relu(-gap -
 negative_gap_cap)`. It is intended as a stabilizer for large negative evidence
@@ -679,6 +703,8 @@ Important class-aware fields include:
 - `class_evidence_interaction_scale_multiplier`: epoch schedule multiplier applied to interaction score.
 - `class_evidence_interaction_effective_scale`: scheduled scale actually applied to interaction score.
 - `class_evidence_embedding_score_gap`, `class_evidence_branch_support_score_gap`, `class_evidence_interaction_score_gap`: true-vs-hardest-negative component gaps.
+- `class_top_branch_relative_gap`, `class_top_branch_relative_margin_penalty`, `class_top_branch_relative_margin_support_weight`, `class_top_branch_relative_margin_hardness_weight`: teacher-relative top-branch ranking diagnostics.
+- `top_teacher_gap_min_target`, `top_teacher_gap_min_support_value`, `top_teacher_gap_min_penalty`: support-conditioned teacher minimum-gap diagnostics.
 - `direct_top_score_gap`, `top_support_residual_gap`, `top_support_gap_min_target`, `top_support_gap_min_penalty`: top-support teacher path and min-gap constraint diagnostics.
 - `branch_support_disagreement`, `embedding_disagreement_cap_penalty`, `interaction_disagreement_cap_penalty`: disagreement-conditioned cap diagnostics.
 - `global_residual_gate`: class-wise residual correction gate.

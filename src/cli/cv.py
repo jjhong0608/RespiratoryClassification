@@ -440,6 +440,12 @@ def main() -> None:
                     cfg.train.loss.top_support_gap_min_constraint
                 ),
                 top_support_gap_min_base_by_class=top_support_gap_min_base_by_class,
+                class_top_branch_relative_margin=(
+                    cfg.train.loss.class_top_branch_relative_margin
+                ),
+                top_teacher_gap_min_constraint=(
+                    cfg.train.loss.top_teacher_gap_min_constraint
+                ),
                 branch_direct_score_margin=cfg.train.loss.branch_direct_score_margin,
                 branch_support_score_margin=(
                     cfg.train.loss.branch_support_score_margin

@@ -244,11 +244,11 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver30"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver32"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
-    assert current_training_cfg.model.encoder.architecture.hidden_size == 384
-    assert current_training_cfg.model.encoder.architecture.adapter_depth == 6
+    assert current_training_cfg.model.encoder.architecture.hidden_size == 512
+    assert current_training_cfg.model.encoder.architecture.adapter_depth == 8
     assert current_training_cfg.train.loss.type == "cross_entropy"
     assert (
         current_training_cfg.model.encoder.architecture.evidence_pooling.type
@@ -397,6 +397,31 @@ def test_retained_repo_configs_load() -> None:
     }
     assert min_gap.support_gain == pytest.approx(0.5)
     assert min_gap.support_cap == pytest.approx(2.0)
+    teacher_rel = current_training_cfg.train.loss.class_top_branch_relative_margin
+    assert teacher_rel.enabled is True
+    assert teacher_rel.weight == pytest.approx(0.05)
+    assert teacher_rel.target == "class_top_branch_margin_features"
+    assert teacher_rel.mode == "true_vs_hardest_negative_hinge"
+    assert teacher_rel.margin == pytest.approx(0.3)
+    assert teacher_rel.support_weighting.enabled is True
+    assert teacher_rel.support_weighting.source == "top_branch_margin"
+    assert teacher_rel.support_weighting.mode == "linear"
+    assert teacher_rel.support_weighting.gain == pytest.approx(0.5)
+    assert teacher_rel.support_weighting.cap == pytest.approx(3.0)
+    assert teacher_rel.hardness_weighting.enabled is True
+    assert teacher_rel.hardness_weighting.source == "teacher_gap_deficit"
+    assert teacher_rel.hardness_weighting.mode == "linear"
+    assert teacher_rel.hardness_weighting.gain == pytest.approx(0.5)
+    assert teacher_rel.hardness_weighting.cap == pytest.approx(2.0)
+    teacher_min = current_training_cfg.train.loss.top_teacher_gap_min_constraint
+    assert teacher_min.enabled is True
+    assert teacher_min.weight == pytest.approx(0.075)
+    assert teacher_min.target == "class_top_branch_margin_features"
+    assert teacher_min.mode == "support_conditioned_min_gap"
+    assert teacher_min.base_min_gap == pytest.approx(0.0)
+    assert teacher_min.support_source == "top_branch_margin"
+    assert teacher_min.support_gain == pytest.approx(0.75)
+    assert teacher_min.support_cap == pytest.approx(2.0)
     phase_schedule = (
         current_training_cfg.train.loss.top_branch_margin.phase_weight_schedule
     )
@@ -526,10 +551,18 @@ def test_retained_repo_configs_load() -> None:
         current_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.positive_gap_cap
         == pytest.approx(8.0)
     )
+    assert (
+        current_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.weight
+        == pytest.approx(0.015)
+    )
     assert current_training_cfg.train.loss.interaction_gap_cap_regularization.enabled
     assert (
         current_training_cfg.train.loss.interaction_gap_cap_regularization.gap_cap
         == pytest.approx(6.0)
+    )
+    assert (
+        current_training_cfg.train.loss.interaction_gap_cap_regularization.weight
+        == pytest.approx(0.015)
     )
     assert current_training_cfg.model.classifier.hidden_dim == 1024
     assert current_training_cfg.model.classifier.fusion_projector.type == "mlp"
@@ -540,9 +573,9 @@ def test_retained_repo_configs_load() -> None:
         current_class_gate.global_residual.correction.confidence_aware_gate.damping
         == pytest.approx(0.7)
     )
-    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER14"
-    assert disease_training_cfg.model.encoder.architecture.hidden_size == 384
-    assert disease_training_cfg.model.encoder.architecture.adapter_depth == 6
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER16"
+    assert disease_training_cfg.model.encoder.architecture.hidden_size == 512
+    assert disease_training_cfg.model.encoder.architecture.adapter_depth == 8
     assert disease_training_cfg.model.classifier.hidden_dim == 1024
     assert disease_training_cfg.model.classifier.fusion_projector.type == "mlp"
     assert disease_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
@@ -583,6 +616,27 @@ def test_retained_repo_configs_load() -> None:
         "Lung_Parenchymal": 0.0,
         "Airway": 0.2,
     }
+    disease_teacher_rel = (
+        disease_training_cfg.train.loss.class_top_branch_relative_margin
+    )
+    assert disease_teacher_rel.enabled is True
+    assert disease_teacher_rel.weight == pytest.approx(0.05)
+    assert disease_teacher_rel.margin == pytest.approx(0.3)
+    assert disease_teacher_rel.support_weighting.enabled is True
+    assert disease_teacher_rel.support_weighting.source == "top_branch_margin"
+    assert disease_teacher_rel.support_weighting.gain == pytest.approx(0.5)
+    assert disease_teacher_rel.support_weighting.cap == pytest.approx(3.0)
+    assert disease_teacher_rel.hardness_weighting.enabled is True
+    assert disease_teacher_rel.hardness_weighting.source == "teacher_gap_deficit"
+    assert disease_teacher_rel.hardness_weighting.mode == "linear"
+    assert disease_teacher_rel.hardness_weighting.gain == pytest.approx(0.5)
+    assert disease_teacher_rel.hardness_weighting.cap == pytest.approx(2.0)
+    disease_teacher_min = disease_training_cfg.train.loss.top_teacher_gap_min_constraint
+    assert disease_teacher_min.enabled is True
+    assert disease_teacher_min.weight == pytest.approx(0.075)
+    assert disease_teacher_min.base_min_gap == pytest.approx(0.0)
+    assert disease_teacher_min.support_gain == pytest.approx(0.75)
+    assert disease_teacher_min.support_cap == pytest.approx(2.0)
     assert (
         disease_training_cfg.train.loss.top_support_score_margin.label_weight_by_label
         == {
@@ -680,10 +734,18 @@ def test_retained_repo_configs_load() -> None:
         disease_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.positive_gap_cap
         == pytest.approx(8.0)
     )
+    assert (
+        disease_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.weight
+        == pytest.approx(0.015)
+    )
     assert disease_training_cfg.train.loss.interaction_gap_cap_regularization.enabled
     assert (
         disease_training_cfg.train.loss.interaction_gap_cap_regularization.gap_cap
         == pytest.approx(6.0)
+    )
+    assert (
+        disease_training_cfg.train.loss.interaction_gap_cap_regularization.weight
+        == pytest.approx(0.015)
     )
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
     assert baseline_training_cfg.experiment.logging.terminal_width is None
@@ -2185,6 +2247,246 @@ def test_valid_branch_direct_score_margin_config_loads(tmp_path: Path) -> None:
     assert margin_cfg.weight == pytest.approx(0.05)
     assert margin_cfg.class_weighted is True
     assert margin_cfg.warmup_epochs == 10
+
+
+def test_valid_teacher_relative_top_branch_config_loads(tmp_path: Path) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["class_top_branch_relative_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "true_vs_hardest_negative_hinge",
+        "margin": 0.3,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+        "support_weighting": {
+            "enabled": True,
+            "source": "top_branch_margin",
+            "mode": "linear",
+            "gain": 0.5,
+            "cap": 3.0,
+        },
+        "hardness_weighting": {
+            "enabled": True,
+            "source": "teacher_gap_deficit",
+            "mode": "linear",
+            "gain": 0.5,
+            "cap": 2.0,
+        },
+    }
+    payload["train"]["loss"]["top_teacher_gap_min_constraint"] = {
+        "enabled": True,
+        "weight": 0.075,
+        "target": "class_top_branch_margin_features",
+        "mode": "support_conditioned_min_gap",
+        "base_min_gap": 0.0,
+        "support_source": "top_branch_margin",
+        "support_gain": 0.75,
+        "support_cap": 2.0,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "teacher_relative_top_branch.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    relative_cfg = cfg.train.loss.class_top_branch_relative_margin
+    assert relative_cfg.enabled is True
+    assert relative_cfg.margin == pytest.approx(0.3)
+    assert relative_cfg.support_weighting.source == "top_branch_margin"
+    assert relative_cfg.support_weighting.gain == pytest.approx(0.5)
+    assert relative_cfg.hardness_weighting.source == "teacher_gap_deficit"
+    assert relative_cfg.hardness_weighting.mode == "linear"
+    assert relative_cfg.hardness_weighting.gain == pytest.approx(0.5)
+    assert relative_cfg.hardness_weighting.cap == pytest.approx(2.0)
+    teacher_min_cfg = cfg.train.loss.top_teacher_gap_min_constraint
+    assert teacher_min_cfg.enabled is True
+    assert teacher_min_cfg.weight == pytest.approx(0.075)
+    assert teacher_min_cfg.support_source == "top_branch_margin"
+    assert teacher_min_cfg.support_gain == pytest.approx(0.75)
+    assert teacher_min_cfg.support_cap == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("target", "class_evidence_logits", "class_top_branch_relative_margin.target"),
+        ("mode", "softplus", "class_top_branch_relative_margin.mode"),
+        ("margin", 0.0, "class_top_branch_relative_margin.margin"),
+        ("weight", 0.0, "class_top_branch_relative_margin.weight"),
+        ("warmup_epochs", -1, "class_top_branch_relative_margin.warmup_epochs"),
+    ],
+)
+def test_invalid_class_top_branch_relative_margin_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["class_top_branch_relative_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "true_vs_hardest_negative_hinge",
+        "margin": 0.3,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["class_top_branch_relative_margin"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_class_top_branch_relative_margin.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "error"),
+    [
+        (
+            "support_weighting",
+            "source",
+            "same_as_source",
+            "class_top_branch_relative_margin.support_weighting",
+        ),
+        (
+            "support_weighting",
+            "mode",
+            "positive_linear",
+            "class_top_branch_relative_margin.support_weighting",
+        ),
+        (
+            "hardness_weighting",
+            "source",
+            "evidence_gap",
+            "class_top_branch_relative_margin.hardness_weighting",
+        ),
+        (
+            "hardness_weighting",
+            "mode",
+            "negative_gap",
+            "class_top_branch_relative_margin.hardness_weighting",
+        ),
+    ],
+)
+def test_invalid_class_top_branch_relative_margin_weighting_is_rejected(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["class_top_branch_relative_margin"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "true_vs_hardest_negative_hinge",
+        "margin": 0.3,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+        "support_weighting": {
+            "enabled": True,
+            "source": "top_branch_margin",
+            "mode": "linear",
+            "gain": 0.5,
+            "cap": 3.0,
+        },
+        "hardness_weighting": {
+            "enabled": True,
+            "source": "teacher_gap_deficit",
+            "mode": "linear",
+            "gain": 1.0,
+            "cap": 3.0,
+        },
+    }
+    payload["train"]["loss"]["class_top_branch_relative_margin"][section][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_class_top_branch_relative_weighting.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("target", "class_evidence_logits", "top_teacher_gap_min_constraint.target"),
+        ("mode", "true_vs_hardest_negative", "top_teacher_gap_min_constraint.mode"),
+        (
+            "support_source",
+            "same_as_source",
+            "top_teacher_gap_min_constraint.support_source",
+        ),
+        ("support_cap", 0.0, "top_teacher_gap_min_constraint.support_cap"),
+        ("warmup_epochs", -1, "top_teacher_gap_min_constraint.warmup_epochs"),
+    ],
+)
+def test_invalid_top_teacher_gap_min_constraint_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["top_teacher_gap_min_constraint"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "support_conditioned_min_gap",
+        "base_min_gap": 0.0,
+        "support_source": "top_branch_margin",
+        "support_gain": 0.5,
+        "support_cap": 2.0,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["top_teacher_gap_min_constraint"][field] = value
+    config_path = _write_json(
+        tmp_path / "bad_top_teacher_gap_min_constraint.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 def test_valid_class_gated_branch_logit_margin_config_loads(

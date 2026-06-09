@@ -61,6 +61,7 @@ from src.utils.config import (
     ClassGatedBranchLogitMarginConfig,
     ClassGateDiversityRegularizationConfig,
     ClassifierConfig,
+    ClassTopBranchRelativeMarginConfig,
     DataConfig,
     EarlyStoppingConfig,
     EncoderAdaptationConfig,
@@ -88,6 +89,7 @@ from src.utils.config import (
     TopBranchMarginPhaseWeightScheduleConfig,
     TopSupportGapMinConstraintConfig,
     TopSupportScoreMarginConfig,
+    TopTeacherGapMinConstraintConfig,
 )
 
 from conftest import small_patch_branches
@@ -325,6 +327,24 @@ def _trainer_cfg(
     top_support_gap_min_support_cap: float = 2.0,
     top_support_gap_min_class_weighted: bool = False,
     top_support_gap_min_warmup_epochs: int = 0,
+    class_top_branch_relative_margin_enabled: bool = False,
+    class_top_branch_relative_margin_weight: float = 0.0,
+    class_top_branch_relative_margin_value: float = 0.3,
+    class_top_branch_relative_margin_class_weighted: bool = False,
+    class_top_branch_relative_margin_warmup_epochs: int = 0,
+    class_top_branch_relative_margin_support_weighting: (
+        MarginSupportWeightingConfig | None
+    ) = None,
+    class_top_branch_relative_margin_hardness_weighting: (
+        MarginHardnessWeightingConfig | None
+    ) = None,
+    top_teacher_gap_min_enabled: bool = False,
+    top_teacher_gap_min_weight: float = 0.0,
+    top_teacher_gap_min_base_min_gap: float = 0.0,
+    top_teacher_gap_min_support_gain: float = 0.5,
+    top_teacher_gap_min_support_cap: float = 2.0,
+    top_teacher_gap_min_class_weighted: bool = False,
+    top_teacher_gap_min_warmup_epochs: int = 0,
     branch_support_score_margin_enabled: bool = False,
     branch_support_score_margin_weight: float = 0.0,
     branch_support_score_margin_temperature: float = 1.0,
@@ -643,6 +663,37 @@ def _trainer_cfg(
             warmup_epochs=top_support_gap_min_warmup_epochs,
         ),
         top_support_gap_min_base_by_class=top_support_gap_min_base_by_class,
+        class_top_branch_relative_margin=ClassTopBranchRelativeMarginConfig(
+            enabled=class_top_branch_relative_margin_enabled,
+            weight=class_top_branch_relative_margin_weight,
+            target="class_top_branch_margin_features",
+            mode="true_vs_hardest_negative_hinge",
+            margin=class_top_branch_relative_margin_value,
+            class_weighted=class_top_branch_relative_margin_class_weighted,
+            reduction="mean",
+            warmup_epochs=class_top_branch_relative_margin_warmup_epochs,
+            support_weighting=(
+                class_top_branch_relative_margin_support_weighting
+                or MarginSupportWeightingConfig()
+            ),
+            hardness_weighting=(
+                class_top_branch_relative_margin_hardness_weighting
+                or MarginHardnessWeightingConfig()
+            ),
+        ),
+        top_teacher_gap_min_constraint=TopTeacherGapMinConstraintConfig(
+            enabled=top_teacher_gap_min_enabled,
+            weight=top_teacher_gap_min_weight,
+            target="class_top_branch_margin_features",
+            mode="support_conditioned_min_gap",
+            base_min_gap=top_teacher_gap_min_base_min_gap,
+            support_source="top_branch_margin",
+            support_gain=top_teacher_gap_min_support_gain,
+            support_cap=top_teacher_gap_min_support_cap,
+            class_weighted=top_teacher_gap_min_class_weighted,
+            reduction="mean",
+            warmup_epochs=top_teacher_gap_min_warmup_epochs,
+        ),
         branch_support_score_margin=BranchSupportScoreMarginConfig(
             enabled=branch_support_score_margin_enabled,
             weight=branch_support_score_margin_weight,
@@ -2536,6 +2587,148 @@ def test_trainer_top_support_gap_min_constraint_is_support_conditioned() -> None
     assert torch.isclose(target_warmup, torch.tensor(0.0))
     assert torch.isclose(raw_loss, expected_raw)
     assert torch.isclose(weighted_loss, 0.05 * expected_raw)
+    assert torch.isclose(target_mean, target_min_gap.mean())
+
+
+def test_trainer_class_top_branch_relative_margin_uses_support_and_hardness() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.5, 2.0, 0.5),
+            class_top_branch_relative_margin_enabled=True,
+            class_top_branch_relative_margin_weight=0.05,
+            class_top_branch_relative_margin_value=0.3,
+            class_top_branch_relative_margin_class_weighted=True,
+            class_top_branch_relative_margin_warmup_epochs=10,
+            class_top_branch_relative_margin_support_weighting=(
+                MarginSupportWeightingConfig(
+                    enabled=True,
+                    source="top_branch_margin",
+                    mode="linear",
+                    gain=0.5,
+                    cap=3.0,
+                )
+            ),
+            class_top_branch_relative_margin_hardness_weighting=(
+                MarginHardnessWeightingConfig(
+                    enabled=True,
+                    source="teacher_gap_deficit",
+                    mode="linear",
+                    gain=0.5,
+                    cap=2.0,
+                )
+            ),
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor(
+            [
+                [[1.0, 0.2, 0.0], [0.1, 0.0, 0.0]],
+                [[0.2, 0.4, 0.1], [0.0, 0.3, 0.1]],
+            ],
+            dtype=torch.float32,
+        ),
+        class_top_branch_margin_features=torch.tensor(
+            [[0.4, 0.6, 0.1], [0.2, 0.7, 0.3]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_warmup, weighted_warmup, support_warmup, hardness_warmup = (
+        trainer._compute_class_top_branch_relative_margin_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+    raw_loss, weighted_loss, support_mean, hardness_mean = (
+        trainer._compute_class_top_branch_relative_margin_loss(
+            output,
+            labels,
+            epoch=11,
+        )
+    )
+
+    margin_deficit = torch.tensor([0.5, 0.0], dtype=torch.float32)
+    support_weights = torch.tensor([1.4, 1.1], dtype=torch.float32)
+    hardness_weights = torch.tensor([1.25, 1.0], dtype=torch.float32)
+    class_weights = torch.tensor([1.5, 2.0], dtype=torch.float32)
+    expected_raw = torch.mean(
+        margin_deficit * support_weights * hardness_weights * class_weights
+    )
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(support_warmup, torch.tensor(0.0))
+    assert torch.isclose(hardness_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.05 * expected_raw)
+    assert torch.isclose(support_mean, support_weights.mean())
+    assert torch.isclose(hardness_mean, hardness_weights.mean())
+
+
+def test_trainer_top_teacher_gap_min_constraint_is_support_conditioned() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.5, 2.0, 0.5),
+            top_teacher_gap_min_enabled=True,
+            top_teacher_gap_min_weight=0.075,
+            top_teacher_gap_min_base_min_gap=0.0,
+            top_teacher_gap_min_support_gain=0.75,
+            top_teacher_gap_min_support_cap=2.0,
+            top_teacher_gap_min_class_weighted=True,
+            top_teacher_gap_min_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=torch.tensor(
+            [
+                [[1.0, 0.2, 0.0], [0.1, 0.0, 0.0]],
+                [[0.2, 0.4, 0.1], [0.0, 0.3, 0.1]],
+            ],
+            dtype=torch.float32,
+        ),
+        class_top_branch_margin_features=torch.tensor(
+            [[0.4, 0.6, 0.1], [0.2, 0.7, 0.3]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    raw_warmup, weighted_warmup, target_warmup = (
+        trainer._compute_top_teacher_gap_min_constraint_loss(
+            output,
+            labels,
+            epoch=10,
+        )
+    )
+    raw_loss, weighted_loss, target_mean = (
+        trainer._compute_top_teacher_gap_min_constraint_loss(
+            output,
+            labels,
+            epoch=11,
+        )
+    )
+
+    teacher_gap = torch.tensor([-0.2, 0.4], dtype=torch.float32)
+    target_min_gap = torch.tensor([0.6, 0.15], dtype=torch.float32)
+    penalties = torch.relu(target_min_gap - teacher_gap)
+    class_weights = torch.tensor([1.5, 2.0], dtype=torch.float32)
+    expected_raw = torch.mean(penalties * class_weights)
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(target_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.075 * expected_raw)
     assert torch.isclose(target_mean, target_min_gap.mean())
 
 
@@ -4510,6 +4703,32 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
                     cap=3.0,
                 )
             ),
+            class_top_branch_relative_margin_enabled=True,
+            class_top_branch_relative_margin_weight=0.05,
+            class_top_branch_relative_margin_value=0.3,
+            class_top_branch_relative_margin_support_weighting=(
+                MarginSupportWeightingConfig(
+                    enabled=True,
+                    source="top_branch_margin",
+                    mode="linear",
+                    gain=0.5,
+                    cap=3.0,
+                )
+            ),
+            class_top_branch_relative_margin_hardness_weighting=(
+                MarginHardnessWeightingConfig(
+                    enabled=True,
+                    source="teacher_gap_deficit",
+                    mode="linear",
+                    gain=0.5,
+                    cap=2.0,
+                )
+            ),
+            top_teacher_gap_min_enabled=True,
+            top_teacher_gap_min_weight=0.075,
+            top_teacher_gap_min_base_min_gap=0.0,
+            top_teacher_gap_min_support_gain=0.75,
+            top_teacher_gap_min_support_cap=2.0,
             gate_branch_regret_enabled=True,
             gate_branch_regret_weight=0.1,
             gate_branch_regret_positive_threshold=0.3,
@@ -4550,6 +4769,10 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
             [[0.2, 0.0, 0.6]],
             dtype=torch.float32,
         ),
+        class_top_branch_margin_features=torch.tensor(
+            [[0.2, 0.3, 0.5]],
+            dtype=torch.float32,
+        ),
         global_residual_logits=torch.tensor(
             [[0.2, -0.6, 0.3]],
             dtype=torch.float32,
@@ -4581,6 +4804,22 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
     assert row["top_support_score_margin_hardness"] == pytest.approx(0.6)
     assert row["top_support_score_margin_hardness_weight"] == pytest.approx(1.6)
     assert row["top_support_score_margin_total_multiplier"] == pytest.approx(1.6)
+    assert row["class_top_branch_relative_gap"] == pytest.approx(-0.2)
+    assert row["class_top_branch_relative_negative_class"] == 2
+    assert row["class_top_branch_relative_margin_target"] == pytest.approx(0.3)
+    assert row["class_top_branch_relative_margin_penalty"] == pytest.approx(
+        0.5 * 1.15 * 1.25
+    )
+    assert row["class_top_branch_relative_margin_support_weight"] == pytest.approx(1.15)
+    assert row["class_top_branch_relative_margin_hardness"] == pytest.approx(0.5)
+    assert row["class_top_branch_relative_margin_hardness_weight"] == pytest.approx(1.25)
+    assert row["class_top_branch_relative_margin_eligible"] is True
+    assert row["top_teacher_gap_min_gap"] == pytest.approx(-0.2)
+    assert row["top_teacher_gap_min_negative_class"] == 2
+    assert row["top_teacher_gap_min_target"] == pytest.approx(0.225)
+    assert row["top_teacher_gap_min_support_value"] == pytest.approx(0.3)
+    assert row["top_teacher_gap_min_penalty"] == pytest.approx(0.425)
+    assert row["top_teacher_gap_min_eligible"] is True
     assert row["branch_to_evidence_branch_gap"] == pytest.approx(0.3)
     assert row["branch_to_evidence_evidence_gap"] == pytest.approx(0.15)
     assert row["branch_to_evidence_penalty"] == pytest.approx(0.15)
