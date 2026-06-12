@@ -474,6 +474,17 @@ penalty by true-class top-branch support and by teacher-gap deficit. In the
 current teacher-relative setup this is an auxiliary hard-sample pressure; the
 minimum-gap constraint below is the primary correction.
 
+`weak_positive_support_weighting` can be added to the teacher-relative losses
+when diagnostics show a weak positive `top_branch_margin_value` but negative
+`class_top_branch_relative_gap`. It multiplies only samples whose detached
+top-branch support falls inside a configured band, for example
+`0.2 <= top_branch_margin_value <= 1.0`, so weak-positive teacher samples receive
+extra pressure without changing the model capacity or final combiner.
+`weak_positive_margin_boost` and `weak_positive_target_boost` use the same band
+but increase the required teacher-relative gap itself. The former raises the
+effective hinge margin for `class_top_branch_relative_margin`; the latter adds
+directly to `top_teacher_gap_min_constraint.target_min_gap`.
+
 `top_teacher_gap_min_constraint` is the minimum-gap companion for the teacher
 itself. It enforces:
 
@@ -485,9 +496,9 @@ loss = relu(target_min_gap - class_top_branch_relative_gap)
 ```
 
 Use it when diagnostics show `top_branch_margin_value > 0` but
-`class_top_branch_relative_gap < 0`. Weak-positive support samples are handled
-directly through the support-conditioned target, without adding a separate
-weak-positive band multiplier for the first pass.
+`class_top_branch_relative_gap < 0`. Weak-positive support samples can be handled
+both by the support-conditioned target and by an optional band-specific target
+boost.
 
 `class_evidence_gap_cap_regularization` limits overconfident wrong evidence
 rankings with a label-agnostic hinge on `class_evidence_logits`: `relu(-gap -
@@ -607,6 +618,13 @@ thresholds are allowed, so normal can be fixed at a permissive value such as
 `-0.2`. It uses the same `weight_schedule` shape as `gate_branch_regret`, but
 keeps independent values and adaptive state.
 
+`gate_best_branch_alignment` is a condition-based gate mismatch correction. It
+activates only when a weak-positive best branch exists, the selected true-class
+gate branch differs from that best branch, and the selected branch margin is
+sufficiently worse. Its penalty is `-log(gate_weight[best_branch])`, so it
+directly increases gate mass on the best available branch without replacing
+`gate_branch_regret` or `gate_bad_branch_suppression`.
+
 `residual_contradiction_regularization` penalizes the raw global residual logits
 when class evidence supports the true class but the residual gap points too far
 against it. It is label-agnostic and uses the same true-vs-hardest-negative
@@ -703,8 +721,9 @@ Important class-aware fields include:
 - `class_evidence_interaction_scale_multiplier`: epoch schedule multiplier applied to interaction score.
 - `class_evidence_interaction_effective_scale`: scheduled scale actually applied to interaction score.
 - `class_evidence_embedding_score_gap`, `class_evidence_branch_support_score_gap`, `class_evidence_interaction_score_gap`: true-vs-hardest-negative component gaps.
-- `class_top_branch_relative_gap`, `class_top_branch_relative_margin_penalty`, `class_top_branch_relative_margin_support_weight`, `class_top_branch_relative_margin_hardness_weight`: teacher-relative top-branch ranking diagnostics.
-- `top_teacher_gap_min_target`, `top_teacher_gap_min_support_value`, `top_teacher_gap_min_penalty`: support-conditioned teacher minimum-gap diagnostics.
+- `class_top_branch_relative_gap`, `class_top_branch_relative_margin_penalty`, `class_top_branch_relative_margin_support_weight`, `class_top_branch_relative_margin_hardness_weight`, `class_top_branch_relative_margin_weak_positive_weight`, `class_top_branch_relative_margin_weak_positive_margin_boost`, `class_top_branch_relative_margin_effective_target`: teacher-relative top-branch ranking diagnostics.
+- `top_teacher_gap_min_target`, `top_teacher_gap_min_support_value`, `top_teacher_gap_min_penalty`, `top_teacher_gap_min_weak_positive_weight`, `top_teacher_gap_min_weak_positive_target_boost`: support-conditioned teacher minimum-gap diagnostics.
+- `gate_best_branch_alignment_best_branch`, `gate_best_branch_alignment_selected_branch`, `gate_best_branch_alignment_eligible`, `gate_best_branch_alignment_penalty`: condition-based gate mismatch diagnostics.
 - `direct_top_score_gap`, `top_support_residual_gap`, `top_support_gap_min_target`, `top_support_gap_min_penalty`: top-support teacher path and min-gap constraint diagnostics.
 - `branch_support_disagreement`, `embedding_disagreement_cap_penalty`, `interaction_disagreement_cap_penalty`: disagreement-conditioned cap diagnostics.
 - `global_residual_gate`: class-wise residual correction gate.

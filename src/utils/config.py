@@ -373,6 +373,30 @@ class TopSupportGapMinConstraintConfig:
 
 
 @dataclass(frozen=True)
+class WeakPositiveSupportWeightingConfig:
+    enabled: bool = False
+    min_support: float = 0.2
+    max_support: float = 1.0
+    multiplier: float = 1.0
+
+
+@dataclass(frozen=True)
+class WeakPositiveTargetBoostConfig:
+    enabled: bool = False
+    min_support: float = 0.2
+    max_support: float = 1.0
+    boost: float = 0.0
+
+
+@dataclass(frozen=True)
+class WeakPositiveMarginBoostConfig:
+    enabled: bool = False
+    min_support: float = 0.2
+    max_support: float = 1.0
+    boost: float = 0.0
+
+
+@dataclass(frozen=True)
 class ClassTopBranchRelativeMarginConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -389,6 +413,12 @@ class ClassTopBranchRelativeMarginConfig:
     )
     hardness_weighting: MarginHardnessWeightingConfig = field(
         default_factory=MarginHardnessWeightingConfig
+    )
+    weak_positive_support_weighting: WeakPositiveSupportWeightingConfig = field(
+        default_factory=WeakPositiveSupportWeightingConfig
+    )
+    weak_positive_margin_boost: WeakPositiveMarginBoostConfig = field(
+        default_factory=WeakPositiveMarginBoostConfig
     )
 
 
@@ -407,6 +437,12 @@ class TopTeacherGapMinConstraintConfig:
     class_weighted: bool = False
     reduction: Literal["mean"] = "mean"
     warmup_epochs: int = 0
+    weak_positive_support_weighting: WeakPositiveSupportWeightingConfig = field(
+        default_factory=WeakPositiveSupportWeightingConfig
+    )
+    weak_positive_target_boost: WeakPositiveTargetBoostConfig = field(
+        default_factory=WeakPositiveTargetBoostConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -670,6 +706,26 @@ class GateBranchRegretConfig:
 
 
 @dataclass(frozen=True)
+class GateBestBranchAlignmentConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["true_class_gate"] = "true_class_gate"
+    source: Literal["branch_logits"] = "branch_logits"
+    mode: Literal["weak_positive_best_branch_alignment"] = (
+        "weak_positive_best_branch_alignment"
+    )
+    margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
+    min_best_margin: float = 0.2
+    max_best_margin: float = 1.0
+    mismatch_margin_drop: float = 0.5
+    loss: Literal["negative_log_best_gate"] = "negative_log_best_gate"
+    detach_branch_margin: bool = True
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
 class GateBadBranchSuppressionConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -840,6 +896,9 @@ class LossConfig:
     )
     gate_weighted_branch_margin: GateWeightedBranchMarginConfig = field(
         default_factory=GateWeightedBranchMarginConfig
+    )
+    gate_best_branch_alignment: GateBestBranchAlignmentConfig = field(
+        default_factory=GateBestBranchAlignmentConfig
     )
     gate_branch_regret: GateBranchRegretConfig = field(
         default_factory=GateBranchRegretConfig
@@ -1128,6 +1187,12 @@ class JsonConfigLoader:
     _GATE_WEIGHTED_BRANCH_MARGIN_SOURCES = {"branch_logits"}
     _GATE_WEIGHTED_BRANCH_MARGIN_MODES = {"true_vs_hardest_negative"}
     _GATE_WEIGHTED_BRANCH_MARGIN_SELECTIONS = {"gate_weighted"}
+    _GATE_BEST_BRANCH_ALIGNMENT_TARGETS = {"true_class_gate"}
+    _GATE_BEST_BRANCH_ALIGNMENT_SOURCES = {"branch_logits"}
+    _GATE_BEST_BRANCH_ALIGNMENT_MODES = {"weak_positive_best_branch_alignment"}
+    _GATE_BEST_BRANCH_ALIGNMENT_MARGIN_MODES = {"true_vs_hardest_negative"}
+    _GATE_BEST_BRANCH_ALIGNMENT_LOSSES = {"negative_log_best_gate"}
+    _GATE_BEST_BRANCH_ALIGNMENT_REDUCTIONS = {"mean"}
     _GATE_BRANCH_REGRET_TARGETS = {"true_class_gate"}
     _GATE_BRANCH_REGRET_SOURCES = {"branch_logits"}
     _GATE_BRANCH_REGRET_MODES = {"best_margin_regret"}
@@ -1563,6 +1628,62 @@ class JsonConfigLoader:
             raise ValueError(f"{field_name}.gain must be greater than or equal to zero")
         if cfg.cap <= 0:
             raise ValueError(f"{field_name}.cap must be greater than zero")
+
+    @staticmethod
+    def _validate_weak_positive_support_weighting(
+        cfg: WeakPositiveSupportWeightingConfig,
+        *,
+        field_name: str,
+    ) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        for value, suffix in (
+            (cfg.min_support, "min_support"),
+            (cfg.max_support, "max_support"),
+            (cfg.multiplier, "multiplier"),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{suffix} must be numeric")
+        if float(cfg.min_support) < 0.0:
+            raise ValueError(
+                f"{field_name}.min_support must be greater than or equal to zero"
+            )
+        if float(cfg.max_support) <= float(cfg.min_support):
+            raise ValueError(
+                f"{field_name}.max_support must be greater than min_support"
+            )
+        if float(cfg.multiplier) < 1.0:
+            raise ValueError(
+                f"{field_name}.multiplier must be greater than or equal to 1.0"
+            )
+
+    @staticmethod
+    def _validate_weak_positive_boost(
+        cfg: WeakPositiveTargetBoostConfig | WeakPositiveMarginBoostConfig,
+        *,
+        field_name: str,
+    ) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        for value, suffix in (
+            (cfg.min_support, "min_support"),
+            (cfg.max_support, "max_support"),
+            (cfg.boost, "boost"),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{suffix} must be numeric")
+        if float(cfg.min_support) < 0.0:
+            raise ValueError(
+                f"{field_name}.min_support must be greater than or equal to zero"
+            )
+        if float(cfg.max_support) <= float(cfg.min_support):
+            raise ValueError(
+                f"{field_name}.max_support must be greater than min_support"
+            )
+        if float(cfg.boost) < 0.0:
+            raise ValueError(
+                f"{field_name}.boost must be greater than or equal to zero"
+            )
 
     @staticmethod
     def _validate_top_branch_margin_hardness_weighting(
@@ -3791,6 +3912,19 @@ class JsonConfigLoader:
                 "train.loss.class_top_branch_relative_margin.hardness_weighting "
                 "supports only source='teacher_gap_deficit' and mode='linear'"
             )
+        JsonConfigLoader._validate_weak_positive_support_weighting(
+            class_top_branch_relative_cfg.weak_positive_support_weighting,
+            field_name=(
+                "train.loss.class_top_branch_relative_margin."
+                "weak_positive_support_weighting"
+            ),
+        )
+        JsonConfigLoader._validate_weak_positive_boost(
+            class_top_branch_relative_cfg.weak_positive_margin_boost,
+            field_name=(
+                "train.loss.class_top_branch_relative_margin.weak_positive_margin_boost"
+            ),
+        )
         if class_top_branch_relative_cfg.enabled:
             if class_top_branch_relative_cfg.weight <= 0:
                 raise ValueError(
@@ -3891,6 +4025,19 @@ class JsonConfigLoader:
                 "train.loss.top_teacher_gap_min_constraint.warmup_epochs "
                 "must be non-negative"
             )
+        JsonConfigLoader._validate_weak_positive_support_weighting(
+            top_teacher_min_cfg.weak_positive_support_weighting,
+            field_name=(
+                "train.loss.top_teacher_gap_min_constraint."
+                "weak_positive_support_weighting"
+            ),
+        )
+        JsonConfigLoader._validate_weak_positive_boost(
+            top_teacher_min_cfg.weak_positive_target_boost,
+            field_name=(
+                "train.loss.top_teacher_gap_min_constraint.weak_positive_target_boost"
+            ),
+        )
         if top_teacher_min_cfg.enabled:
             if top_teacher_min_cfg.weight <= 0:
                 raise ValueError(
@@ -4972,6 +5119,131 @@ class JsonConfigLoader:
                     "train.loss.gate_weighted_branch_margin requires "
                     "model.encoder.architecture.evidence_pooling.type="
                     "'class_aware_branch_gated'"
+                )
+        gate_best_cfg = cfg.loss.gate_best_branch_alignment
+        if not isinstance(gate_best_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.gate_best_branch_alignment.enabled must be a boolean"
+            )
+        if not isinstance(gate_best_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.gate_best_branch_alignment.class_weighted must be a boolean"
+            )
+        if not isinstance(gate_best_cfg.detach_branch_margin, bool):
+            raise TypeError(
+                "train.loss.gate_best_branch_alignment.detach_branch_margin "
+                "must be a boolean"
+            )
+        if (
+            gate_best_cfg.target
+            not in JsonConfigLoader._GATE_BEST_BRANCH_ALIGNMENT_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.gate_best_branch_alignment.target must be 'true_class_gate'"
+            )
+        if (
+            gate_best_cfg.source
+            not in JsonConfigLoader._GATE_BEST_BRANCH_ALIGNMENT_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.gate_best_branch_alignment.source must be 'branch_logits'"
+            )
+        if gate_best_cfg.mode not in JsonConfigLoader._GATE_BEST_BRANCH_ALIGNMENT_MODES:
+            raise ValueError(
+                "train.loss.gate_best_branch_alignment.mode must be "
+                "'weak_positive_best_branch_alignment'"
+            )
+        if (
+            gate_best_cfg.margin_mode
+            not in JsonConfigLoader._GATE_BEST_BRANCH_ALIGNMENT_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.gate_best_branch_alignment.margin_mode must be "
+                "'true_vs_hardest_negative'"
+            )
+        if (
+            gate_best_cfg.loss
+            not in JsonConfigLoader._GATE_BEST_BRANCH_ALIGNMENT_LOSSES
+        ):
+            raise ValueError(
+                "train.loss.gate_best_branch_alignment.loss must be "
+                "'negative_log_best_gate'"
+            )
+        if (
+            gate_best_cfg.reduction
+            not in JsonConfigLoader._GATE_BEST_BRANCH_ALIGNMENT_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.gate_best_branch_alignment.reduction must be 'mean'"
+            )
+        if not isinstance(gate_best_cfg.weight, int | float) or isinstance(
+            gate_best_cfg.weight,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.gate_best_branch_alignment.weight must be numeric"
+            )
+        for field_name, value, min_value, strict_min in (
+            ("min_best_margin", gate_best_cfg.min_best_margin, 0.0, False),
+            ("max_best_margin", gate_best_cfg.max_best_margin, 0.0, True),
+            (
+                "mismatch_margin_drop",
+                gate_best_cfg.mismatch_margin_drop,
+                0.0,
+                False,
+            ),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(
+                    f"train.loss.gate_best_branch_alignment.{field_name} "
+                    "must be numeric"
+                )
+            if float(value) <= min_value if strict_min else float(value) < min_value:
+                comparator = (
+                    "greater than" if strict_min else "greater than or equal to"
+                )
+                raise ValueError(
+                    f"train.loss.gate_best_branch_alignment.{field_name} "
+                    f"must be {comparator} {min_value}"
+                )
+        if float(gate_best_cfg.max_best_margin) <= float(gate_best_cfg.min_best_margin):
+            raise ValueError(
+                "train.loss.gate_best_branch_alignment.max_best_margin must be "
+                "greater than min_best_margin"
+            )
+        if not isinstance(gate_best_cfg.warmup_epochs, int) or isinstance(
+            gate_best_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.gate_best_branch_alignment.warmup_epochs must be an integer"
+            )
+        if int(gate_best_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.gate_best_branch_alignment.warmup_epochs must be "
+                "non-negative"
+            )
+        if gate_best_cfg.enabled:
+            if gate_best_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.gate_best_branch_alignment.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.gate_best_branch_alignment is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.gate_best_branch_alignment requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if gate_best_cfg.class_weighted and not cfg.loss.class_weighting.enabled:
+                raise ValueError(
+                    "train.loss.gate_best_branch_alignment.class_weighted "
+                    "requires train.loss.class_weighting.enabled=true"
                 )
         if not isinstance(cfg.loss.gate_branch_regret.enabled, bool):
             raise ValueError("train.loss.gate_branch_regret.enabled must be a boolean")
@@ -6163,11 +6435,54 @@ class JsonConfigLoader:
                 )
             )
         )
+        class_top_branch_relative_margin["weak_positive_support_weighting"] = (
+            WeakPositiveSupportWeightingConfig(
+                **dict(
+                    class_top_branch_relative_margin.get(
+                        "weak_positive_support_weighting",
+                        {},
+                    )
+                )
+            )
+        )
+        class_top_branch_relative_margin["weak_positive_margin_boost"] = (
+            WeakPositiveMarginBoostConfig(
+                **dict(
+                    class_top_branch_relative_margin.get(
+                        "weak_positive_margin_boost",
+                        {},
+                    )
+                )
+            )
+        )
         loss["class_top_branch_relative_margin"] = ClassTopBranchRelativeMarginConfig(
             **class_top_branch_relative_margin
         )
+        top_teacher_gap_min_constraint = dict(
+            loss.get("top_teacher_gap_min_constraint", {})
+        )
+        top_teacher_gap_min_constraint["weak_positive_support_weighting"] = (
+            WeakPositiveSupportWeightingConfig(
+                **dict(
+                    top_teacher_gap_min_constraint.get(
+                        "weak_positive_support_weighting",
+                        {},
+                    )
+                )
+            )
+        )
+        top_teacher_gap_min_constraint["weak_positive_target_boost"] = (
+            WeakPositiveTargetBoostConfig(
+                **dict(
+                    top_teacher_gap_min_constraint.get(
+                        "weak_positive_target_boost",
+                        {},
+                    )
+                )
+            )
+        )
         loss["top_teacher_gap_min_constraint"] = TopTeacherGapMinConstraintConfig(
-            **dict(loss.get("top_teacher_gap_min_constraint", {}))
+            **top_teacher_gap_min_constraint
         )
         loss["branch_support_score_margin"] = BranchSupportScoreMarginConfig(
             **dict(loss.get("branch_support_score_margin", {}))
@@ -6237,6 +6552,9 @@ class JsonConfigLoader:
             )
         loss["gate_weighted_branch_margin"] = GateWeightedBranchMarginConfig(
             **gate_weighted_branch_margin
+        )
+        loss["gate_best_branch_alignment"] = GateBestBranchAlignmentConfig(
+            **dict(loss.get("gate_best_branch_alignment", {}))
         )
         gate_branch_regret = dict(loss.get("gate_branch_regret", {}))
         gate_branch_regret["positive_threshold_by_label"] = dict(

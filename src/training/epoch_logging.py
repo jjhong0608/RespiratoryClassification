@@ -446,6 +446,27 @@ def _format_gate_line(
             f"{_component_float(train_components, 'class_gate_diversity', 0.0):.4f}/"
             f"{_component_float(val_components, 'class_gate_diversity', 0.0):.4f}"
         )
+    if _has_component(train_components, val_components, "gate_best_branch_alignment"):
+        parts.append(
+            "gate_align raw="
+            f"{_component_float(train_components, 'gate_best_branch_alignment', 0.0):.4f}/"
+            f"{_component_float(val_components, 'gate_best_branch_alignment', 0.0):.4f}"
+        )
+        parts.append(
+            "align_loss="
+            f"{_component_float(train_components, 'gate_best_branch_alignment_loss', 0.0):.4f}/"
+            f"{_component_float(val_components, 'gate_best_branch_alignment_loss', 0.0):.4f}"
+        )
+        parts.append(
+            "align_eligible="
+            f"{_component_float(train_components, 'gate_best_branch_alignment_eligible_fraction', 0.0):.4f}/"
+            f"{_component_float(val_components, 'gate_best_branch_alignment_eligible_fraction', 0.0):.4f}"
+        )
+        parts.append(
+            "align_mismatch="
+            f"{_component_float(train_components, 'gate_best_branch_alignment_mismatch_fraction', 0.0):.4f}/"
+            f"{_component_float(val_components, 'gate_best_branch_alignment_mismatch_fraction', 0.0):.4f}"
+        )
     if _has_component(train_components, val_components, "gate_branch_regret"):
         parts.append(
             "regret raw="

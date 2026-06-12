@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "new_test_CNUH_3classes_ver32",
+    "name": "new_test_CNUH_3classes_ver34",
     "task": "normal_crackle_wheeze_rhonchi_pretrain",
     "mode": "clip",
     "seed": 1337,
@@ -539,26 +539,50 @@
           "enabled": true,
           "source": "top_branch_margin",
           "mode": "linear",
-          "gain": 0.5,
-          "cap": 3.0
+          "gain": 0.75,
+          "cap": 2.0
         },
         "hardness_weighting": {
           "enabled": true,
           "source": "teacher_gap_deficit",
           "mode": "linear",
-          "gain": 0.5,
+          "gain": 0.75,
           "cap": 2.0
+        },
+        "weak_positive_support_weighting": {
+          "enabled": true,
+          "min_support": 0.2,
+          "max_support": 1.0,
+          "multiplier": 1.25
+        },
+        "weak_positive_margin_boost": {
+          "enabled": true,
+          "min_support": 0.2,
+          "max_support": 1.0,
+          "boost": 0.2
         }
       },
       "top_teacher_gap_min_constraint": {
         "enabled": true,
-        "weight": 0.075,
+        "weight": 0.1,
         "target": "class_top_branch_margin_features",
         "mode": "support_conditioned_min_gap",
         "base_min_gap": 0.0,
         "support_source": "top_branch_margin",
         "support_gain": 0.75,
         "support_cap": 2.0,
+        "weak_positive_support_weighting": {
+          "enabled": true,
+          "min_support": 0.2,
+          "max_support": 1.0,
+          "multiplier": 1.5
+        },
+        "weak_positive_target_boost": {
+          "enabled": true,
+          "min_support": 0.2,
+          "max_support": 1.0,
+          "boost": 0.3
+        },
         "class_weighted": true,
         "reduction": "mean",
         "warmup_epochs": 10
@@ -684,6 +708,22 @@
         "warmup_epochs": 10,
         "reduction": "class_balanced_violating_mean",
         "branch_selection": "gate_weighted"
+      },
+      "gate_best_branch_alignment": {
+        "enabled": true,
+        "weight": 0.03,
+        "target": "true_class_gate",
+        "source": "branch_logits",
+        "mode": "weak_positive_best_branch_alignment",
+        "margin_mode": "true_vs_hardest_negative",
+        "min_best_margin": 0.2,
+        "max_best_margin": 1.0,
+        "mismatch_margin_drop": 0.5,
+        "loss": "negative_log_best_gate",
+        "detach_branch_margin": true,
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
       },
       "gate_branch_regret": {
         "enabled": true,

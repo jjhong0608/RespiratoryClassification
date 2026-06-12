@@ -1118,3 +1118,201 @@ penalty =
 ### 주의점
 
 `VER16`은 새 loss를 추가하지 않는다. 같은 teacher-relative objective 안에서 primary loss와 auxiliary hard-sample weighting의 역할을 재조정하는 실험이다.
+
+## CNUH_DISEASE_VER16 -> CNUH_DISEASE_VER17
+
+### 수정 이유
+
+`VER16` 최종 분석에서는 `top_branch_margin_value`가 약하게 양수인 sample에서 `class_top_branch_relative_gap`이 여전히 음수로 무너지는 현상이 반복됐다. 즉 branch 내부 true-class support는 완전히 죽지 않았지만, class-wise top-branch teacher ranking으로 넘어가는 순간 hardest negative가 true class를 이겼고, 이후 `top_support_score_gap -> branch_support_score_gap -> class_evidence_gap -> final_gap`도 같은 방향으로 따라갔다.
+
+`VER17`에서는 model capacity와 final combiner를 유지하고, teacher-front loss 두 개에 weak-positive support band weighting을 추가한다. 이 변경은 label-specific correction이 아니라 `0.2 <= top_branch_margin_value <= 1.0`인 weak-positive teacher sample을 label-agnostic하게 더 강하게 보는 구조 보정이다.
+
+### Config 변경
+
+#### 1. `top_teacher_gap_min_constraint` primary correction 강화
+
+```json
+"top_teacher_gap_min_constraint": {
+  "enabled": true,
+  "weight": 0.1,
+  "target": "class_top_branch_margin_features",
+  "mode": "support_conditioned_min_gap",
+  "base_min_gap": 0.0,
+  "support_source": "top_branch_margin",
+  "support_gain": 0.75,
+  "support_cap": 2.0,
+  "weak_positive_support_weighting": {
+    "enabled": true,
+    "min_support": 0.2,
+    "max_support": 1.0,
+    "multiplier": 1.5
+  },
+  "class_weighted": true,
+  "reduction": "mean",
+  "warmup_epochs": 10
+}
+```
+
+#### 2. `class_top_branch_relative_margin` auxiliary hard-sample pressure 재조정
+
+```json
+"class_top_branch_relative_margin": {
+  "enabled": true,
+  "weight": 0.05,
+  "target": "class_top_branch_margin_features",
+  "mode": "true_vs_hardest_negative_hinge",
+  "margin": 0.3,
+  "class_weighted": true,
+  "reduction": "mean",
+  "warmup_epochs": 10,
+  "support_weighting": {
+    "enabled": true,
+    "source": "top_branch_margin",
+    "mode": "linear",
+    "gain": 0.75,
+    "cap": 2.0
+  },
+  "hardness_weighting": {
+    "enabled": true,
+    "source": "teacher_gap_deficit",
+    "mode": "linear",
+    "gain": 0.75,
+    "cap": 2.0
+  },
+  "weak_positive_support_weighting": {
+    "enabled": true,
+    "min_support": 0.2,
+    "max_support": 1.0,
+    "multiplier": 1.25
+  }
+}
+```
+
+### Code Impact
+
+- `src/utils/config.py`
+  - `WeakPositiveSupportWeightingConfig` 추가
+  - `class_top_branch_relative_margin` 및 `top_teacher_gap_min_constraint` nested parser/validation 추가
+- `src/training/trainer.py`
+  - `_weak_positive_support_weights()` helper 추가
+  - 두 teacher-front loss에 weak-positive multiplier 적용
+  - diagnostics에 `class_top_branch_relative_margin_weak_positive_weight`, `top_teacher_gap_min_weak_positive_weight` 추가
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER17`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver33`
+
+### Diagnostics Checkpoints
+
+`VER17` 분석에서는 다음을 우선 확인한다.
+
+- weak-positive band sample에서 `class_top_branch_relative_margin_weak_positive_eligible=true` 또는 `top_teacher_gap_min_weak_positive_eligible=true`가 정상 기록되는가?
+- `top_branch_margin_value`가 `0.2~1.0`인 wrong sample에서 `class_top_branch_relative_gap < 0`의 magnitude가 줄어드는가?
+- `top_teacher_gap_min_penalty`가 단순히 커지기만 하지 않고 후반부에 감소하는가?
+- downstream `top_support_score_gap`, `branch_support_score_gap`, `class_evidence_gap`, `final_gap`이 teacher gap 개선을 따라오는가?
+
+## CNUH_DISEASE_VER17 -> CNUH_DISEASE_VER18
+
+### 수정 이유
+
+`VER17`은 evidence/final 성능을 개선했지만, diagnostics에서는 hard sample에서 두 가지 문제가 남았다.
+
+1. `top_branch_margin_value`가 약하게 양수인데도 `class_top_branch_relative_gap`이 음수로 무너지는 sample이 계속 남았다.
+2. best branch가 존재하지만 true-class gate가 다른 branch를 선택하는 gate mismatch가 다시 커지는 신호가 있었다.
+
+따라서 `VER18`에서는 model capacity, evidence scorer 구조, final combiner는 유지하고, weak-positive teacher gap과 condition-based gate mismatch만 직접 보정한다.
+
+### Config 변경
+
+#### 1. `top_teacher_gap_min_constraint.weak_positive_target_boost`
+
+```json
+"weak_positive_target_boost": {
+  "enabled": true,
+  "min_support": 0.2,
+  "max_support": 1.0,
+  "boost": 0.3
+}
+```
+
+`0.2 <= top_branch_margin_value <= 1.0`인 weak-positive sample에서는 target minimum teacher gap을 직접 올린다.
+
+```text
+target_min_gap =
+  base_min_gap
+  + support_gain * clamp(relu(top_branch_margin_value), 0, support_cap)
+  + weak_positive_target_boost
+```
+
+#### 2. `class_top_branch_relative_margin.weak_positive_margin_boost`
+
+```json
+"weak_positive_margin_boost": {
+  "enabled": true,
+  "min_support": 0.2,
+  "max_support": 1.0,
+  "boost": 0.2
+}
+```
+
+`class_top_branch_relative_margin`은 기존 weak-positive multiplier를 유지하되, 같은 band에서 hinge target 자체를 올린다.
+
+```text
+effective_margin =
+  margin
+  + weak_positive_margin_boost
+
+penalty =
+  relu(effective_margin - class_top_branch_relative_gap)
+  * support_weight
+  * hardness_weight
+  * weak_positive_weight
+```
+
+#### 3. `gate_best_branch_alignment`
+
+```json
+"gate_best_branch_alignment": {
+  "enabled": true,
+  "weight": 0.03,
+  "target": "true_class_gate",
+  "source": "branch_logits",
+  "mode": "weak_positive_best_branch_alignment",
+  "margin_mode": "true_vs_hardest_negative",
+  "min_best_margin": 0.2,
+  "max_best_margin": 1.0,
+  "mismatch_margin_drop": 0.5,
+  "loss": "negative_log_best_gate",
+  "detach_branch_margin": true,
+  "class_weighted": true,
+  "reduction": "mean",
+  "warmup_epochs": 10
+}
+```
+
+이 loss는 `regret/bad_suppress`를 대체하지 않는다. 역할은 다음과 같이 더 좁다.
+
+```text
+eligible =
+  min_best_margin <= best_margin <= max_best_margin
+  and selected_branch != best_branch
+  and selected_margin + mismatch_margin_drop < best_margin
+
+penalty = -log(true_class_gate[best_branch])
+```
+
+Branch margin은 detach하고 gate만 업데이트한다.
+
+### Diagnostics Checkpoints
+
+`VER18` 분석에서는 다음 chain을 우선 확인한다.
+
+- weak-positive sample에서 `top_teacher_gap_min_weak_positive_target_boost`와 `class_top_branch_relative_margin_weak_positive_margin_boost`가 기대대로 기록되는가?
+- `class_top_branch_relative_margin_effective_target`이 weak-positive sample에서 0.5 수준으로 올라가는가?
+- `gate_best_branch_alignment_best_branch`, `gate_best_branch_alignment_selected_branch`, `gate_best_branch_alignment_eligible`가 gate mismatch를 제대로 잡는가?
+- `gate_best_branch_alignment_loss`가 감소하면서 `gate_branch_regret`와 `gate_bad_branch_suppression`이 같이 안정되는가?
+- `final_gap`은 계속 `class_evidence_gap`을 따라가는가? 그렇다면 final combiner는 유지한다.
+
+### 주의점
+
+`VER18`은 새 구조 변경이 아니라 loss target과 gate mismatch 조건을 더 직접화하는 실험이다. Checkpoint tensor shape는 크게 바뀌지 않지만 loss semantics가 달라지므로 fresh run으로 비교한다.
