@@ -216,6 +216,28 @@ def build_diagnostic_rows(
         if output.class_evidence_top_support_relative_negative_component is not None
         else None
     )
+    class_evidence_top_support_relative_negative_component_uncapped = (
+        output.class_evidence_top_support_relative_negative_component_uncapped.detach().cpu()
+        if output.class_evidence_top_support_relative_negative_component_uncapped
+        is not None
+        else None
+    )
+    class_evidence_top_support_relative_negative_component_capped = (
+        output.class_evidence_top_support_relative_negative_component_capped.detach().cpu()
+        if output.class_evidence_top_support_relative_negative_component_capped
+        is not None
+        else None
+    )
+    class_evidence_top_support_relative_negative_cap_value = (
+        output.class_evidence_top_support_relative_negative_cap_value.detach().cpu()
+        if output.class_evidence_top_support_relative_negative_cap_value is not None
+        else None
+    )
+    class_evidence_top_support_relative_negative_cap_active = (
+        output.class_evidence_top_support_relative_negative_cap_active.detach().cpu()
+        if output.class_evidence_top_support_relative_negative_cap_active is not None
+        else None
+    )
     class_evidence_top_support_direct_raw_scale = (
         output.class_evidence_top_support_direct_raw_scale.detach().cpu()
         if output.class_evidence_top_support_direct_raw_scale is not None
@@ -731,6 +753,37 @@ def build_diagnostic_rows(
                     row[
                         "class_evidence_top_support_relative_negative_component_negative_class"
                     ] = negative_class
+            if (
+                class_evidence_top_support_relative_negative_component_uncapped
+                is not None
+            ):
+                row[
+                    "class_evidence_top_support_relative_negative_component_uncapped"
+                ] = class_evidence_top_support_relative_negative_component_uncapped[
+                    index
+                ].tolist()
+            if (
+                class_evidence_top_support_relative_negative_component_capped
+                is not None
+            ):
+                row["class_evidence_top_support_relative_negative_component_capped"] = (
+                    class_evidence_top_support_relative_negative_component_capped[
+                        index
+                    ].tolist()
+                )
+            if class_evidence_top_support_relative_negative_cap_value is not None:
+                row["class_evidence_top_support_relative_negative_cap_value"] = (
+                    class_evidence_top_support_relative_negative_cap_value[
+                        index
+                    ].tolist()
+                )
+            if class_evidence_top_support_relative_negative_cap_active is not None:
+                row["class_evidence_top_support_relative_negative_cap_active"] = [
+                    bool(value)
+                    for value in class_evidence_top_support_relative_negative_cap_active[
+                        index
+                    ].tolist()
+                ]
             if class_evidence_top_relative_positive is not None:
                 row["class_evidence_top_relative_positive"] = (
                     class_evidence_top_relative_positive[index].tolist()

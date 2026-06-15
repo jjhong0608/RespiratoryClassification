@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
@@ -244,6 +245,18 @@ class ClassGateTopRelativeCorrectionConfig:
 
 
 @dataclass(frozen=True)
+class ClassGateTopSupportNegativeRelativeCapConfig:
+    enabled: bool = False
+    mode: Literal["raw_fraction_cap"] = "raw_fraction_cap"
+    max_negative_fraction: float = 0.75
+    negative_cap: float = 1.5
+    max_negative_fraction_by_label: Mapping[str, float] = field(default_factory=dict)
+    negative_cap_by_label: Mapping[str, float] = field(default_factory=dict)
+    max_negative_fraction_by_class: tuple[float, ...] | None = None
+    negative_cap_by_class: tuple[float, ...] | None = None
+
+
+@dataclass(frozen=True)
 class ClassGateTopSupportDirectPathConfig:
     enabled: bool = False
     mode: Literal["monotonic_raw_relative"] = "monotonic_raw_relative"
@@ -273,6 +286,9 @@ class ClassGateTopSupportDirectPathConfig:
     residual_scale_max: float = 0.3
     residual_bound: float = 1.0
     residual_temperature: float = 1.0
+    negative_relative_cap: ClassGateTopSupportNegativeRelativeCapConfig = field(
+        default_factory=ClassGateTopSupportNegativeRelativeCapConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -513,6 +529,12 @@ class AstModelOutput:
     class_evidence_top_support_raw_positive_component: Tensor | None = None
     class_evidence_top_support_relative_positive_component: Tensor | None = None
     class_evidence_top_support_relative_negative_component: Tensor | None = None
+    class_evidence_top_support_relative_negative_component_uncapped: Tensor | None = (
+        None
+    )
+    class_evidence_top_support_relative_negative_component_capped: Tensor | None = None
+    class_evidence_top_support_relative_negative_cap_value: Tensor | None = None
+    class_evidence_top_support_relative_negative_cap_active: Tensor | None = None
     class_evidence_top_support_direct_raw_scale: Tensor | None = None
     class_evidence_top_support_direct_relative_positive_scale: Tensor | None = None
     class_evidence_top_support_direct_relative_negative_scale: Tensor | None = None
@@ -623,6 +645,10 @@ class ClassEvidenceScoreOutput:
     top_support_raw_positive_component: Tensor | None = None
     top_support_relative_positive_component: Tensor | None = None
     top_support_relative_negative_component: Tensor | None = None
+    top_support_relative_negative_component_uncapped: Tensor | None = None
+    top_support_relative_negative_component_capped: Tensor | None = None
+    top_support_relative_negative_cap_value: Tensor | None = None
+    top_support_relative_negative_cap_active: Tensor | None = None
     top_support_direct_raw_scale: Tensor | None = None
     top_support_direct_relative_positive_scale: Tensor | None = None
     top_support_direct_relative_negative_scale: Tensor | None = None
@@ -1542,6 +1568,33 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             residual_scale,
         )
 
+    def _class_override_row(
+        self,
+        *,
+        default: float,
+        overrides_by_class: tuple[float, ...] | None,
+        device: torch.device,
+        dtype: torch.dtype,
+        field_name: str,
+    ) -> Tensor:
+        if overrides_by_class is None:
+            return torch.full(
+                (1, self.num_classes),
+                float(default),
+                device=device,
+                dtype=dtype,
+            )
+        if len(overrides_by_class) != self.num_classes:
+            raise ValueError(
+                f"{field_name} must have length {self.num_classes}, "
+                f"got {len(overrides_by_class)}"
+            )
+        return torch.tensor(
+            tuple(float(value) for value in overrides_by_class),
+            device=device,
+            dtype=dtype,
+        ).view(1, -1)
+
     def _branch_direct_score_components(
         self,
         branch_feature_inputs: Tensor,
@@ -1566,6 +1619,10 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         Tensor,
         Tensor,
         Tensor,
+        Tensor | None,
+        Tensor | None,
+        Tensor | None,
+        Tensor | None,
         Tensor | None,
         Tensor | None,
         Tensor | None,
@@ -1624,6 +1681,10 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         top_support_raw_positive_component: Tensor | None = None
         top_support_relative_positive_component: Tensor | None = None
         top_support_relative_negative_component: Tensor | None = None
+        top_support_relative_negative_component_uncapped: Tensor | None = None
+        top_support_relative_negative_component_capped: Tensor | None = None
+        top_support_relative_negative_cap_value: Tensor | None = None
+        top_support_relative_negative_cap_active: Tensor | None = None
         top_support_direct_raw_scale: Tensor | None = None
         top_support_direct_relative_positive_scale: Tensor | None = None
         top_support_direct_relative_negative_scale: Tensor | None = None
@@ -1656,9 +1717,51 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 top_support_direct_relative_positive_scale
                 * F.softplus(top_relative_feature)
             )
-            top_support_relative_negative_component = (
+            top_support_relative_negative_component_uncapped = (
                 top_support_direct_relative_negative_scale
                 * F.softplus(-top_relative_feature)
+            )
+            top_support_relative_negative_component = (
+                top_support_relative_negative_component_uncapped
+            )
+            cap_cfg = top_direct_cfg.negative_relative_cap
+            if cap_cfg.enabled:
+                if cap_cfg.mode != "raw_fraction_cap":
+                    raise ValueError("negative relative cap mode is unsupported")
+                max_negative_fraction = self._class_override_row(
+                    default=float(cap_cfg.max_negative_fraction),
+                    overrides_by_class=cap_cfg.max_negative_fraction_by_class,
+                    device=branch_feature_inputs.device,
+                    dtype=branch_feature_inputs.dtype,
+                    field_name=(
+                        "top_support_direct_path.negative_relative_cap."
+                        "max_negative_fraction_by_class"
+                    ),
+                )
+                negative_cap = self._class_override_row(
+                    default=float(cap_cfg.negative_cap),
+                    overrides_by_class=cap_cfg.negative_cap_by_class,
+                    device=branch_feature_inputs.device,
+                    dtype=branch_feature_inputs.dtype,
+                    field_name=(
+                        "top_support_direct_path.negative_relative_cap."
+                        "negative_cap_by_class"
+                    ),
+                )
+                top_support_relative_negative_cap_value = (
+                    max_negative_fraction
+                    * torch.relu(top_support_raw_positive_component)
+                ) + negative_cap
+                top_support_relative_negative_component = torch.minimum(
+                    top_support_relative_negative_component_uncapped,
+                    top_support_relative_negative_cap_value,
+                )
+                top_support_relative_negative_cap_active = (
+                    top_support_relative_negative_component_uncapped
+                    > top_support_relative_negative_cap_value
+                ).to(branch_feature_inputs.dtype)
+            top_support_relative_negative_component_capped = (
+                top_support_relative_negative_component
             )
             top_raw_existential_scores = top_support_raw_positive_component + top_bias
             top_relative_correction_scores = (
@@ -1790,6 +1893,10 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             top_support_raw_positive_component,
             top_support_relative_positive_component,
             top_support_relative_negative_component,
+            top_support_relative_negative_component_uncapped,
+            top_support_relative_negative_component_capped,
+            top_support_relative_negative_cap_value,
+            top_support_relative_negative_cap_active,
             top_support_direct_raw_scale.detach()
             if top_support_direct_raw_scale is not None
             else None,
@@ -1887,6 +1994,10 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 top_support_raw_positive_component: Tensor | None = None
                 top_support_relative_positive_component: Tensor | None = None
                 top_support_relative_negative_component: Tensor | None = None
+                top_support_relative_negative_component_uncapped: Tensor | None = None
+                top_support_relative_negative_component_capped: Tensor | None = None
+                top_support_relative_negative_cap_value: Tensor | None = None
+                top_support_relative_negative_cap_active: Tensor | None = None
                 top_support_direct_raw_scale: Tensor | None = None
                 top_support_direct_relative_positive_scale: Tensor | None = None
                 top_support_direct_relative_negative_scale: Tensor | None = None
@@ -1922,6 +2033,10 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                         top_support_raw_positive_component,
                         top_support_relative_positive_component,
                         top_support_relative_negative_component,
+                        top_support_relative_negative_component_uncapped,
+                        top_support_relative_negative_component_capped,
+                        top_support_relative_negative_cap_value,
+                        top_support_relative_negative_cap_active,
                         top_support_direct_raw_scale,
                         top_support_direct_relative_positive_scale,
                         top_support_direct_relative_negative_scale,
@@ -1953,6 +2068,18 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                             top_support_relative_negative_component = (
                                 self._center_class_scores(
                                     top_support_relative_negative_component
+                                )
+                            )
+                        if top_support_relative_negative_component_uncapped is not None:
+                            top_support_relative_negative_component_uncapped = (
+                                self._center_class_scores(
+                                    top_support_relative_negative_component_uncapped
+                                )
+                            )
+                        if top_support_relative_negative_component_capped is not None:
+                            top_support_relative_negative_component_capped = (
+                                self._center_class_scores(
+                                    top_support_relative_negative_component_capped
                                 )
                             )
                         top_support_scores = self._center_class_scores(
@@ -2061,6 +2188,18 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                     ),
                     top_support_relative_negative_component=(
                         top_support_relative_negative_component
+                    ),
+                    top_support_relative_negative_component_uncapped=(
+                        top_support_relative_negative_component_uncapped
+                    ),
+                    top_support_relative_negative_component_capped=(
+                        top_support_relative_negative_component_capped
+                    ),
+                    top_support_relative_negative_cap_value=(
+                        top_support_relative_negative_cap_value
+                    ),
+                    top_support_relative_negative_cap_active=(
+                        top_support_relative_negative_cap_active
                     ),
                     top_support_direct_raw_scale=top_support_direct_raw_scale,
                     top_support_direct_relative_positive_scale=(
@@ -3384,6 +3523,14 @@ class MultiScaleRdtAstModel(nn.Module):
         class_evidence_top_support_raw_positive_component: Tensor | None = None
         class_evidence_top_support_relative_positive_component: Tensor | None = None
         class_evidence_top_support_relative_negative_component: Tensor | None = None
+        class_evidence_top_support_relative_negative_component_uncapped: (
+            Tensor | None
+        ) = None
+        class_evidence_top_support_relative_negative_component_capped: Tensor | None = (
+            None
+        )
+        class_evidence_top_support_relative_negative_cap_value: Tensor | None = None
+        class_evidence_top_support_relative_negative_cap_active: Tensor | None = None
         class_evidence_top_support_direct_raw_scale: Tensor | None = None
         class_evidence_top_support_direct_relative_positive_scale: Tensor | None = None
         class_evidence_top_support_direct_relative_negative_scale: Tensor | None = None
@@ -3553,6 +3700,14 @@ class MultiScaleRdtAstModel(nn.Module):
                 class_evidence_top_support_relative_negative_component = (
                     class_evidence_score_output.top_support_relative_negative_component
                 )
+                class_evidence_top_support_relative_negative_component_uncapped = class_evidence_score_output.top_support_relative_negative_component_uncapped
+                class_evidence_top_support_relative_negative_component_capped = class_evidence_score_output.top_support_relative_negative_component_capped
+                class_evidence_top_support_relative_negative_cap_value = (
+                    class_evidence_score_output.top_support_relative_negative_cap_value
+                )
+                class_evidence_top_support_relative_negative_cap_active = (
+                    class_evidence_score_output.top_support_relative_negative_cap_active
+                )
                 class_evidence_top_support_direct_raw_scale = (
                     class_evidence_score_output.top_support_direct_raw_scale
                 )
@@ -3697,6 +3852,14 @@ class MultiScaleRdtAstModel(nn.Module):
                 )
                 class_evidence_top_support_relative_negative_component = (
                     class_evidence_score_output.top_support_relative_negative_component
+                )
+                class_evidence_top_support_relative_negative_component_uncapped = class_evidence_score_output.top_support_relative_negative_component_uncapped
+                class_evidence_top_support_relative_negative_component_capped = class_evidence_score_output.top_support_relative_negative_component_capped
+                class_evidence_top_support_relative_negative_cap_value = (
+                    class_evidence_score_output.top_support_relative_negative_cap_value
+                )
+                class_evidence_top_support_relative_negative_cap_active = (
+                    class_evidence_score_output.top_support_relative_negative_cap_active
                 )
                 class_evidence_top_support_direct_raw_scale = (
                     class_evidence_score_output.top_support_direct_raw_scale
@@ -3971,6 +4134,18 @@ class MultiScaleRdtAstModel(nn.Module):
             ),
             class_evidence_top_support_relative_negative_component=(
                 class_evidence_top_support_relative_negative_component
+            ),
+            class_evidence_top_support_relative_negative_component_uncapped=(
+                class_evidence_top_support_relative_negative_component_uncapped
+            ),
+            class_evidence_top_support_relative_negative_component_capped=(
+                class_evidence_top_support_relative_negative_component_capped
+            ),
+            class_evidence_top_support_relative_negative_cap_value=(
+                class_evidence_top_support_relative_negative_cap_value
+            ),
+            class_evidence_top_support_relative_negative_cap_active=(
+                class_evidence_top_support_relative_negative_cap_active
             ),
             class_evidence_top_support_direct_raw_scale=(
                 class_evidence_top_support_direct_raw_scale

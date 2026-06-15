@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "CNUH_DISEASE_VER19",
+    "name": "CNUH_DISEASE_VER20",
     "task": "Normal_vs_LungParenchymal_vs_Airway",
     "mode": "clip",
     "seed": 1337,
@@ -233,7 +233,19 @@
                   "residual_scale_init": 0.05,
                   "residual_bound": 1.0,
                   "residual_temperature": 1.0,
-                  "residual_scale_max": 0.3
+                  "residual_scale_max": 0.3,
+                  "negative_relative_cap": {
+                    "enabled": true,
+                    "mode": "raw_fraction_cap",
+                    "max_negative_fraction": 0.75,
+                    "negative_cap": 1.5,
+                    "max_negative_fraction_by_label": {
+                      "Airway": 0.5
+                    },
+                    "negative_cap_by_label": {
+                      "Airway": 1.0
+                    }
+                  }
                 },
                 "gate_reliability_mixture": {
                   "enabled": true,
@@ -535,7 +547,7 @@
         "margin_by_label": {
           "Normal": 0.3,
           "Lung_Parenchymal": 0.3,
-          "Airway": 0.5
+          "Airway": 0.8
         },
         "class_weighted": true,
         "reduction": "mean",
@@ -564,8 +576,8 @@
             "cap": 2.5
           },
           "Airway": {
-            "gain": 1.0,
-            "cap": 3.0
+            "gain": 1.5,
+            "cap": 4.0
           }
         },
         "weak_positive_support_weighting": {
@@ -588,7 +600,7 @@
           "boost_by_label": {
             "Normal": 0.1,
             "Lung_Parenchymal": 0.2,
-            "Airway": 0.4
+            "Airway": 0.8
           },
           "support_band_by_label": {
             "Airway": {
@@ -600,21 +612,21 @@
       },
       "top_teacher_gap_min_constraint": {
         "enabled": true,
-        "weight": 0.1,
+        "weight": 0.12,
         "target": "class_top_branch_margin_features",
         "mode": "support_conditioned_min_gap",
         "base_min_gap": 0.0,
         "base_min_gap_by_label": {
           "Normal": 0.0,
           "Lung_Parenchymal": 0.0,
-          "Airway": 0.2
+          "Airway": 0.4
         },
         "support_source": "top_branch_margin",
         "support_gain": 0.75,
         "support_gain_by_label": {
           "Normal": 0.5,
           "Lung_Parenchymal": 0.5,
-          "Airway": 1.0
+          "Airway": 1.25
         },
         "support_cap": 2.0,
         "weak_positive_support_weighting": {
@@ -637,7 +649,7 @@
           "boost_by_label": {
             "Normal": 0.2,
             "Lung_Parenchymal": 0.2,
-            "Airway": 0.6
+            "Airway": 1.0
           },
           "support_band_by_label": {
             "Airway": {
@@ -774,7 +786,7 @@
       },
       "gate_best_branch_alignment": {
         "enabled": true,
-        "weight": 0.03,
+        "weight": 0.04,
         "target": "true_class_gate",
         "source": "branch_logits",
         "mode": "weak_positive_best_branch_alignment",
@@ -786,9 +798,9 @@
         },
         "mismatch_margin_drop": 0.5,
         "label_weight_by_label": {
-          "Normal": 1.0,
-          "Lung_Parenchymal": 0.75,
-          "Airway": 0.25
+          "Normal": 1.5,
+          "Lung_Parenchymal": 1.0,
+          "Airway": 0.1
         },
         "loss": "negative_log_best_gate",
         "detach_branch_margin": true,

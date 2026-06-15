@@ -1473,3 +1473,112 @@ effective_margin =
 ### 주의점
 
 `VER19`부터는 label-specific correction을 허용한다. 따라서 비교 시 단순 macro metric뿐 아니라 label별 teacher/gate diagnostics를 같이 확인해야 한다. 특히 Airway recall 개선이 Normal false positive 증가로만 나타나는지, 또는 `class_top_branch_relative_gap -> top_support_score_gap -> class_evidence_gap` chain이 실제로 개선되는지를 분리해서 봐야 한다.
+
+## CNUH_DISEASE_VER19 -> CNUH_DISEASE_VER20
+
+### Date
+
+2026-06-15
+
+### Motivation
+
+`VER19` diagnostics에서 Airway hard sample은 gate가 best branch를 거의 선택해도, weak-positive top teacher 구간에서 `class_top_branch_relative_gap`과 `top_support_score_gap`이 크게 음수로 뒤집히는 문제가 남았다. 따라서 `VER20`은 final combiner나 capacity가 아니라 teacher-relative target과 top-support direct path를 더 직접적으로 조정한다.
+
+### Changes
+
+#### 1. Airway teacher-relative target 강화
+
+`class_top_branch_relative_margin`의 Airway target을 강화한다.
+
+```json
+"margin_by_label": {
+  "Normal": 0.3,
+  "Lung_Parenchymal": 0.3,
+  "Airway": 0.8
+},
+"weak_positive_margin_boost": {
+  "boost_by_label": {
+    "Normal": 0.1,
+    "Lung_Parenchymal": 0.2,
+    "Airway": 0.8
+  }
+},
+"hardness_weighting_by_label": {
+  "Airway": {
+    "gain": 1.5,
+    "cap": 4.0
+  }
+}
+```
+
+#### 2. `top_teacher_gap_min_constraint` 강화
+
+Airway teacher-front primary correction을 더 강하게 둔다.
+
+```json
+"top_teacher_gap_min_constraint": {
+  "weight": 0.12,
+  "base_min_gap_by_label": {
+    "Normal": 0.0,
+    "Lung_Parenchymal": 0.0,
+    "Airway": 0.4
+  },
+  "support_gain_by_label": {
+    "Normal": 0.5,
+    "Lung_Parenchymal": 0.5,
+    "Airway": 1.25
+  },
+  "weak_positive_target_boost": {
+    "boost_by_label": {
+      "Normal": 0.2,
+      "Lung_Parenchymal": 0.2,
+      "Airway": 1.0
+    }
+  }
+}
+```
+
+#### 3. Top-support negative relative cap
+
+`top_support_direct_path.negative_relative_cap`을 추가한다. 이 항목은 loss가 아니라 구조적 guardrail이다.
+
+```text
+uncapped_negative = relative_negative_scale * softplus(-top_relative)
+cap_value = max_negative_fraction[label] * relu(raw_positive_component) + negative_cap[label]
+capped_negative = min(uncapped_negative, cap_value)
+direct_top_score = raw_positive_component + relative_positive_component - capped_negative + class_bias
+```
+
+초기 설정은 전체 label에 `max_negative_fraction=0.75`, `negative_cap=1.5`를 적용하고 Airway만 `max_negative_fraction=0.5`, `negative_cap=1.0`으로 더 엄격하게 제한한다.
+
+#### 4. Gate alignment은 보조로 유지
+
+`gate_best_branch_alignment`는 Normal/Lung 보조 loss로 유지하고 Airway 비중은 낮춘다.
+
+```json
+"gate_best_branch_alignment": {
+  "weight": 0.04,
+  "label_weight_by_label": {
+    "Normal": 1.5,
+    "Lung_Parenchymal": 1.0,
+    "Airway": 0.1
+  }
+}
+```
+
+### Config Names
+
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER20`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver36`
+
+### Diagnostics Checkpoints
+
+`VER20` 분석에서는 다음을 확인한다.
+
+- Airway weak-positive sample에서 `class_top_branch_relative_margin_effective_target`과 `top_teacher_gap_min_effective_target`이 강화된 값을 반영하는가?
+- `class_evidence_top_support_relative_negative_component_uncapped`가 큰 sample에서 `class_evidence_top_support_relative_negative_component_capped`가 `class_evidence_top_support_relative_negative_cap_value`로 제한되는가?
+- cap 활성 샘플에서 `direct_top_score_gap -> top_support_score_gap -> class_evidence_gap` chain이 실제로 덜 무너지는가?
+- `gate_best_branch_alignment`는 Normal/Lung mismatch를 보조하고 Airway teacher correction과 충돌하지 않는가?
+- final combiner는 계속 `final_gap ~= class_evidence_gap`인지 확인한다.

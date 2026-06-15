@@ -101,6 +101,21 @@ def _class_aware_output() -> AstModelOutput:
         class_evidence_top_relative_correction_scores=torch.tensor([[-0.1, 0.1, 0.1]]),
         class_evidence_top_relative_positive=torch.tensor([[0.0, 0.2, 0.3]]),
         class_evidence_top_relative_negative=torch.tensor([[-0.2, 0.0, 0.0]]),
+        class_evidence_top_support_relative_negative_component=torch.tensor(
+            [[0.3, 0.1, 0.0]]
+        ),
+        class_evidence_top_support_relative_negative_component_uncapped=torch.tensor(
+            [[0.6, 0.1, 0.0]]
+        ),
+        class_evidence_top_support_relative_negative_component_capped=torch.tensor(
+            [[0.3, 0.1, 0.0]]
+        ),
+        class_evidence_top_support_relative_negative_cap_value=torch.tensor(
+            [[0.3, 0.4, 0.4]]
+        ),
+        class_evidence_top_support_relative_negative_cap_active=torch.tensor(
+            [[1.0, 0.0, 0.0]]
+        ),
         class_evidence_gate_reliability=torch.tensor([[0.8, 0.9, 0.7]]),
         class_evidence_gate_reliability_regret=torch.tensor([[0.2, 0.1, 0.3]]),
         class_evidence_top_margin=torch.tensor([[0.4, 0.8, 0.2]]),
@@ -382,6 +397,31 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
         -0.20000000298023224,
         0.0,
         0.0,
+    ]
+    assert row["class_evidence_top_support_relative_negative_component"] == [
+        0.30000001192092896,
+        0.10000000149011612,
+        0.0,
+    ]
+    assert row["class_evidence_top_support_relative_negative_component_uncapped"] == [
+        0.6000000238418579,
+        0.10000000149011612,
+        0.0,
+    ]
+    assert row["class_evidence_top_support_relative_negative_component_capped"] == [
+        0.30000001192092896,
+        0.10000000149011612,
+        0.0,
+    ]
+    assert row["class_evidence_top_support_relative_negative_cap_value"] == [
+        0.30000001192092896,
+        0.4000000059604645,
+        0.4000000059604645,
+    ]
+    assert row["class_evidence_top_support_relative_negative_cap_active"] == [
+        True,
+        False,
+        False,
     ]
     assert row["class_evidence_gate_reliability"] == pytest.approx([0.8, 0.9, 0.7])
     assert row["class_evidence_gate_reliability_regret"] == pytest.approx(

@@ -29,6 +29,7 @@ from src.models.model import (
     ClassGateScoreDecompositionConfig,
     ClassGateTopRelativeCorrectionConfig,
     ClassGateTopSupportDirectPathConfig,
+    ClassGateTopSupportNegativeRelativeCapConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -1074,6 +1075,8 @@ def resolve_label_float_overrides(
 ) -> tuple[float, ...]:
     values = [float(default)] * len(label_to_index)
     for label_name, value in overrides.items():
+        if label_name not in label_to_index:
+            raise ValueError(f"unknown label override {label_name!r}")
         values[int(label_to_index[label_name])] = float(value)
     return tuple(values)
 
@@ -1105,6 +1108,7 @@ class JsonConfigLoader:
     }
     _CLASS_GATE_TOP_SUPPORT_DIRECT_PATH_MODES = {"monotonic_raw_relative"}
     _CLASS_GATE_TOP_SUPPORT_DIRECT_PATH_POSITIVE_TRANSFORMS = {"softplus"}
+    _CLASS_GATE_TOP_SUPPORT_NEGATIVE_RELATIVE_CAP_MODES = {"raw_fraction_cap"}
     _CLASS_GATE_BRANCH_DIRECT_SCORE_POSITIVE_WEIGHT_MODES = {"softplus"}
     _CLASS_GATE_BRANCH_FEATURE_TRANSFORM_MODES = {"tanh"}
     _CLASS_GATE_BRANCH_LOGIT_FEATURE_MODES = {"raw", "hardest_negative_margin"}
@@ -2568,6 +2572,71 @@ class JsonConfigLoader:
                     "evidence_scorer.branch_direct_score.top_support_direct_path."
                     f"{field_name} must be greater than zero"
                 )
+        negative_cap_cfg = top_support_direct_path.negative_relative_cap
+        if not isinstance(negative_cap_cfg.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "negative_relative_cap.enabled must be a boolean"
+            )
+        if negative_cap_cfg.enabled and not top_support_direct_path.enabled:
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "negative_relative_cap requires top_support_direct_path.enabled=true"
+            )
+        if (
+            negative_cap_cfg.mode
+            not in JsonConfigLoader._CLASS_GATE_TOP_SUPPORT_NEGATIVE_RELATIVE_CAP_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "negative_relative_cap.mode must be one of "
+                f"{sorted(JsonConfigLoader._CLASS_GATE_TOP_SUPPORT_NEGATIVE_RELATIVE_CAP_MODES)}"
+            )
+        for value, field_name in (
+            (
+                negative_cap_cfg.max_negative_fraction,
+                "max_negative_fraction",
+            ),
+            (negative_cap_cfg.negative_cap, "negative_cap"),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_direct_score.top_support_direct_path."
+                    f"negative_relative_cap.{field_name} must be numeric"
+                )
+            if float(value) < 0.0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.branch_direct_score.top_support_direct_path."
+                    f"negative_relative_cap.{field_name} must be greater than "
+                    "or equal to zero"
+                )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            negative_cap_cfg.max_negative_fraction_by_label,
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "negative_relative_cap.max_negative_fraction_by_label"
+            ),
+            label_to_index=data_cfg.label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            negative_cap_cfg.negative_cap_by_label,
+            field_name=(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.branch_direct_score.top_support_direct_path."
+                "negative_relative_cap.negative_cap_by_label"
+            ),
+            label_to_index=data_cfg.label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
         for prefix, mode, min_value, init_value, max_value in (
             (
                 "top_scale",
@@ -6388,7 +6457,11 @@ class JsonConfigLoader:
         )
 
     @staticmethod
-    def _parse_evidence_pooling(raw: Mapping[str, Any]) -> EvidencePoolingConfig:
+    def _parse_evidence_pooling(
+        raw: Mapping[str, Any],
+        *,
+        label_to_index: Mapping[str, int],
+    ) -> EvidencePoolingConfig:
         kwargs = dict(raw)
         class_gate = dict(kwargs.get("class_gate", {}))
         global_residual = dict(class_gate.get("global_residual", {}))
@@ -6439,10 +6512,35 @@ class JsonConfigLoader:
                 **dict(branch_direct_score.get("top_relative_correction", {}))
             )
         )
-        branch_direct_score["top_support_direct_path"] = (
-            ClassGateTopSupportDirectPathConfig(
-                **dict(branch_direct_score.get("top_support_direct_path", {}))
+        top_support_direct_path = dict(
+            branch_direct_score.get("top_support_direct_path", {})
+        )
+        negative_relative_cap = dict(
+            top_support_direct_path.get("negative_relative_cap", {})
+        )
+        negative_relative_cap["max_negative_fraction_by_label"] = dict(
+            negative_relative_cap.get("max_negative_fraction_by_label", {})
+        )
+        negative_relative_cap["negative_cap_by_label"] = dict(
+            negative_relative_cap.get("negative_cap_by_label", {})
+        )
+        negative_relative_cap["max_negative_fraction_by_class"] = (
+            resolve_label_float_overrides(
+                default=float(negative_relative_cap.get("max_negative_fraction", 0.75)),
+                overrides=negative_relative_cap["max_negative_fraction_by_label"],
+                label_to_index=label_to_index,
             )
+        )
+        negative_relative_cap["negative_cap_by_class"] = resolve_label_float_overrides(
+            default=float(negative_relative_cap.get("negative_cap", 1.5)),
+            overrides=negative_relative_cap["negative_cap_by_label"],
+            label_to_index=label_to_index,
+        )
+        top_support_direct_path["negative_relative_cap"] = (
+            ClassGateTopSupportNegativeRelativeCapConfig(**negative_relative_cap)
+        )
+        branch_direct_score["top_support_direct_path"] = (
+            ClassGateTopSupportDirectPathConfig(**top_support_direct_path)
         )
         evidence_scorer["branch_direct_score"] = ClassGateBranchDirectScoreConfig(
             **branch_direct_score
@@ -6508,7 +6606,8 @@ class JsonConfigLoader:
         architecture["rdt"] = RdtConfig(**rdt)
         architecture["mil"] = MilConfig(**dict(architecture.get("mil", {})))
         architecture["evidence_pooling"] = JsonConfigLoader._parse_evidence_pooling(
-            dict(architecture.get("evidence_pooling", {}))
+            dict(architecture.get("evidence_pooling", {})),
+            label_to_index=data_cfg.label_to_index,
         )
         token_augmentation = dict(architecture.get("token_augmentation", {}))
         token_augmentation["branch_event_dropout"] = BranchEventDropoutConfig(

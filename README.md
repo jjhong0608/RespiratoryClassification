@@ -344,6 +344,13 @@ direct_top_score_gap -> top_support_residual_gap -> top_support_score_gap ->
 gated_support_score_gap -> branch_direct_score_gap -> branch_support_score_gap
 -> class_evidence_gap -> final_gap`.
 
+`top_support_direct_path.negative_relative_cap` is a deterministic guardrail for
+weak-positive teacher cases. It caps the negative relative term as
+`min(negative_scale * softplus(-top_relative), max_negative_fraction *
+relu(raw_positive_component) + negative_cap)`, with optional label-specific
+overrides. This keeps negative relative support from overwhelming a positive top
+raw teacher signal before the evidence scorer sees it.
+
 This keeps class-axis attention as the interaction scorer while making direct
 branch-support contribution visible in diagnostics.
 `interaction_scale_schedule` can keep the interaction contribution small during
@@ -731,6 +738,7 @@ Important class-aware fields include:
 - `class_evidence_branch_direct_raw_scale`, `class_evidence_branch_direct_relative_scale`: legacy aliases for top/gated scales.
 - `class_evidence_branch_direct_top_weights`, `class_evidence_branch_direct_gated_weights`: positive class-shared direct branch weights.
 - `class_evidence_branch_direct_existential_weights`, `class_evidence_branch_direct_competitive_weights`: legacy aliases for top/gated weights.
+- `class_evidence_top_support_relative_negative_component_uncapped`, `class_evidence_top_support_relative_negative_component_capped`, `class_evidence_top_support_relative_negative_cap_value`, `class_evidence_top_support_relative_negative_cap_active`: direct-top negative relative cap diagnostics.
 - `class_evidence_interaction_scale`: learnable bounded scale before epoch scheduling.
 - `class_evidence_interaction_scale_multiplier`: epoch schedule multiplier applied to interaction score.
 - `class_evidence_interaction_effective_scale`: scheduled scale actually applied to interaction score.

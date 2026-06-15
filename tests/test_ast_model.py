@@ -29,6 +29,7 @@ from src.models.model import (
     ClassGateScoreDecompositionConfig,
     ClassGateTopRelativeCorrectionConfig,
     ClassGateTopSupportDirectPathConfig,
+    ClassGateTopSupportNegativeRelativeCapConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -1063,6 +1064,19 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
                                     residual_hidden_size=8,
                                     residual_scale_init=0.05,
                                     residual_scale_max=0.3,
+                                    negative_relative_cap=(
+                                        ClassGateTopSupportNegativeRelativeCapConfig(
+                                            enabled=True,
+                                            max_negative_fraction=0.75,
+                                            negative_cap=1.5,
+                                            max_negative_fraction_by_class=(
+                                                0.75,
+                                                0.75,
+                                                0.5,
+                                            ),
+                                            negative_cap_by_class=(1.5, 1.5, 1.0),
+                                        )
+                                    ),
                                 )
                             ),
                             gate_reliability_mixture=(
@@ -1141,6 +1155,15 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
     assert output.class_evidence_branch_direct_relative_scale is not None
     assert output.class_evidence_branch_direct_residual_scale is not None
     assert output.class_evidence_top_support_direct_residual_scale is not None
+    assert (
+        output.class_evidence_top_support_relative_negative_component_uncapped
+        is not None
+    )
+    assert (
+        output.class_evidence_top_support_relative_negative_component_capped is not None
+    )
+    assert output.class_evidence_top_support_relative_negative_cap_value is not None
+    assert output.class_evidence_top_support_relative_negative_cap_active is not None
     assert output.class_evidence_branch_direct_top_weights is not None
     assert output.class_evidence_branch_direct_gated_weights is not None
     assert output.class_evidence_branch_direct_existential_weights is not None
@@ -1180,6 +1203,10 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
         output.class_evidence_direct_top_scores,
         expected_direct_top_scores,
         atol=1e-5,
+    )
+    assert torch.allclose(
+        output.class_evidence_top_support_relative_negative_component,
+        output.class_evidence_top_support_relative_negative_component_capped,
     )
     expected_top_support_scores = output.class_evidence_direct_top_scores + (
         output.class_evidence_top_support_direct_residual_scale

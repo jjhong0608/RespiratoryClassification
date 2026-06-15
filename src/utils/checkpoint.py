@@ -26,6 +26,7 @@ from src.models.model import (
     ClassGateScoreDecompositionConfig,
     ClassGateTopRelativeCorrectionConfig,
     ClassGateTopSupportDirectPathConfig,
+    ClassGateTopSupportNegativeRelativeCapConfig,
     ClassifierConfig,
     EncoderAdaptationConfig,
     EvidencePoolingConfig,
@@ -221,10 +222,16 @@ def _parse_evidence_pooling(raw: object) -> EvidencePoolingConfig:
             **dict(branch_direct_score_kwargs.get("top_relative_correction", {}))
         )
     )
-    branch_direct_score_kwargs["top_support_direct_path"] = (
-        ClassGateTopSupportDirectPathConfig(
-            **dict(branch_direct_score_kwargs.get("top_support_direct_path", {}))
+    top_support_direct_path_kwargs = dict(
+        branch_direct_score_kwargs.get("top_support_direct_path", {})
+    )
+    top_support_direct_path_kwargs["negative_relative_cap"] = (
+        ClassGateTopSupportNegativeRelativeCapConfig(
+            **dict(top_support_direct_path_kwargs.get("negative_relative_cap", {}))
         )
+    )
+    branch_direct_score_kwargs["top_support_direct_path"] = (
+        ClassGateTopSupportDirectPathConfig(**top_support_direct_path_kwargs)
     )
     evidence_scorer_kwargs["branch_direct_score"] = ClassGateBranchDirectScoreConfig(
         **branch_direct_score_kwargs
