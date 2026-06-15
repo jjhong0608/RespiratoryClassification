@@ -244,7 +244,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver36"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver37"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.model.encoder.architecture.hidden_size == 512
@@ -485,6 +485,41 @@ def test_retained_repo_configs_load() -> None:
     assert teacher_min.weak_positive_target_boost.support_band_by_label[
         "wheeze"
     ].max_support == pytest.approx(1.2)
+    hard_neg_teacher = (
+        current_training_cfg.train.loss.hard_negative_top_teacher_suppression
+    )
+    assert hard_neg_teacher.enabled is True
+    assert hard_neg_teacher.weight == pytest.approx(0.05)
+    assert hard_neg_teacher.target == "class_top_branch_margin_features"
+    assert hard_neg_teacher.mode == "detach_true_top_hardest_negative_hinge"
+    assert hard_neg_teacher.support_source == "top_branch_margin"
+    assert hard_neg_teacher.base_required_gap == pytest.approx(0.1)
+    assert hard_neg_teacher.base_required_gap_by_label == {
+        "normal": 0.1,
+        "crackle": 0.1,
+        "wheeze": 0.3,
+    }
+    assert hard_neg_teacher.weak_positive_band.enabled is True
+    assert hard_neg_teacher.weak_positive_band.min_support == pytest.approx(0.2)
+    assert hard_neg_teacher.weak_positive_band.max_support == pytest.approx(1.0)
+    assert hard_neg_teacher.weak_positive_band.boost_by_label == {
+        "normal": 0.1,
+        "crackle": 0.1,
+        "wheeze": 0.5,
+    }
+    assert hard_neg_teacher.weak_positive_band.support_band_by_label[
+        "wheeze"
+    ].max_support == pytest.approx(1.2)
+    assert hard_neg_teacher.moderate_positive_band.enabled is True
+    assert hard_neg_teacher.moderate_positive_band.min_support == pytest.approx(1.2)
+    assert hard_neg_teacher.moderate_positive_band.max_support == pytest.approx(2.0)
+    assert hard_neg_teacher.moderate_positive_band.boost_by_label == {
+        "normal": 0.0,
+        "crackle": 0.0,
+        "wheeze": 0.2,
+    }
+    assert hard_neg_teacher.detach_true_top is True
+    assert hard_neg_teacher.class_weighted is True
     phase_schedule = (
         current_training_cfg.train.loss.top_branch_margin.phase_weight_schedule
     )
@@ -636,7 +671,7 @@ def test_retained_repo_configs_load() -> None:
         current_class_gate.global_residual.correction.confidence_aware_gate.damping
         == pytest.approx(0.7)
     )
-    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER20"
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER21"
     assert disease_training_cfg.model.encoder.architecture.hidden_size == 512
     assert disease_training_cfg.model.encoder.architecture.adapter_depth == 8
     assert disease_training_cfg.model.classifier.hidden_dim == 1024
@@ -763,6 +798,33 @@ def test_retained_repo_configs_load() -> None:
     assert disease_teacher_min.weak_positive_target_boost.support_band_by_label[
         "Airway"
     ].max_support == pytest.approx(1.2)
+    disease_hard_neg_teacher = (
+        disease_training_cfg.train.loss.hard_negative_top_teacher_suppression
+    )
+    assert disease_hard_neg_teacher.enabled is True
+    assert disease_hard_neg_teacher.weight == pytest.approx(0.05)
+    assert disease_hard_neg_teacher.base_required_gap_by_label == {
+        "Normal": 0.1,
+        "Lung_Parenchymal": 0.1,
+        "Airway": 0.3,
+    }
+    assert disease_hard_neg_teacher.weak_positive_band.enabled is True
+    assert disease_hard_neg_teacher.weak_positive_band.boost_by_label == {
+        "Normal": 0.1,
+        "Lung_Parenchymal": 0.1,
+        "Airway": 0.5,
+    }
+    assert disease_hard_neg_teacher.weak_positive_band.support_band_by_label[
+        "Airway"
+    ].max_support == pytest.approx(1.2)
+    assert disease_hard_neg_teacher.moderate_positive_band.enabled is True
+    assert disease_hard_neg_teacher.moderate_positive_band.boost_by_label == {
+        "Normal": 0.0,
+        "Lung_Parenchymal": 0.0,
+        "Airway": 0.2,
+    }
+    assert disease_hard_neg_teacher.detach_true_top is True
+    assert disease_hard_neg_teacher.class_weighted is True
     disease_gate_align = disease_training_cfg.train.loss.gate_best_branch_alignment
     assert disease_gate_align.enabled is True
     assert disease_gate_align.weight == pytest.approx(0.04)
@@ -2560,6 +2622,227 @@ def test_valid_teacher_relative_top_branch_config_loads(tmp_path: Path) -> None:
     assert teacher_min_cfg.weak_positive_target_boost.support_band_by_label[
         "wheeze"
     ].max_support == pytest.approx(1.2)
+
+
+def test_valid_hard_negative_top_teacher_suppression_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["hard_negative_top_teacher_suppression"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "detach_true_top_hardest_negative_hinge",
+        "support_source": "top_branch_margin",
+        "base_required_gap": 0.1,
+        "base_required_gap_by_label": {"wheeze": 0.3},
+        "weak_positive_band": {
+            "enabled": True,
+            "min_support": 0.2,
+            "max_support": 1.0,
+            "boost": 0.1,
+            "boost_by_label": {"wheeze": 0.5},
+            "support_band_by_label": {
+                "wheeze": {"min_support": 0.2, "max_support": 1.2}
+            },
+        },
+        "moderate_positive_band": {
+            "enabled": True,
+            "min_support": 1.2,
+            "max_support": 2.0,
+            "boost": 0.0,
+            "boost_by_label": {"wheeze": 0.2},
+        },
+        "detach_true_top": True,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(
+        tmp_path / "hard_negative_top_teacher_suppression.json",
+        payload,
+    )
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    hard_neg_cfg = cfg.train.loss.hard_negative_top_teacher_suppression
+    assert hard_neg_cfg.enabled is True
+    assert hard_neg_cfg.weight == pytest.approx(0.05)
+    assert hard_neg_cfg.base_required_gap_by_label == {"wheeze": 0.3}
+    assert hard_neg_cfg.weak_positive_band.enabled is True
+    assert hard_neg_cfg.weak_positive_band.boost_by_label == {"wheeze": 0.5}
+    assert hard_neg_cfg.weak_positive_band.support_band_by_label[
+        "wheeze"
+    ].max_support == pytest.approx(1.2)
+    assert hard_neg_cfg.moderate_positive_band.enabled is True
+    assert hard_neg_cfg.moderate_positive_band.boost_by_label == {"wheeze": 0.2}
+    assert hard_neg_cfg.detach_true_top is True
+    assert hard_neg_cfg.class_weighted is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        (
+            "target",
+            "class_evidence_logits",
+            "hard_negative_top_teacher_suppression.target",
+        ),
+        ("mode", "softplus", "hard_negative_top_teacher_suppression.mode"),
+        (
+            "support_source",
+            "class_top_branch_margin_features",
+            "hard_negative_top_teacher_suppression.support_source",
+        ),
+        (
+            "base_required_gap",
+            -0.1,
+            "hard_negative_top_teacher_suppression.base_required_gap",
+        ),
+        ("weight", 0.0, "hard_negative_top_teacher_suppression.weight"),
+        (
+            "detach_true_top",
+            "true",
+            "hard_negative_top_teacher_suppression.detach_true_top",
+        ),
+        (
+            "class_weighted",
+            "true",
+            "hard_negative_top_teacher_suppression.class_weighted",
+        ),
+        ("warmup_epochs", -1, "hard_negative_top_teacher_suppression.warmup_epochs"),
+    ],
+)
+def test_invalid_hard_negative_top_teacher_suppression_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["hard_negative_top_teacher_suppression"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "detach_true_top_hardest_negative_hinge",
+        "support_source": "top_branch_margin",
+        "base_required_gap": 0.1,
+        "detach_true_top": True,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["hard_negative_top_teacher_suppression"][field] = value
+    config_path = _write_json(tmp_path / "bad_hard_negative_teacher.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("band", "field", "value", "error"),
+    [
+        (
+            "weak_positive_band",
+            "enabled",
+            "yes",
+            "hard_negative_top_teacher_suppression.weak_positive_band.enabled",
+        ),
+        (
+            "weak_positive_band",
+            "min_support",
+            -0.1,
+            "hard_negative_top_teacher_suppression.weak_positive_band.min_support",
+        ),
+        (
+            "weak_positive_band",
+            "max_support",
+            0.1,
+            "hard_negative_top_teacher_suppression.weak_positive_band.max_support",
+        ),
+        (
+            "weak_positive_band",
+            "boost",
+            -0.1,
+            "hard_negative_top_teacher_suppression.weak_positive_band.boost",
+        ),
+        (
+            "weak_positive_band",
+            "boost_by_label",
+            {"ghost": 0.1},
+            "hard_negative_top_teacher_suppression.weak_positive_band.boost_by_label",
+        ),
+        (
+            "moderate_positive_band",
+            "boost_by_label",
+            {"wheeze": -0.1},
+            "hard_negative_top_teacher_suppression.moderate_positive_band.boost_by_label",
+        ),
+    ],
+)
+def test_invalid_hard_negative_top_teacher_band_config_is_rejected(
+    tmp_path: Path,
+    band: str,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["train"]["loss"]["hard_negative_top_teacher_suppression"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "detach_true_top_hardest_negative_hinge",
+        "support_source": "top_branch_margin",
+        "base_required_gap": 0.1,
+        "weak_positive_band": {
+            "enabled": True,
+            "min_support": 0.2,
+            "max_support": 1.0,
+            "boost": 0.1,
+        },
+        "moderate_positive_band": {
+            "enabled": True,
+            "min_support": 1.2,
+            "max_support": 2.0,
+            "boost": 0.0,
+        },
+        "detach_true_top": True,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["hard_negative_top_teacher_suppression"][band][field] = (
+        value
+    )
+    config_path = _write_json(
+        tmp_path / "bad_hard_negative_teacher_band.json",
+        payload,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
 
 
 @pytest.mark.parametrize(

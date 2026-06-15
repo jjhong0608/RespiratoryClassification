@@ -392,6 +392,71 @@ def main() -> None:
         },
         label_to_index=cfg.data.label_to_index,
     )
+    hard_negative_top_teacher_base_required_gap_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.hard_negative_top_teacher_suppression.base_required_gap,
+        overrides=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.base_required_gap_by_label
+        ),
+        label_to_index=cfg.data.label_to_index,
+    )
+    hard_negative_top_teacher_weak_boost_by_class = resolve_label_float_overrides(
+        default=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.weak_positive_band.boost
+        ),
+        overrides=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.weak_positive_band.boost_by_label
+        ),
+        label_to_index=cfg.data.label_to_index,
+    )
+    hard_negative_top_teacher_weak_min_by_class = resolve_label_float_overrides(
+        default=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.weak_positive_band.min_support
+        ),
+        overrides={
+            label: item.min_support
+            for label, item in cfg.train.loss.hard_negative_top_teacher_suppression.weak_positive_band.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    hard_negative_top_teacher_weak_max_by_class = resolve_label_float_overrides(
+        default=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.weak_positive_band.max_support
+        ),
+        overrides={
+            label: item.max_support
+            for label, item in cfg.train.loss.hard_negative_top_teacher_suppression.weak_positive_band.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    hard_negative_top_teacher_moderate_boost_by_class = resolve_label_float_overrides(
+        default=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.moderate_positive_band.boost
+        ),
+        overrides=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.moderate_positive_band.boost_by_label
+        ),
+        label_to_index=cfg.data.label_to_index,
+    )
+    hard_negative_top_teacher_moderate_min_by_class = resolve_label_float_overrides(
+        default=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.moderate_positive_band.min_support
+        ),
+        overrides={
+            label: item.min_support
+            for label, item in cfg.train.loss.hard_negative_top_teacher_suppression.moderate_positive_band.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    hard_negative_top_teacher_moderate_max_by_class = resolve_label_float_overrides(
+        default=(
+            cfg.train.loss.hard_negative_top_teacher_suppression.moderate_positive_band.max_support
+        ),
+        overrides={
+            label: item.max_support
+            for label, item in cfg.train.loss.hard_negative_top_teacher_suppression.moderate_positive_band.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
     class_evidence_gap_cap_negative_cap_by_class = resolve_label_float_overrides(
         default=cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap,
         overrides=(
@@ -568,6 +633,30 @@ def main() -> None:
             ),
             top_teacher_gap_min_target_boost_max_by_class=(
                 top_teacher_gap_min_target_boost_max_by_class
+            ),
+            hard_negative_top_teacher_suppression=(
+                cfg.train.loss.hard_negative_top_teacher_suppression
+            ),
+            hard_negative_top_teacher_base_required_gap_by_class=(
+                hard_negative_top_teacher_base_required_gap_by_class
+            ),
+            hard_negative_top_teacher_weak_boost_by_class=(
+                hard_negative_top_teacher_weak_boost_by_class
+            ),
+            hard_negative_top_teacher_weak_min_by_class=(
+                hard_negative_top_teacher_weak_min_by_class
+            ),
+            hard_negative_top_teacher_weak_max_by_class=(
+                hard_negative_top_teacher_weak_max_by_class
+            ),
+            hard_negative_top_teacher_moderate_boost_by_class=(
+                hard_negative_top_teacher_moderate_boost_by_class
+            ),
+            hard_negative_top_teacher_moderate_min_by_class=(
+                hard_negative_top_teacher_moderate_min_by_class
+            ),
+            hard_negative_top_teacher_moderate_max_by_class=(
+                hard_negative_top_teacher_moderate_max_by_class
             ),
             branch_direct_score_margin=cfg.train.loss.branch_direct_score_margin,
             branch_support_score_margin=(cfg.train.loss.branch_support_score_margin),

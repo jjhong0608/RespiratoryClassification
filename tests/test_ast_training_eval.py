@@ -75,6 +75,8 @@ from src.utils.config import (
     GateEntropyRegularizationConfig,
     GateWeightedBranchMarginConfig,
     GlobalResidualAntiVetoConfig,
+    HardNegativeTopTeacherSuppressionBandConfig,
+    HardNegativeTopTeacherSuppressionConfig,
     InteractionGapCapRegularizationConfig,
     LabelSmoothingConfig,
     MarginHardnessWeightingConfig,
@@ -385,6 +387,29 @@ def _trainer_cfg(
     top_teacher_gap_min_weak_positive_target_boost: (
         WeakPositiveTargetBoostConfig | None
     ) = None,
+    hard_negative_top_teacher_enabled: bool = False,
+    hard_negative_top_teacher_weight: float = 0.0,
+    hard_negative_top_teacher_base_required_gap: float = 0.1,
+    hard_negative_top_teacher_base_required_gap_by_class: (
+        tuple[float, ...] | None
+    ) = None,
+    hard_negative_top_teacher_weak_band: (
+        HardNegativeTopTeacherSuppressionBandConfig | None
+    ) = None,
+    hard_negative_top_teacher_weak_boost_by_class: tuple[float, ...] | None = None,
+    hard_negative_top_teacher_weak_min_by_class: tuple[float, ...] | None = None,
+    hard_negative_top_teacher_weak_max_by_class: tuple[float, ...] | None = None,
+    hard_negative_top_teacher_moderate_band: (
+        HardNegativeTopTeacherSuppressionBandConfig | None
+    ) = None,
+    hard_negative_top_teacher_moderate_boost_by_class: (
+        tuple[float, ...] | None
+    ) = None,
+    hard_negative_top_teacher_moderate_min_by_class: tuple[float, ...] | None = None,
+    hard_negative_top_teacher_moderate_max_by_class: tuple[float, ...] | None = None,
+    hard_negative_top_teacher_detach_true_top: bool = True,
+    hard_negative_top_teacher_class_weighted: bool = False,
+    hard_negative_top_teacher_warmup_epochs: int = 0,
     branch_support_score_margin_enabled: bool = False,
     branch_support_score_margin_weight: float = 0.0,
     branch_support_score_margin_temperature: float = 1.0,
@@ -812,6 +837,49 @@ def _trainer_cfg(
         ),
         top_teacher_gap_min_target_boost_max_by_class=(
             top_teacher_gap_min_target_boost_max_by_class
+        ),
+        hard_negative_top_teacher_suppression=(
+            HardNegativeTopTeacherSuppressionConfig(
+                enabled=hard_negative_top_teacher_enabled,
+                weight=hard_negative_top_teacher_weight,
+                target="class_top_branch_margin_features",
+                mode="detach_true_top_hardest_negative_hinge",
+                support_source="top_branch_margin",
+                base_required_gap=hard_negative_top_teacher_base_required_gap,
+                weak_positive_band=(
+                    hard_negative_top_teacher_weak_band
+                    or HardNegativeTopTeacherSuppressionBandConfig()
+                ),
+                moderate_positive_band=(
+                    hard_negative_top_teacher_moderate_band
+                    or HardNegativeTopTeacherSuppressionBandConfig()
+                ),
+                detach_true_top=hard_negative_top_teacher_detach_true_top,
+                class_weighted=hard_negative_top_teacher_class_weighted,
+                reduction="mean",
+                warmup_epochs=hard_negative_top_teacher_warmup_epochs,
+            )
+        ),
+        hard_negative_top_teacher_base_required_gap_by_class=(
+            hard_negative_top_teacher_base_required_gap_by_class
+        ),
+        hard_negative_top_teacher_weak_boost_by_class=(
+            hard_negative_top_teacher_weak_boost_by_class
+        ),
+        hard_negative_top_teacher_weak_min_by_class=(
+            hard_negative_top_teacher_weak_min_by_class
+        ),
+        hard_negative_top_teacher_weak_max_by_class=(
+            hard_negative_top_teacher_weak_max_by_class
+        ),
+        hard_negative_top_teacher_moderate_boost_by_class=(
+            hard_negative_top_teacher_moderate_boost_by_class
+        ),
+        hard_negative_top_teacher_moderate_min_by_class=(
+            hard_negative_top_teacher_moderate_min_by_class
+        ),
+        hard_negative_top_teacher_moderate_max_by_class=(
+            hard_negative_top_teacher_moderate_max_by_class
         ),
         branch_support_score_margin=BranchSupportScoreMarginConfig(
             enabled=branch_support_score_margin_enabled,
@@ -2968,6 +3036,165 @@ def test_trainer_top_teacher_gap_min_constraint_is_support_conditioned() -> None
     assert torch.isclose(target_boost_mean, target_boosts.mean())
     assert torch.isclose(base_min_gap_mean, torch.tensor(0.0))
     assert torch.isclose(support_gain_mean, torch.tensor(0.75))
+
+
+def test_trainer_hard_negative_top_teacher_suppression_uses_band_boosts() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.5, 2.0, 0.5),
+            hard_negative_top_teacher_enabled=True,
+            hard_negative_top_teacher_weight=0.05,
+            hard_negative_top_teacher_base_required_gap=0.1,
+            hard_negative_top_teacher_base_required_gap_by_class=(0.1, 0.1, 0.3),
+            hard_negative_top_teacher_weak_band=(
+                HardNegativeTopTeacherSuppressionBandConfig(
+                    enabled=True,
+                    min_support=0.2,
+                    max_support=1.0,
+                    boost=0.1,
+                )
+            ),
+            hard_negative_top_teacher_weak_boost_by_class=(0.1, 0.1, 0.5),
+            hard_negative_top_teacher_weak_max_by_class=(1.0, 1.0, 1.2),
+            hard_negative_top_teacher_moderate_band=(
+                HardNegativeTopTeacherSuppressionBandConfig(
+                    enabled=True,
+                    min_support=1.2,
+                    max_support=2.0,
+                    boost=0.0,
+                )
+            ),
+            hard_negative_top_teacher_moderate_boost_by_class=(0.0, 0.0, 0.2),
+            hard_negative_top_teacher_class_weighted=True,
+            hard_negative_top_teacher_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(3, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(3, 32),
+        branch_logits=torch.tensor(
+            [
+                [[1.0, 0.2, 0.1]],
+                [[0.0, 0.1, 1.6]],
+                [[0.0, 0.1, 2.6]],
+            ],
+            dtype=torch.float32,
+        ),
+        class_top_branch_margin_features=torch.tensor(
+            [
+                [0.4, 0.8, 0.1],
+                [0.2, 1.0, 0.5],
+                [0.2, 1.0, 1.5],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 2, 2], dtype=torch.long)
+
+    (
+        raw_warmup,
+        weighted_warmup,
+        required_warmup,
+        weak_boost_warmup,
+        moderate_boost_warmup,
+        weak_eligible_warmup,
+        moderate_eligible_warmup,
+        penalty_eligible_warmup,
+    ) = trainer._compute_hard_negative_top_teacher_suppression_loss(
+        output,
+        labels,
+        epoch=10,
+    )
+    (
+        raw_loss,
+        weighted_loss,
+        required_gap_mean,
+        weak_boost_mean,
+        moderate_boost_mean,
+        weak_eligible_mean,
+        moderate_eligible_mean,
+        penalty_eligible_mean,
+    ) = trainer._compute_hard_negative_top_teacher_suppression_loss(
+        output,
+        labels,
+        epoch=11,
+    )
+
+    required_gaps = torch.tensor([0.2, 0.5, 0.3], dtype=torch.float32)
+    penalties = torch.tensor([0.6, 1.0, 0.0], dtype=torch.float32)
+    class_weights = torch.tensor([1.5, 0.5, 0.5], dtype=torch.float32)
+    expected_raw = torch.mean(penalties * class_weights)
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(required_warmup, torch.tensor(0.0))
+    assert torch.isclose(weak_boost_warmup, torch.tensor(0.0))
+    assert torch.isclose(moderate_boost_warmup, torch.tensor(0.0))
+    assert torch.isclose(weak_eligible_warmup, torch.tensor(0.0))
+    assert torch.isclose(moderate_eligible_warmup, torch.tensor(0.0))
+    assert torch.isclose(penalty_eligible_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.05 * expected_raw)
+    assert torch.isclose(required_gap_mean, required_gaps.mean())
+    assert torch.isclose(weak_boost_mean, torch.tensor(0.1 / 3.0))
+    assert torch.isclose(moderate_boost_mean, torch.tensor(0.2 / 3.0))
+    assert torch.isclose(weak_eligible_mean, torch.tensor(1.0 / 3.0))
+    assert torch.isclose(moderate_eligible_mean, torch.tensor(1.0 / 3.0))
+    assert torch.isclose(penalty_eligible_mean, torch.tensor(2.0 / 3.0))
+
+
+def test_trainer_hard_negative_top_teacher_suppression_detaches_true_top() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            hard_negative_top_teacher_enabled=True,
+            hard_negative_top_teacher_weight=1.0,
+            hard_negative_top_teacher_base_required_gap=0.1,
+            hard_negative_top_teacher_weak_band=(
+                HardNegativeTopTeacherSuppressionBandConfig(
+                    enabled=True,
+                    min_support=0.2,
+                    max_support=1.0,
+                    boost=0.1,
+                )
+            ),
+            hard_negative_top_teacher_detach_true_top=True,
+        )
+    )
+    teacher_logits = torch.tensor(
+        [[0.4, 0.8, 0.1]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    branch_logits = torch.tensor(
+        [[[1.0, 0.2, 0.1]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(1, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(1, 32),
+        branch_logits=branch_logits,
+        class_top_branch_margin_features=teacher_logits,
+    )
+    labels = torch.tensor([0], dtype=torch.long)
+
+    _, weighted_loss, *_ = trainer._compute_hard_negative_top_teacher_suppression_loss(
+        output,
+        labels,
+        epoch=1,
+    )
+    weighted_loss.backward()
+
+    assert teacher_logits.grad is not None
+    assert teacher_logits.grad[0, 0] == pytest.approx(0.0)
+    assert teacher_logits.grad[0, 1] == pytest.approx(1.0)
+    assert teacher_logits.grad[0, 2] == pytest.approx(0.0)
+    assert branch_logits.grad is None
 
 
 def test_trainer_teacher_relative_losses_use_label_specific_weak_positive_band() -> (
@@ -5328,6 +5555,25 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
                     boost=0.3,
                 )
             ),
+            hard_negative_top_teacher_enabled=True,
+            hard_negative_top_teacher_weight=0.05,
+            hard_negative_top_teacher_base_required_gap=0.1,
+            hard_negative_top_teacher_weak_band=(
+                HardNegativeTopTeacherSuppressionBandConfig(
+                    enabled=True,
+                    min_support=0.2,
+                    max_support=1.0,
+                    boost=0.1,
+                )
+            ),
+            hard_negative_top_teacher_moderate_band=(
+                HardNegativeTopTeacherSuppressionBandConfig(
+                    enabled=True,
+                    min_support=1.2,
+                    max_support=2.0,
+                    boost=0.0,
+                )
+            ),
             gate_best_branch_alignment_enabled=True,
             gate_best_branch_alignment_weight=0.03,
             gate_best_branch_alignment_min_best_margin=0.2,
@@ -5445,6 +5691,19 @@ def test_trainer_branch_objective_diagnostics_include_dynamic_targets() -> None:
     assert row["top_teacher_gap_min_weak_positive_weight"] == pytest.approx(1.5)
     assert row["top_teacher_gap_min_weak_positive_eligible"] is True
     assert row["top_teacher_gap_min_eligible"] is True
+    assert row["hard_negative_top_teacher_true_top"] == pytest.approx(0.3)
+    assert row["hard_negative_top_teacher_negative_top"] == pytest.approx(0.5)
+    assert row["hard_negative_top_teacher_negative_class"] == 2
+    assert row["hard_negative_top_teacher_support_value"] == pytest.approx(0.3)
+    assert row["hard_negative_top_teacher_required_gap"] == pytest.approx(0.2)
+    assert row["hard_negative_top_teacher_base_required_gap"] == pytest.approx(0.1)
+    assert row["hard_negative_top_teacher_weak_band_boost"] == pytest.approx(0.1)
+    assert row["hard_negative_top_teacher_moderate_band_boost"] == pytest.approx(0.0)
+    assert row["hard_negative_top_teacher_weak_band_eligible"] is True
+    assert row["hard_negative_top_teacher_moderate_band_eligible"] is False
+    assert row["hard_negative_top_teacher_penalty"] == pytest.approx(0.4)
+    assert row["hard_negative_top_teacher_eligible"] is True
+    assert row["hard_negative_top_teacher_detach_true_top"] is True
     assert row["gate_best_branch_alignment_best_branch"] == 1
     assert row["gate_best_branch_alignment_selected_branch"] == 1
     assert row["gate_best_branch_alignment_best_margin"] == pytest.approx(0.3)
@@ -6102,6 +6361,14 @@ def _sample_epoch_log_context(
         "class_evidence_margin_loss": 0.08,
         "top_support_score_margin": 0.34,
         "top_support_score_margin_loss": 0.017,
+        "hard_negative_top_teacher_suppression": 0.28,
+        "hard_negative_top_teacher_suppression_loss": 0.014,
+        "hard_negative_top_teacher_required_gap": 0.32,
+        "hard_negative_top_teacher_weak_band_boost": 0.08,
+        "hard_negative_top_teacher_moderate_band_boost": 0.03,
+        "hard_negative_top_teacher_weak_band_eligible_fraction": 0.25,
+        "hard_negative_top_teacher_moderate_band_eligible_fraction": 0.10,
+        "hard_negative_top_teacher_penalty_eligible_fraction": 0.35,
         "branch_support_score_margin": 0.36,
         "branch_support_score_margin_loss": 0.018,
         "class_gated_branch_logit_margin": 0.31,
@@ -6150,6 +6417,14 @@ def _sample_epoch_log_context(
         "class_evidence_margin_loss": 0.09,
         "top_support_score_margin": 0.39,
         "top_support_score_margin_loss": 0.0195,
+        "hard_negative_top_teacher_suppression": 0.31,
+        "hard_negative_top_teacher_suppression_loss": 0.0155,
+        "hard_negative_top_teacher_required_gap": 0.34,
+        "hard_negative_top_teacher_weak_band_boost": 0.09,
+        "hard_negative_top_teacher_moderate_band_boost": 0.04,
+        "hard_negative_top_teacher_weak_band_eligible_fraction": 0.28,
+        "hard_negative_top_teacher_moderate_band_eligible_fraction": 0.12,
+        "hard_negative_top_teacher_penalty_eligible_fraction": 0.37,
         "branch_support_score_margin": 0.41,
         "branch_support_score_margin_loss": 0.0205,
         "class_gated_branch_logit_margin": 0.38,
@@ -6227,6 +6502,8 @@ def test_epoch_log_formatter_builds_readable_multiclass_block() -> None:
     assert "normal->wheeze=3" in block
     assert "class_margin raw=0.4000 loss=0.0800" in block
     assert "top_support raw=0.3400 loss=0.0170" in block
+    assert "hard_neg_teacher raw=0.2800 loss=0.0140" in block
+    assert "hard_neg_req=0.3200" in block
     assert "branch_support raw=0.3600 loss=0.0180" in block
     assert "branch_logit_margin raw=0.3100 loss=0.0465" in block
     assert "b2e raw=0.2700 loss=0.0135" in block
@@ -6265,6 +6542,12 @@ def test_epoch_jsonl_logs_append_metric_loss_and_adaptive_payloads(
     assert loss_payload["train"]["class_evidence_margin_loss"] == pytest.approx(0.08)
     assert loss_payload["train"]["top_support_score_margin_loss"] == pytest.approx(
         0.017
+    )
+    assert loss_payload["train"][
+        "hard_negative_top_teacher_suppression_loss"
+    ] == pytest.approx(0.014)
+    assert loss_payload["train"]["hard_negative_top_teacher_required_gap"] == (
+        pytest.approx(0.32)
     )
     assert loss_payload["train"]["branch_support_score_margin_loss"] == pytest.approx(
         0.018

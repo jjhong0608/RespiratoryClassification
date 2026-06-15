@@ -1582,3 +1582,102 @@ direct_top_score = raw_positive_component + relative_positive_component - capped
 - cap 활성 샘플에서 `direct_top_score_gap -> top_support_score_gap -> class_evidence_gap` chain이 실제로 덜 무너지는가?
 - `gate_best_branch_alignment`는 Normal/Lung mismatch를 보조하고 Airway teacher correction과 충돌하지 않는가?
 - final combiner는 계속 `final_gap ~= class_evidence_gap`인지 확인한다.
+
+## CNUH_DISEASE_VER20 -> CNUH_DISEASE_VER21
+
+### Date
+
+2026-06-16
+
+### Motivation
+
+`VER20` diagnostics에서는 Airway hard sample에서 `top_branch_margin_value > 0`이어도 `class_top_branch_relative_gap < 0`으로 무너지는 병목이 계속 남았다. 특히 true Airway top teacher가 약하게 살아 있어도 hardest negative, 주로 Lung/Normal 쪽 top teacher가 더 커지면 이후 `top_support_score_gap -> branch_support_score_gap -> class_evidence_gap -> final_gap` chain이 그대로 따라 무너졌다.
+
+`top_teacher_gap_min_constraint`는 true-vs-negative gap의 target을 높이는 역할을 유지하지만, 그것만으로는 true top을 올리는 힘과 hardest negative top을 낮추는 힘이 분리되지 않았다. 따라서 `VER21`은 teacher-front stage에서 hardest negative top teacher를 직접 누르는 `hard_negative_top_teacher_suppression`을 추가한다.
+
+### Changes
+
+#### 1. `hard_negative_top_teacher_suppression` 추가
+
+새 loss는 `class_top_branch_margin_features` 단계에서 true class top teacher와 hardest negative top teacher를 비교한다.
+
+```text
+true_top = class_top_branch_margin_features[y]
+neg_top = max(class_top_branch_margin_features[j != y])
+required_gap = base_required_gap[label] + weak_band_boost[label] + moderate_band_boost[label]
+loss = relu(neg_top - detach(true_top) + required_gap)
+```
+
+기본 설정은 다음과 같다.
+
+```json
+"hard_negative_top_teacher_suppression": {
+  "enabled": true,
+  "weight": 0.05,
+  "target": "class_top_branch_margin_features",
+  "mode": "detach_true_top_hardest_negative_hinge",
+  "support_source": "top_branch_margin",
+  "base_required_gap_by_label": {
+    "Normal": 0.1,
+    "Lung_Parenchymal": 0.1,
+    "Airway": 0.3
+  },
+  "detach_true_top": true,
+  "class_weighted": true,
+  "reduction": "mean",
+  "warmup_epochs": 10
+}
+```
+
+`detach_true_top=true`이므로 이 loss는 true top을 직접 올리는 대신 hardest negative top을 낮추는 데 집중한다. true top을 올리는 역할은 기존 `top_branch_margin`, `class_top_branch_relative_margin`, `top_teacher_gap_min_constraint`가 계속 맡는다.
+
+#### 2. Weak-positive / moderate-positive support band boost
+
+Airway hard FN은 weak-positive support band뿐 아니라 그보다 약간 큰 support 구간에도 분포하므로 두 band를 둔다.
+
+```json
+"weak_positive_band": {
+  "enabled": true,
+  "min_support": 0.2,
+  "max_support": 1.0,
+  "boost_by_label": {
+    "Normal": 0.1,
+    "Lung_Parenchymal": 0.1,
+    "Airway": 0.5
+  },
+  "support_band_by_label": {
+    "Airway": {
+      "min_support": 0.2,
+      "max_support": 1.2
+    }
+  }
+},
+"moderate_positive_band": {
+  "enabled": true,
+  "min_support": 1.2,
+  "max_support": 2.0,
+  "boost_by_label": {
+    "Normal": 0.0,
+    "Lung_Parenchymal": 0.0,
+    "Airway": 0.2
+  }
+}
+```
+
+### Config Names
+
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER21`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver37`
+
+### Diagnostics Checkpoints
+
+`VER21` 분석에서는 다음을 확인한다.
+
+- `hard_negative_top_teacher_negative_class`가 Airway FN에서 어떤 label로 집중되는가?
+- weak-positive Airway sample에서 `hard_negative_top_teacher_required_gap`이 `base_required_gap + weak_band_boost`를 반영하는가?
+- moderate-positive Airway sample에서 `hard_negative_top_teacher_moderate_band_boost`가 활성화되는가?
+- `hard_negative_top_teacher_penalty`가 후반으로 갈수록 감소하고, 동시에 `class_top_branch_relative_gap`이 음수로 무너지는 비율이 줄어드는가?
+- downstream chain인 `top_support_score_gap -> branch_support_score_gap -> class_evidence_gap -> final_gap`이 teacher-front 개선을 실제로 따라가는가?
+- final combiner는 계속 `final_gap ~= class_evidence_gap`인지 확인한다. 이 조건이 유지되면 병목은 final path가 아니라 teacher/support/evidence path다.

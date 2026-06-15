@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "CNUH_DISEASE_VER20",
+    "name": "CNUH_DISEASE_VER21",
     "task": "Normal_vs_LungParenchymal_vs_Airway",
     "mode": "clip",
     "seed": 1337,
@@ -658,6 +658,51 @@
             }
           }
         },
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
+      "hard_negative_top_teacher_suppression": {
+        "enabled": true,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "detach_true_top_hardest_negative_hinge",
+        "support_source": "top_branch_margin",
+        "base_required_gap": 0.1,
+        "base_required_gap_by_label": {
+          "Normal": 0.1,
+          "Lung_Parenchymal": 0.1,
+          "Airway": 0.3
+        },
+        "weak_positive_band": {
+          "enabled": true,
+          "min_support": 0.2,
+          "max_support": 1.0,
+          "boost": 0.1,
+          "boost_by_label": {
+            "Normal": 0.1,
+            "Lung_Parenchymal": 0.1,
+            "Airway": 0.5
+          },
+          "support_band_by_label": {
+            "Airway": {
+              "min_support": 0.2,
+              "max_support": 1.2
+            }
+          }
+        },
+        "moderate_positive_band": {
+          "enabled": true,
+          "min_support": 1.2,
+          "max_support": 2.0,
+          "boost": 0.0,
+          "boost_by_label": {
+            "Normal": 0.0,
+            "Lung_Parenchymal": 0.0,
+            "Airway": 0.2
+          }
+        },
+        "detach_true_top": true,
         "class_weighted": true,
         "reduction": "mean",
         "warmup_epochs": 10

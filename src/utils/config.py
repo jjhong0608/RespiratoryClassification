@@ -471,6 +471,43 @@ class TopTeacherGapMinConstraintConfig:
 
 
 @dataclass(frozen=True)
+class HardNegativeTopTeacherSuppressionBandConfig:
+    enabled: bool = False
+    min_support: float = 0.2
+    max_support: float = 1.0
+    boost: float = 0.0
+    boost_by_label: Mapping[str, float] = field(default_factory=dict)
+    support_band_by_label: Mapping[str, WeakPositiveSupportBandConfig] = field(
+        default_factory=dict
+    )
+
+
+@dataclass(frozen=True)
+class HardNegativeTopTeacherSuppressionConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_top_branch_margin_features"] = (
+        "class_top_branch_margin_features"
+    )
+    mode: Literal["detach_true_top_hardest_negative_hinge"] = (
+        "detach_true_top_hardest_negative_hinge"
+    )
+    support_source: Literal["top_branch_margin"] = "top_branch_margin"
+    base_required_gap: float = 0.1
+    base_required_gap_by_label: Mapping[str, float] = field(default_factory=dict)
+    weak_positive_band: HardNegativeTopTeacherSuppressionBandConfig = field(
+        default_factory=HardNegativeTopTeacherSuppressionBandConfig
+    )
+    moderate_positive_band: HardNegativeTopTeacherSuppressionBandConfig = field(
+        default_factory=HardNegativeTopTeacherSuppressionBandConfig
+    )
+    detach_true_top: bool = True
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
 class BranchSupportScoreMarginConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -899,6 +936,9 @@ class LossConfig:
     top_teacher_gap_min_constraint: TopTeacherGapMinConstraintConfig = field(
         default_factory=TopTeacherGapMinConstraintConfig
     )
+    hard_negative_top_teacher_suppression: HardNegativeTopTeacherSuppressionConfig = (
+        field(default_factory=HardNegativeTopTeacherSuppressionConfig)
+    )
     branch_support_score_margin: BranchSupportScoreMarginConfig = field(
         default_factory=BranchSupportScoreMarginConfig
     )
@@ -1165,6 +1205,14 @@ class JsonConfigLoader:
     _TOP_TEACHER_GAP_MIN_CONSTRAINT_MODES = {"support_conditioned_min_gap"}
     _TOP_TEACHER_GAP_MIN_CONSTRAINT_SUPPORT_SOURCES = {"top_branch_margin"}
     _TOP_TEACHER_GAP_MIN_CONSTRAINT_REDUCTIONS = {"mean"}
+    _HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_TARGETS = {
+        "class_top_branch_margin_features"
+    }
+    _HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_MODES = {
+        "detach_true_top_hardest_negative_hinge"
+    }
+    _HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_SUPPORT_SOURCES = {"top_branch_margin"}
+    _HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_REDUCTIONS = {"mean"}
     _BRANCH_SUPPORT_SCORE_MARGIN_TARGETS = {"class_evidence_branch_support_scores"}
     _BRANCH_SUPPORT_SCORE_MARGIN_MODES = {"softplus_true_vs_hardest_negative"}
     _BRANCH_SUPPORT_SCORE_MARGIN_REDUCTIONS = {"mean"}
@@ -1751,6 +1799,47 @@ class JsonConfigLoader:
             raise ValueError(
                 f"{field_name}.boost must be greater than or equal to zero"
             )
+
+    @staticmethod
+    def _validate_hard_negative_top_teacher_band(
+        cfg: HardNegativeTopTeacherSuppressionBandConfig,
+        *,
+        field_name: str,
+        label_to_index: Mapping[str, int],
+    ) -> None:
+        if not isinstance(cfg.enabled, bool):
+            raise TypeError(f"{field_name}.enabled must be a boolean")
+        for value, suffix in (
+            (cfg.min_support, "min_support"),
+            (cfg.max_support, "max_support"),
+            (cfg.boost, "boost"),
+        ):
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{field_name}.{suffix} must be numeric")
+        if float(cfg.min_support) < 0.0:
+            raise ValueError(
+                f"{field_name}.min_support must be greater than or equal to zero"
+            )
+        if float(cfg.max_support) <= float(cfg.min_support):
+            raise ValueError(
+                f"{field_name}.max_support must be greater than min_support"
+            )
+        if float(cfg.boost) < 0.0:
+            raise ValueError(
+                f"{field_name}.boost must be greater than or equal to zero"
+            )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            cfg.boost_by_label,
+            field_name=f"{field_name}.boost_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_weak_positive_support_bands(
+            cfg.support_band_by_label,
+            field_name=f"{field_name}.support_band_by_label",
+            label_to_index=label_to_index,
+        )
 
     @staticmethod
     def _validate_top_branch_margin_hardness_weighting(
@@ -4313,6 +4402,126 @@ class JsonConfigLoader:
                     "train.loss.top_teacher_gap_min_constraint.class_weighted "
                     "requires train.loss.class_weighting.enabled=true"
                 )
+        hard_negative_teacher_cfg = cfg.loss.hard_negative_top_teacher_suppression
+        if not isinstance(hard_negative_teacher_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.hard_negative_top_teacher_suppression.enabled must be "
+                "a boolean"
+            )
+        if not isinstance(hard_negative_teacher_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.hard_negative_top_teacher_suppression.class_weighted "
+                "must be a boolean"
+            )
+        if not isinstance(hard_negative_teacher_cfg.detach_true_top, bool):
+            raise TypeError(
+                "train.loss.hard_negative_top_teacher_suppression.detach_true_top "
+                "must be a boolean"
+            )
+        if (
+            hard_negative_teacher_cfg.target
+            not in JsonConfigLoader._HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.hard_negative_top_teacher_suppression.target must be "
+                "'class_top_branch_margin_features'"
+            )
+        if (
+            hard_negative_teacher_cfg.mode
+            not in JsonConfigLoader._HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_MODES
+        ):
+            raise ValueError(
+                "train.loss.hard_negative_top_teacher_suppression.mode must be "
+                "'detach_true_top_hardest_negative_hinge'"
+            )
+        if (
+            hard_negative_teacher_cfg.support_source
+            not in JsonConfigLoader._HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_SUPPORT_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.hard_negative_top_teacher_suppression.support_source "
+                "must be 'top_branch_margin'"
+            )
+        if (
+            hard_negative_teacher_cfg.reduction
+            not in JsonConfigLoader._HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.hard_negative_top_teacher_suppression.reduction "
+                "must be 'mean'"
+            )
+        if (
+            not isinstance(hard_negative_teacher_cfg.base_required_gap, int | float)
+            or isinstance(hard_negative_teacher_cfg.base_required_gap, bool)
+            or float(hard_negative_teacher_cfg.base_required_gap) < 0.0
+        ):
+            raise ValueError(
+                "train.loss.hard_negative_top_teacher_suppression."
+                "base_required_gap must be greater than or equal to zero"
+            )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            hard_negative_teacher_cfg.base_required_gap_by_label,
+            field_name=(
+                "train.loss.hard_negative_top_teacher_suppression."
+                "base_required_gap_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_hard_negative_top_teacher_band(
+            hard_negative_teacher_cfg.weak_positive_band,
+            field_name=(
+                "train.loss.hard_negative_top_teacher_suppression.weak_positive_band"
+            ),
+            label_to_index=label_to_index,
+        )
+        JsonConfigLoader._validate_hard_negative_top_teacher_band(
+            hard_negative_teacher_cfg.moderate_positive_band,
+            field_name=(
+                "train.loss.hard_negative_top_teacher_suppression."
+                "moderate_positive_band"
+            ),
+            label_to_index=label_to_index,
+        )
+        if not isinstance(hard_negative_teacher_cfg.warmup_epochs, int) or isinstance(
+            hard_negative_teacher_cfg.warmup_epochs,
+            bool,
+        ):
+            raise TypeError(
+                "train.loss.hard_negative_top_teacher_suppression.warmup_epochs "
+                "must be an integer"
+            )
+        if int(hard_negative_teacher_cfg.warmup_epochs) < 0:
+            raise ValueError(
+                "train.loss.hard_negative_top_teacher_suppression.warmup_epochs "
+                "must be non-negative"
+            )
+        if hard_negative_teacher_cfg.enabled:
+            if hard_negative_teacher_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.hard_negative_top_teacher_suppression.weight "
+                    "must be greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.hard_negative_top_teacher_suppression is supported "
+                    "only for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.hard_negative_top_teacher_suppression requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if (
+                hard_negative_teacher_cfg.class_weighted
+                and not cfg.loss.class_weighting.enabled
+            ):
+                raise ValueError(
+                    "train.loss.hard_negative_top_teacher_suppression."
+                    "class_weighted requires train.loss.class_weighting.enabled=true"
+                )
         branch_support_cfg = cfg.loss.branch_support_score_margin
         if not isinstance(branch_support_cfg.enabled, bool):
             raise ValueError(
@@ -6672,6 +6881,19 @@ class JsonConfigLoader:
         return config_type(**data)
 
     @staticmethod
+    def _parse_hard_negative_top_teacher_band(
+        raw: Mapping[str, Any],
+    ) -> HardNegativeTopTeacherSuppressionBandConfig:
+        data = dict(raw)
+        data["boost_by_label"] = dict(data.get("boost_by_label", {}))
+        data["support_band_by_label"] = (
+            JsonConfigLoader._parse_weak_positive_support_bands(
+                data.get("support_band_by_label", {})
+            )
+        )
+        return HardNegativeTopTeacherSuppressionBandConfig(**data)
+
+    @staticmethod
     def _parse_margin_hardness_weighting_by_label(
         raw: Mapping[str, Any] | None,
         *,
@@ -6896,6 +7118,25 @@ class JsonConfigLoader:
         )
         loss["top_teacher_gap_min_constraint"] = TopTeacherGapMinConstraintConfig(
             **top_teacher_gap_min_constraint
+        )
+        hard_negative_top_teacher = dict(
+            loss.get("hard_negative_top_teacher_suppression", {})
+        )
+        hard_negative_top_teacher["base_required_gap_by_label"] = dict(
+            hard_negative_top_teacher.get("base_required_gap_by_label", {})
+        )
+        hard_negative_top_teacher["weak_positive_band"] = (
+            JsonConfigLoader._parse_hard_negative_top_teacher_band(
+                dict(hard_negative_top_teacher.get("weak_positive_band", {}))
+            )
+        )
+        hard_negative_top_teacher["moderate_positive_band"] = (
+            JsonConfigLoader._parse_hard_negative_top_teacher_band(
+                dict(hard_negative_top_teacher.get("moderate_positive_band", {}))
+            )
+        )
+        loss["hard_negative_top_teacher_suppression"] = (
+            HardNegativeTopTeacherSuppressionConfig(**hard_negative_top_teacher)
         )
         loss["branch_support_score_margin"] = BranchSupportScoreMarginConfig(
             **dict(loss.get("branch_support_score_margin", {}))

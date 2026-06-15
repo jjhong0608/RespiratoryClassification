@@ -281,6 +281,13 @@ def _format_component_line(
         raw_key="top_teacher_gap_min_constraint",
         loss_key="top_teacher_gap_min_constraint_loss",
     )
+    _append_raw_loss_pair(
+        parts,
+        "hard_neg_teacher",
+        components,
+        raw_key="hard_negative_top_teacher_suppression",
+        loss_key="hard_negative_top_teacher_suppression_loss",
+    )
     top_teacher_support_mult = _component_float(
         components,
         "class_top_branch_relative_margin_support_multiplier",
@@ -297,6 +304,13 @@ def _format_component_line(
             f"{top_teacher_support_mult:.4f}/"
             f"{top_teacher_hardness_mult:.4f}"
         )
+    hard_neg_required_gap = _component_float(
+        components,
+        "hard_negative_top_teacher_required_gap",
+        0.0,
+    )
+    if hard_neg_required_gap:
+        parts.append(f"hard_neg_req={hard_neg_required_gap:.4f}")
     _append_raw_loss_pair(
         parts,
         "top_support",

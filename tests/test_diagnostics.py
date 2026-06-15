@@ -540,6 +540,37 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
     assert row["global_residual_effective_scale"] == pytest.approx(0.05)
 
 
+def test_diagnostics_include_class_top_branch_teacher_metadata() -> None:
+    rows = build_diagnostic_rows(
+        _batch(),
+        _class_aware_output(),
+        probabilities=torch.tensor([[0.2, 0.7, 0.1]]),
+        predicted_labels=torch.tensor([1]),
+        analysis=AnalysisOutputConfig(
+            save_logits=True,
+            save_probabilities=True,
+            save_embeddings=False,
+            save_clip_metadata=True,
+        ),
+    )
+
+    row = rows[0]
+    assert row["class_top_branch_margin_features"] == [
+        0.20000000298023224,
+        0.4000000059604645,
+        0.6000000238418579,
+    ]
+    assert row["class_top_branch_margin_relative_features"] == pytest.approx(
+        [-0.4000000059604645, -0.20000000298023224, 0.20000000298023224]
+    )
+    assert row["class_evidence_top_support_scores"] == [
+        0.0,
+        0.5,
+        -0.10000000149011612,
+    ]
+    assert row["class_evidence_top_support_score_gap"] == pytest.approx(0.5)
+
+
 def test_diagnostics_include_selected_evidence_dropout_metadata() -> None:
     rows = build_diagnostic_rows(
         _batch(),
