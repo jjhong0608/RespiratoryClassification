@@ -133,9 +133,25 @@ class TrainerConfig:
     class_top_branch_relative_margin: ClassTopBranchRelativeMarginConfig = field(
         default_factory=ClassTopBranchRelativeMarginConfig
     )
+    class_top_branch_relative_margin_by_class: tuple[float, ...] | None = None
+    class_top_branch_relative_hardness_gain_by_class: tuple[float, ...] | None = None
+    class_top_branch_relative_hardness_cap_by_class: tuple[float, ...] | None = None
+    class_top_branch_relative_weak_support_min_by_class: tuple[float, ...] | None = None
+    class_top_branch_relative_weak_support_max_by_class: tuple[float, ...] | None = None
+    class_top_branch_relative_margin_boost_by_class: tuple[float, ...] | None = None
+    class_top_branch_relative_margin_boost_min_by_class: tuple[float, ...] | None = None
+    class_top_branch_relative_margin_boost_max_by_class: tuple[float, ...] | None = None
     top_teacher_gap_min_constraint: TopTeacherGapMinConstraintConfig = field(
         default_factory=TopTeacherGapMinConstraintConfig
     )
+    top_teacher_gap_min_base_by_class: tuple[float, ...] | None = None
+    top_teacher_gap_min_support_gain_by_class: tuple[float, ...] | None = None
+    top_teacher_gap_min_support_cap_by_class: tuple[float, ...] | None = None
+    top_teacher_gap_min_weak_support_min_by_class: tuple[float, ...] | None = None
+    top_teacher_gap_min_weak_support_max_by_class: tuple[float, ...] | None = None
+    top_teacher_gap_min_target_boost_by_class: tuple[float, ...] | None = None
+    top_teacher_gap_min_target_boost_min_by_class: tuple[float, ...] | None = None
+    top_teacher_gap_min_target_boost_max_by_class: tuple[float, ...] | None = None
     branch_support_score_margin: BranchSupportScoreMarginConfig = field(
         default_factory=BranchSupportScoreMarginConfig
     )
@@ -169,6 +185,10 @@ class TrainerConfig:
     gate_best_branch_alignment: GateBestBranchAlignmentConfig = field(
         default_factory=GateBestBranchAlignmentConfig
     )
+    gate_best_branch_alignment_label_weight_by_class: tuple[float, ...] | None = None
+    gate_best_branch_alignment_min_best_margin_by_class: tuple[float, ...] | None = None
+    gate_best_branch_alignment_max_best_margin_by_class: tuple[float, ...] | None = None
+    gate_best_branch_alignment_mismatch_drop_by_class: tuple[float, ...] | None = None
     gate_branch_regret: GateBranchRegretConfig = field(
         default_factory=GateBranchRegretConfig
     )
@@ -227,11 +247,16 @@ class LossComponents:
     class_top_branch_relative_margin_weak_positive_multiplier: Tensor | None = None
     class_top_branch_relative_margin_effective_target: Tensor | None = None
     class_top_branch_relative_margin_weak_positive_margin_boost: Tensor | None = None
+    class_top_branch_relative_margin_label_margin: Tensor | None = None
+    class_top_branch_relative_margin_hardness_gain: Tensor | None = None
+    class_top_branch_relative_margin_hardness_cap: Tensor | None = None
     top_teacher_gap_min_constraint: Tensor | None = None
     top_teacher_gap_min_constraint_loss: Tensor | None = None
     top_teacher_gap_min_target: Tensor | None = None
     top_teacher_gap_min_weak_positive_multiplier: Tensor | None = None
     top_teacher_gap_min_weak_positive_target_boost: Tensor | None = None
+    top_teacher_gap_min_base_min_gap: Tensor | None = None
+    top_teacher_gap_min_support_gain: Tensor | None = None
     branch_direct_score_margin: Tensor | None = None
     branch_direct_score_margin_loss: Tensor | None = None
     branch_path_dominance_constraint: Tensor | None = None
@@ -261,6 +286,10 @@ class LossComponents:
     gate_best_branch_alignment_eligible_fraction: Tensor | None = None
     gate_best_branch_alignment_mismatch_fraction: Tensor | None = None
     gate_best_branch_alignment_best_gate_weight: Tensor | None = None
+    gate_best_branch_alignment_label_multiplier: Tensor | None = None
+    gate_best_branch_alignment_min_best_margin: Tensor | None = None
+    gate_best_branch_alignment_max_best_margin: Tensor | None = None
+    gate_best_branch_alignment_mismatch_margin_drop: Tensor | None = None
     gate_branch_regret: Tensor | None = None
     gate_branch_regret_loss: Tensor | None = None
     gate_branch_regret_eligible_fraction: Tensor | None = None
@@ -1878,6 +1907,9 @@ class Trainer(LoggingMixin):
         cfg: Any,
         *,
         loss_name: str,
+        gain_by_class: Sequence[float] | None = None,
+        cap_by_class: Sequence[float] | None = None,
+        label_indices: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         if not cfg.enabled:
             return torch.ones_like(margin_deficit), torch.zeros_like(margin_deficit)
@@ -1891,23 +1923,52 @@ class Trainer(LoggingMixin):
                 f"{loss_name} hardness weighting supports only mode='linear'"
             )
         hardness = torch.relu(margin_deficit.detach())
-        weights = 1.0 + float(cfg.gain) * torch.clamp(
-            hardness,
-            max=float(cfg.cap),
-        )
+        if label_indices is None:
+            gain = torch.full_like(hardness, float(cfg.gain))
+            cap = torch.full_like(hardness, float(cfg.cap))
+        else:
+            gain = self._class_values_tensor(
+                gain_by_class,
+                label_indices,
+                device=hardness.device,
+                dtype=hardness.dtype,
+                fallback=float(cfg.gain),
+            )
+            cap = self._class_values_tensor(
+                cap_by_class,
+                label_indices,
+                device=hardness.device,
+                dtype=hardness.dtype,
+                fallback=float(cfg.cap),
+            )
+        weights = 1.0 + gain * torch.minimum(hardness, cap)
         return weights, hardness
 
     def _weak_positive_support_weights(
         self,
         support_gap: Tensor,
         cfg: WeakPositiveSupportWeightingConfig,
+        *,
+        label_indices: Tensor | None = None,
+        min_support_by_class: Sequence[float] | None = None,
+        max_support_by_class: Sequence[float] | None = None,
     ) -> tuple[Tensor, Tensor]:
         if not cfg.enabled:
             return torch.ones_like(support_gap), torch.zeros_like(support_gap)
         support = support_gap.detach()
-        eligible = (support >= float(cfg.min_support)) & (
-            support <= float(cfg.max_support)
+        min_support = self._weak_positive_band_values(
+            support,
+            cfg.min_support,
+            label_indices=label_indices,
+            values_by_class=min_support_by_class,
         )
+        max_support = self._weak_positive_band_values(
+            support,
+            cfg.max_support,
+            label_indices=label_indices,
+            values_by_class=max_support_by_class,
+        )
+        eligible = (support >= min_support) & (support <= max_support)
         weights = torch.where(
             eligible,
             torch.full_like(support, float(cfg.multiplier)),
@@ -1915,20 +1976,59 @@ class Trainer(LoggingMixin):
         )
         return weights, eligible.to(dtype=support_gap.dtype)
 
+    def _weak_positive_band_values(
+        self,
+        reference: Tensor,
+        fallback: float,
+        *,
+        label_indices: Tensor | None,
+        values_by_class: Sequence[float] | None,
+    ) -> Tensor:
+        if label_indices is None:
+            return torch.full_like(reference, float(fallback))
+        return self._class_values_tensor(
+            values_by_class,
+            label_indices,
+            device=reference.device,
+            dtype=reference.dtype,
+            fallback=float(fallback),
+        )
+
     def _weak_positive_boost_values(
         self,
         support_gap: Tensor,
         cfg: WeakPositiveMarginBoostConfig | WeakPositiveTargetBoostConfig,
+        *,
+        label_indices: Tensor | None = None,
+        boost_by_class: Sequence[float] | None = None,
+        min_support_by_class: Sequence[float] | None = None,
+        max_support_by_class: Sequence[float] | None = None,
     ) -> tuple[Tensor, Tensor]:
         if not cfg.enabled:
             return torch.zeros_like(support_gap), torch.zeros_like(support_gap)
         support = support_gap.detach()
-        eligible = (support >= float(cfg.min_support)) & (
-            support <= float(cfg.max_support)
+        min_support = self._weak_positive_band_values(
+            support,
+            cfg.min_support,
+            label_indices=label_indices,
+            values_by_class=min_support_by_class,
         )
+        max_support = self._weak_positive_band_values(
+            support,
+            cfg.max_support,
+            label_indices=label_indices,
+            values_by_class=max_support_by_class,
+        )
+        boost_value = self._weak_positive_band_values(
+            support,
+            cfg.boost,
+            label_indices=label_indices,
+            values_by_class=boost_by_class,
+        )
+        eligible = (support >= min_support) & (support <= max_support)
         boost = torch.where(
             eligible,
-            torch.full_like(support, float(cfg.boost)),
+            boost_value,
             torch.zeros_like(support),
         )
         return boost, eligible.to(dtype=support_gap.dtype)
@@ -1939,7 +2039,18 @@ class Trainer(LoggingMixin):
         labels: Tensor,
         *,
         epoch: int,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ]:
         cfg = self.cfg.class_top_branch_relative_margin
         if cfg.target != "class_top_branch_margin_features":
             raise ValueError(
@@ -1965,10 +2076,32 @@ class Trainer(LoggingMixin):
         )
         if label_indices.numel() == 0:
             raw_loss = teacher_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
+            return (
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+            )
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = teacher_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
+            return (
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+            )
         teacher_gap, _ = self._true_vs_hardest_negative_gap(
             teacher_logits,
             label_indices,
@@ -1982,8 +2115,23 @@ class Trainer(LoggingMixin):
         margin_boost, _ = self._weak_positive_boost_values(
             support_gap,
             cfg.weak_positive_margin_boost,
+            label_indices=label_indices,
+            boost_by_class=self.cfg.class_top_branch_relative_margin_boost_by_class,
+            min_support_by_class=(
+                self.cfg.class_top_branch_relative_margin_boost_min_by_class
+            ),
+            max_support_by_class=(
+                self.cfg.class_top_branch_relative_margin_boost_max_by_class
+            ),
         )
-        effective_margin = float(cfg.margin) + margin_boost
+        label_margin = self._class_values_tensor(
+            self.cfg.class_top_branch_relative_margin_by_class,
+            label_indices,
+            device=teacher_logits.device,
+            dtype=teacher_logits.dtype,
+            fallback=float(cfg.margin),
+        )
+        effective_margin = label_margin + margin_boost
         margin_deficit = torch.relu(effective_margin - teacher_gap)
         support_weight, _ = self._margin_support_weights(
             output,
@@ -1997,10 +2145,20 @@ class Trainer(LoggingMixin):
             margin_deficit,
             cfg.hardness_weighting,
             loss_name="class_top_branch_relative_margin",
+            gain_by_class=self.cfg.class_top_branch_relative_hardness_gain_by_class,
+            cap_by_class=self.cfg.class_top_branch_relative_hardness_cap_by_class,
+            label_indices=label_indices,
         )
         weak_positive_weight, _ = self._weak_positive_support_weights(
             support_gap,
             cfg.weak_positive_support_weighting,
+            label_indices=label_indices,
+            min_support_by_class=(
+                self.cfg.class_top_branch_relative_weak_support_min_by_class
+            ),
+            max_support_by_class=(
+                self.cfg.class_top_branch_relative_weak_support_max_by_class
+            ),
         )
         penalties = (
             margin_deficit * support_weight * hardness_weight * weak_positive_weight
@@ -2026,6 +2184,25 @@ class Trainer(LoggingMixin):
             weak_positive_weight.detach().mean(),
             effective_margin.detach().mean(),
             margin_boost.detach().mean(),
+            label_margin.detach().mean(),
+            self._class_values_tensor(
+                self.cfg.class_top_branch_relative_hardness_gain_by_class,
+                label_indices,
+                device=teacher_logits.device,
+                dtype=teacher_logits.dtype,
+                fallback=float(cfg.hardness_weighting.gain),
+            )
+            .detach()
+            .mean(),
+            self._class_values_tensor(
+                self.cfg.class_top_branch_relative_hardness_cap_by_class,
+                label_indices,
+                device=teacher_logits.device,
+                dtype=teacher_logits.dtype,
+                fallback=float(cfg.hardness_weighting.cap),
+            )
+            .detach()
+            .mean(),
         )
 
     def _compute_top_teacher_gap_min_constraint_loss(
@@ -2034,7 +2211,7 @@ class Trainer(LoggingMixin):
         labels: Tensor,
         *,
         epoch: int,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         cfg = self.cfg.top_teacher_gap_min_constraint
         if cfg.target != "class_top_branch_margin_features":
             raise ValueError(
@@ -2065,10 +2242,10 @@ class Trainer(LoggingMixin):
         )
         if label_indices.numel() == 0:
             raw_loss = teacher_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
+            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = teacher_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
+            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
         teacher_gap, _ = self._true_vs_hardest_negative_gap(
             teacher_logits,
             label_indices,
@@ -2079,19 +2256,48 @@ class Trainer(LoggingMixin):
             label_indices,
             loss_name="top_teacher_gap_min_constraint",
         ).detach()
-        support = torch.clamp(
-            torch.relu(support_gap),
-            max=float(cfg.support_cap),
+        support_cap = self._class_values_tensor(
+            self.cfg.top_teacher_gap_min_support_cap_by_class,
+            label_indices,
+            device=teacher_logits.device,
+            dtype=teacher_logits.dtype,
+            fallback=float(cfg.support_cap),
         )
-        target_min_gap = float(cfg.base_min_gap) + float(cfg.support_gain) * support
+        support = torch.minimum(torch.relu(support_gap), support_cap)
+        base_min_gap = self._class_values_tensor(
+            self.cfg.top_teacher_gap_min_base_by_class,
+            label_indices,
+            device=teacher_logits.device,
+            dtype=teacher_logits.dtype,
+            fallback=float(cfg.base_min_gap),
+        )
+        support_gain = self._class_values_tensor(
+            self.cfg.top_teacher_gap_min_support_gain_by_class,
+            label_indices,
+            device=teacher_logits.device,
+            dtype=teacher_logits.dtype,
+            fallback=float(cfg.support_gain),
+        )
+        target_min_gap = base_min_gap + support_gain * support
         target_boost, _ = self._weak_positive_boost_values(
             support_gap,
             cfg.weak_positive_target_boost,
+            label_indices=label_indices,
+            boost_by_class=self.cfg.top_teacher_gap_min_target_boost_by_class,
+            min_support_by_class=(
+                self.cfg.top_teacher_gap_min_target_boost_min_by_class
+            ),
+            max_support_by_class=(
+                self.cfg.top_teacher_gap_min_target_boost_max_by_class
+            ),
         )
         target_min_gap = target_min_gap + target_boost
         weak_positive_weight, _ = self._weak_positive_support_weights(
             support_gap,
             cfg.weak_positive_support_weighting,
+            label_indices=label_indices,
+            min_support_by_class=self.cfg.top_teacher_gap_min_weak_support_min_by_class,
+            max_support_by_class=self.cfg.top_teacher_gap_min_weak_support_max_by_class,
         )
         penalties = torch.relu(target_min_gap - teacher_gap) * weak_positive_weight
         class_weights = self._class_margin_weights(
@@ -2113,6 +2319,8 @@ class Trainer(LoggingMixin):
             target_min_gap.detach().mean(),
             weak_positive_weight.detach().mean(),
             target_boost.detach().mean(),
+            base_min_gap.detach().mean(),
+            support_gain.detach().mean(),
         )
 
     def _compute_branch_direct_score_margin_loss(
@@ -3200,7 +3408,17 @@ class Trainer(LoggingMixin):
         labels: Tensor,
         *,
         epoch: int,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ]:
         cfg = self.cfg.gate_best_branch_alignment
         if cfg.target != "true_class_gate":
             raise ValueError(
@@ -3226,7 +3444,17 @@ class Trainer(LoggingMixin):
             )
         if int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = output.logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
+            return (
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+            )
         branch_logits, gate_weights, label_indices = (
             self._class_aware_branch_margin_inputs(
                 output,
@@ -3236,7 +3464,17 @@ class Trainer(LoggingMixin):
         )
         if label_indices.numel() == 0:
             raw_loss = branch_logits.sum() * 0.0
-            return raw_loss, raw_loss, raw_loss, raw_loss, raw_loss
+            return (
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+            )
 
         branch_margin = self._true_class_branch_margins(branch_logits, label_indices)
         branch_margin_for_selection = (
@@ -3256,11 +3494,39 @@ class Trainer(LoggingMixin):
         best_gate_weight = true_class_gate.gather(1, best_branch.view(-1, 1)).squeeze(1)
         mismatch = selected_branch != best_branch
         margin_drop = best_margin - selected_margin
+        min_best_margin = self._class_values_tensor(
+            self.cfg.gate_best_branch_alignment_min_best_margin_by_class,
+            label_indices,
+            device=branch_logits.device,
+            dtype=branch_logits.dtype,
+            fallback=float(cfg.min_best_margin),
+        )
+        max_best_margin = self._class_values_tensor(
+            self.cfg.gate_best_branch_alignment_max_best_margin_by_class,
+            label_indices,
+            device=branch_logits.device,
+            dtype=branch_logits.dtype,
+            fallback=float(cfg.max_best_margin),
+        )
+        mismatch_margin_drop = self._class_values_tensor(
+            self.cfg.gate_best_branch_alignment_mismatch_drop_by_class,
+            label_indices,
+            device=branch_logits.device,
+            dtype=branch_logits.dtype,
+            fallback=float(cfg.mismatch_margin_drop),
+        )
+        label_multiplier = self._class_values_tensor(
+            self.cfg.gate_best_branch_alignment_label_weight_by_class,
+            label_indices,
+            device=branch_logits.device,
+            dtype=branch_logits.dtype,
+            fallback=1.0,
+        )
         eligible = (
-            (best_margin >= float(cfg.min_best_margin))
-            & (best_margin <= float(cfg.max_best_margin))
+            (best_margin >= min_best_margin)
+            & (best_margin <= max_best_margin)
             & mismatch
-            & (margin_drop > float(cfg.mismatch_margin_drop))
+            & (margin_drop > mismatch_margin_drop)
         )
         penalties = -torch.log(best_gate_weight.clamp_min(1.0e-8))
         if not torch.any(eligible):
@@ -3272,10 +3538,11 @@ class Trainer(LoggingMixin):
                 enabled=cfg.class_weighted,
                 loss_name="gate_best_branch_alignment",
             )
+            sample_weights = class_weights * label_multiplier
             raw_loss = self._reduce_class_margin_penalties(
                 penalties[eligible],
                 label_indices[eligible],
-                class_weights[eligible],
+                sample_weights[eligible],
                 reduction=cfg.reduction,
             )
         weighted_loss = float(cfg.weight) * raw_loss
@@ -3290,6 +3557,10 @@ class Trainer(LoggingMixin):
             eligible.to(dtype=branch_logits.dtype).detach().mean(),
             mismatch.to(dtype=branch_logits.dtype).detach().mean(),
             best_gate_mean,
+            label_multiplier.detach().mean(),
+            min_best_margin.detach().mean(),
+            max_best_margin.detach().mean(),
+            mismatch_margin_drop.detach().mean(),
         )
 
     def _compute_top_branch_margin_loss(
@@ -3734,6 +4005,9 @@ class Trainer(LoggingMixin):
         class_top_branch_relative_margin_weak_positive_margin_boost: Tensor | None = (
             None
         )
+        class_top_branch_relative_margin_label_margin: Tensor | None = None
+        class_top_branch_relative_margin_hardness_gain: Tensor | None = None
+        class_top_branch_relative_margin_hardness_cap: Tensor | None = None
         if self.cfg.class_top_branch_relative_margin.enabled:
             (
                 class_top_branch_relative_margin,
@@ -3743,6 +4017,9 @@ class Trainer(LoggingMixin):
                 class_top_branch_relative_margin_weak_positive_multiplier,
                 class_top_branch_relative_margin_effective_target,
                 class_top_branch_relative_margin_weak_positive_margin_boost,
+                class_top_branch_relative_margin_label_margin,
+                class_top_branch_relative_margin_hardness_gain,
+                class_top_branch_relative_margin_hardness_cap,
             ) = self._compute_class_top_branch_relative_margin_loss(
                 output,
                 labels,
@@ -3755,6 +4032,8 @@ class Trainer(LoggingMixin):
         top_teacher_gap_min_target: Tensor | None = None
         top_teacher_gap_min_weak_positive_multiplier: Tensor | None = None
         top_teacher_gap_min_weak_positive_target_boost: Tensor | None = None
+        top_teacher_gap_min_base_min_gap: Tensor | None = None
+        top_teacher_gap_min_support_gain: Tensor | None = None
         if self.cfg.top_teacher_gap_min_constraint.enabled:
             (
                 top_teacher_gap_min_constraint,
@@ -3762,6 +4041,8 @@ class Trainer(LoggingMixin):
                 top_teacher_gap_min_target,
                 top_teacher_gap_min_weak_positive_multiplier,
                 top_teacher_gap_min_weak_positive_target_boost,
+                top_teacher_gap_min_base_min_gap,
+                top_teacher_gap_min_support_gain,
             ) = self._compute_top_teacher_gap_min_constraint_loss(
                 output,
                 labels,
@@ -3938,6 +4219,10 @@ class Trainer(LoggingMixin):
         gate_best_branch_alignment_eligible_fraction: Tensor | None = None
         gate_best_branch_alignment_mismatch_fraction: Tensor | None = None
         gate_best_branch_alignment_best_gate_weight: Tensor | None = None
+        gate_best_branch_alignment_label_multiplier: Tensor | None = None
+        gate_best_branch_alignment_min_best_margin: Tensor | None = None
+        gate_best_branch_alignment_max_best_margin: Tensor | None = None
+        gate_best_branch_alignment_mismatch_margin_drop: Tensor | None = None
         if self.cfg.gate_best_branch_alignment.enabled:
             (
                 gate_best_branch_alignment,
@@ -3945,6 +4230,10 @@ class Trainer(LoggingMixin):
                 gate_best_branch_alignment_eligible_fraction,
                 gate_best_branch_alignment_mismatch_fraction,
                 gate_best_branch_alignment_best_gate_weight,
+                gate_best_branch_alignment_label_multiplier,
+                gate_best_branch_alignment_min_best_margin,
+                gate_best_branch_alignment_max_best_margin,
+                gate_best_branch_alignment_mismatch_margin_drop,
             ) = self._compute_gate_best_branch_alignment_loss(
                 output,
                 labels,
@@ -4075,6 +4364,15 @@ class Trainer(LoggingMixin):
             class_top_branch_relative_margin_weak_positive_margin_boost=(
                 class_top_branch_relative_margin_weak_positive_margin_boost
             ),
+            class_top_branch_relative_margin_label_margin=(
+                class_top_branch_relative_margin_label_margin
+            ),
+            class_top_branch_relative_margin_hardness_gain=(
+                class_top_branch_relative_margin_hardness_gain
+            ),
+            class_top_branch_relative_margin_hardness_cap=(
+                class_top_branch_relative_margin_hardness_cap
+            ),
             top_teacher_gap_min_constraint=top_teacher_gap_min_constraint,
             top_teacher_gap_min_constraint_loss=top_teacher_gap_min_constraint_loss,
             top_teacher_gap_min_target=top_teacher_gap_min_target,
@@ -4084,6 +4382,8 @@ class Trainer(LoggingMixin):
             top_teacher_gap_min_weak_positive_target_boost=(
                 top_teacher_gap_min_weak_positive_target_boost
             ),
+            top_teacher_gap_min_base_min_gap=top_teacher_gap_min_base_min_gap,
+            top_teacher_gap_min_support_gain=top_teacher_gap_min_support_gain,
             branch_direct_score_margin=branch_direct_score_margin,
             branch_direct_score_margin_loss=branch_direct_score_margin_loss,
             branch_path_dominance_constraint=branch_path_dominance_constraint,
@@ -4140,6 +4440,18 @@ class Trainer(LoggingMixin):
             ),
             gate_best_branch_alignment_best_gate_weight=(
                 gate_best_branch_alignment_best_gate_weight
+            ),
+            gate_best_branch_alignment_label_multiplier=(
+                gate_best_branch_alignment_label_multiplier
+            ),
+            gate_best_branch_alignment_min_best_margin=(
+                gate_best_branch_alignment_min_best_margin
+            ),
+            gate_best_branch_alignment_max_best_margin=(
+                gate_best_branch_alignment_max_best_margin
+            ),
+            gate_best_branch_alignment_mismatch_margin_drop=(
+                gate_best_branch_alignment_mismatch_margin_drop
             ),
             gate_branch_regret=gate_branch_regret,
             gate_branch_regret_loss=gate_branch_regret_loss,
@@ -4560,8 +4872,25 @@ class Trainer(LoggingMixin):
                 margin_boost, _ = self._weak_positive_boost_values(
                     support_gap,
                     rel_cfg.weak_positive_margin_boost,
+                    label_indices=label_indices,
+                    boost_by_class=(
+                        self.cfg.class_top_branch_relative_margin_boost_by_class
+                    ),
+                    min_support_by_class=(
+                        self.cfg.class_top_branch_relative_margin_boost_min_by_class
+                    ),
+                    max_support_by_class=(
+                        self.cfg.class_top_branch_relative_margin_boost_max_by_class
+                    ),
                 )
-                effective_margin = float(rel_cfg.margin) + margin_boost
+                label_margin = self._class_values_tensor(
+                    self.cfg.class_top_branch_relative_margin_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(rel_cfg.margin),
+                )
+                effective_margin = label_margin + margin_boost
                 margin_deficit = torch.relu(effective_margin - teacher_gap)
                 support_weight, _ = self._margin_support_weights(
                     output,
@@ -4575,12 +4904,40 @@ class Trainer(LoggingMixin):
                     margin_deficit,
                     rel_cfg.hardness_weighting,
                     loss_name="class_top_branch_relative_margin",
+                    gain_by_class=(
+                        self.cfg.class_top_branch_relative_hardness_gain_by_class
+                    ),
+                    cap_by_class=(
+                        self.cfg.class_top_branch_relative_hardness_cap_by_class
+                    ),
+                    label_indices=label_indices,
                 )
                 weak_positive_weight, weak_positive_eligible = (
                     self._weak_positive_support_weights(
                         support_gap,
                         rel_cfg.weak_positive_support_weighting,
+                        label_indices=label_indices,
+                        min_support_by_class=(
+                            self.cfg.class_top_branch_relative_weak_support_min_by_class
+                        ),
+                        max_support_by_class=(
+                            self.cfg.class_top_branch_relative_weak_support_max_by_class
+                        ),
                     )
+                )
+                hardness_gain = self._class_values_tensor(
+                    self.cfg.class_top_branch_relative_hardness_gain_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(rel_cfg.hardness_weighting.gain),
+                )
+                hardness_cap = self._class_values_tensor(
+                    self.cfg.class_top_branch_relative_hardness_cap_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(rel_cfg.hardness_weighting.cap),
                 )
                 penalties = (
                     margin_deficit
@@ -4600,6 +4957,9 @@ class Trainer(LoggingMixin):
                     row["class_top_branch_relative_margin_target"] = float(
                         rel_cfg.margin
                     )
+                    row["class_top_branch_relative_margin_label_margin"] = float(
+                        label_margin[index].detach().cpu().item()
+                    )
                     row["class_top_branch_relative_margin_effective_target"] = float(
                         effective_margin[index].detach().cpu().item()
                     )
@@ -4617,6 +4977,12 @@ class Trainer(LoggingMixin):
                     )
                     row["class_top_branch_relative_margin_hardness_weight"] = float(
                         hardness_weight[index].detach().cpu().item()
+                    )
+                    row["class_top_branch_relative_margin_hardness_gain"] = float(
+                        hardness_gain[index].detach().cpu().item()
+                    )
+                    row["class_top_branch_relative_margin_hardness_cap"] = float(
+                        hardness_cap[index].detach().cpu().item()
                     )
                     row["class_top_branch_relative_margin_weak_positive_weight"] = (
                         float(weak_positive_weight[index].detach().cpu().item())
@@ -4650,22 +5016,53 @@ class Trainer(LoggingMixin):
                     label_indices,
                     loss_name="top_teacher_gap_min_constraint",
                 ).detach()
-                support = torch.clamp(
-                    torch.relu(support_gap),
-                    max=float(teacher_min_cfg.support_cap),
+                support_cap = self._class_values_tensor(
+                    self.cfg.top_teacher_gap_min_support_cap_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(teacher_min_cfg.support_cap),
                 )
-                target_min_gap = float(teacher_min_cfg.base_min_gap) + (
-                    float(teacher_min_cfg.support_gain) * support
+                support = torch.minimum(torch.relu(support_gap), support_cap)
+                base_min_gap = self._class_values_tensor(
+                    self.cfg.top_teacher_gap_min_base_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(teacher_min_cfg.base_min_gap),
                 )
+                support_gain = self._class_values_tensor(
+                    self.cfg.top_teacher_gap_min_support_gain_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(teacher_min_cfg.support_gain),
+                )
+                target_min_gap = base_min_gap + (support_gain * support)
                 target_boost, _ = self._weak_positive_boost_values(
                     support_gap,
                     teacher_min_cfg.weak_positive_target_boost,
+                    label_indices=label_indices,
+                    boost_by_class=self.cfg.top_teacher_gap_min_target_boost_by_class,
+                    min_support_by_class=(
+                        self.cfg.top_teacher_gap_min_target_boost_min_by_class
+                    ),
+                    max_support_by_class=(
+                        self.cfg.top_teacher_gap_min_target_boost_max_by_class
+                    ),
                 )
                 target_min_gap = target_min_gap + target_boost
                 weak_positive_weight, weak_positive_eligible = (
                     self._weak_positive_support_weights(
                         support_gap,
                         teacher_min_cfg.weak_positive_support_weighting,
+                        label_indices=label_indices,
+                        min_support_by_class=(
+                            self.cfg.top_teacher_gap_min_weak_support_min_by_class
+                        ),
+                        max_support_by_class=(
+                            self.cfg.top_teacher_gap_min_weak_support_max_by_class
+                        ),
                     )
                 )
                 active = int(epoch) > int(teacher_min_cfg.warmup_epochs)
@@ -4683,6 +5080,12 @@ class Trainer(LoggingMixin):
                     )
                     row["top_teacher_gap_min_target"] = float(
                         target_min_gap[index].detach().cpu().item()
+                    )
+                    row["top_teacher_gap_min_base_min_gap"] = float(
+                        base_min_gap[index].detach().cpu().item()
+                    )
+                    row["top_teacher_gap_min_support_gain"] = float(
+                        support_gain[index].detach().cpu().item()
                     )
                     row["top_teacher_gap_min_effective_target"] = float(
                         target_min_gap[index].detach().cpu().item()
@@ -5348,15 +5751,43 @@ class Trainer(LoggingMixin):
                 mismatch = selected_branch != best_branch
                 margin_drop = best_margin - selected_margin
                 active = int(epoch) > int(gate_align_cfg.warmup_epochs)
+                min_best_margin = self._class_values_tensor(
+                    self.cfg.gate_best_branch_alignment_min_best_margin_by_class,
+                    label_indices,
+                    device=branch_logits.device,
+                    dtype=branch_logits.dtype,
+                    fallback=float(gate_align_cfg.min_best_margin),
+                )
+                max_best_margin = self._class_values_tensor(
+                    self.cfg.gate_best_branch_alignment_max_best_margin_by_class,
+                    label_indices,
+                    device=branch_logits.device,
+                    dtype=branch_logits.dtype,
+                    fallback=float(gate_align_cfg.max_best_margin),
+                )
+                mismatch_margin_drop = self._class_values_tensor(
+                    self.cfg.gate_best_branch_alignment_mismatch_drop_by_class,
+                    label_indices,
+                    device=branch_logits.device,
+                    dtype=branch_logits.dtype,
+                    fallback=float(gate_align_cfg.mismatch_margin_drop),
+                )
+                label_multiplier = self._class_values_tensor(
+                    self.cfg.gate_best_branch_alignment_label_weight_by_class,
+                    label_indices,
+                    device=branch_logits.device,
+                    dtype=branch_logits.dtype,
+                    fallback=1.0,
+                )
                 eligible = (
-                    (best_margin >= float(gate_align_cfg.min_best_margin))
-                    & (best_margin <= float(gate_align_cfg.max_best_margin))
+                    (best_margin >= min_best_margin)
+                    & (best_margin <= max_best_margin)
                     & mismatch
-                    & (margin_drop > float(gate_align_cfg.mismatch_margin_drop))
+                    & (margin_drop > mismatch_margin_drop)
                 )
                 penalties = torch.where(
                     eligible & active,
-                    -torch.log(best_gate_weight.clamp_min(1.0e-8)),
+                    -torch.log(best_gate_weight.clamp_min(1.0e-8)) * label_multiplier,
                     torch.zeros_like(best_gate_weight),
                 )
                 for index, row in enumerate(rows):
@@ -5374,6 +5805,18 @@ class Trainer(LoggingMixin):
                     )
                     row["gate_best_branch_alignment_margin_drop"] = float(
                         margin_drop[index].detach().cpu().item()
+                    )
+                    row["gate_best_branch_alignment_label_multiplier"] = float(
+                        label_multiplier[index].detach().cpu().item()
+                    )
+                    row["gate_best_branch_alignment_min_best_margin"] = float(
+                        min_best_margin[index].detach().cpu().item()
+                    )
+                    row["gate_best_branch_alignment_max_best_margin"] = float(
+                        max_best_margin[index].detach().cpu().item()
+                    )
+                    row["gate_best_branch_alignment_mismatch_margin_drop"] = float(
+                        mismatch_margin_drop[index].detach().cpu().item()
                     )
                     row["gate_best_branch_alignment_best_gate_weight"] = float(
                         best_gate_weight[index].detach().cpu().item()
@@ -5938,11 +6381,16 @@ class Trainer(LoggingMixin):
             "class_top_branch_relative_margin_weak_positive_multiplier": 0.0,
             "class_top_branch_relative_margin_effective_target": 0.0,
             "class_top_branch_relative_margin_weak_positive_margin_boost": 0.0,
+            "class_top_branch_relative_margin_label_margin": 0.0,
+            "class_top_branch_relative_margin_hardness_gain": 0.0,
+            "class_top_branch_relative_margin_hardness_cap": 0.0,
             "top_teacher_gap_min_constraint": 0.0,
             "top_teacher_gap_min_constraint_loss": 0.0,
             "top_teacher_gap_min_target": 0.0,
             "top_teacher_gap_min_weak_positive_multiplier": 0.0,
             "top_teacher_gap_min_weak_positive_target_boost": 0.0,
+            "top_teacher_gap_min_base_min_gap": 0.0,
+            "top_teacher_gap_min_support_gain": 0.0,
             "branch_direct_score_margin": 0.0,
             "branch_direct_score_margin_loss": 0.0,
             "branch_path_dominance_constraint": 0.0,
@@ -5972,6 +6420,10 @@ class Trainer(LoggingMixin):
             "gate_best_branch_alignment_eligible_fraction": 0.0,
             "gate_best_branch_alignment_mismatch_fraction": 0.0,
             "gate_best_branch_alignment_best_gate_weight": 0.0,
+            "gate_best_branch_alignment_label_multiplier": 0.0,
+            "gate_best_branch_alignment_min_best_margin": 0.0,
+            "gate_best_branch_alignment_max_best_margin": 0.0,
+            "gate_best_branch_alignment_mismatch_margin_drop": 0.0,
             "gate_branch_regret": 0.0,
             "gate_branch_regret_loss": 0.0,
             "gate_branch_regret_eligible_fraction": 0.0,
@@ -6137,6 +6589,15 @@ class Trainer(LoggingMixin):
                 "class_top_branch_relative_margin_weak_positive_margin_boost": (
                     loss_components.class_top_branch_relative_margin_weak_positive_margin_boost
                 ),
+                "class_top_branch_relative_margin_label_margin": (
+                    loss_components.class_top_branch_relative_margin_label_margin
+                ),
+                "class_top_branch_relative_margin_hardness_gain": (
+                    loss_components.class_top_branch_relative_margin_hardness_gain
+                ),
+                "class_top_branch_relative_margin_hardness_cap": (
+                    loss_components.class_top_branch_relative_margin_hardness_cap
+                ),
                 "top_teacher_gap_min_constraint": (
                     loss_components.top_teacher_gap_min_constraint
                 ),
@@ -6151,6 +6612,12 @@ class Trainer(LoggingMixin):
                 ),
                 "top_teacher_gap_min_weak_positive_target_boost": (
                     loss_components.top_teacher_gap_min_weak_positive_target_boost
+                ),
+                "top_teacher_gap_min_base_min_gap": (
+                    loss_components.top_teacher_gap_min_base_min_gap
+                ),
+                "top_teacher_gap_min_support_gain": (
+                    loss_components.top_teacher_gap_min_support_gain
                 ),
                 "branch_direct_score_margin": (
                     loss_components.branch_direct_score_margin
@@ -6238,6 +6705,18 @@ class Trainer(LoggingMixin):
                 ),
                 "gate_best_branch_alignment_best_gate_weight": (
                     loss_components.gate_best_branch_alignment_best_gate_weight
+                ),
+                "gate_best_branch_alignment_label_multiplier": (
+                    loss_components.gate_best_branch_alignment_label_multiplier
+                ),
+                "gate_best_branch_alignment_min_best_margin": (
+                    loss_components.gate_best_branch_alignment_min_best_margin
+                ),
+                "gate_best_branch_alignment_max_best_margin": (
+                    loss_components.gate_best_branch_alignment_max_best_margin
+                ),
+                "gate_best_branch_alignment_mismatch_margin_drop": (
+                    loss_components.gate_best_branch_alignment_mismatch_margin_drop
                 ),
                 "gate_branch_regret": loss_components.gate_branch_regret,
                 "gate_branch_regret_loss": loss_components.gate_branch_regret_loss,
@@ -6643,6 +7122,24 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "train_class_top_branch_relative_margin_label_margin": (
+                        train_components.get(
+                            "class_top_branch_relative_margin_label_margin",
+                            0.0,
+                        )
+                    ),
+                    "train_class_top_branch_relative_margin_hardness_gain": (
+                        train_components.get(
+                            "class_top_branch_relative_margin_hardness_gain",
+                            0.0,
+                        )
+                    ),
+                    "train_class_top_branch_relative_margin_hardness_cap": (
+                        train_components.get(
+                            "class_top_branch_relative_margin_hardness_cap",
+                            0.0,
+                        )
+                    ),
                     "train_top_teacher_gap_min_constraint": train_components.get(
                         "top_teacher_gap_min_constraint",
                         0.0,
@@ -6668,6 +7165,14 @@ class Trainer(LoggingMixin):
                             "top_teacher_gap_min_weak_positive_target_boost",
                             0.0,
                         )
+                    ),
+                    "train_top_teacher_gap_min_base_min_gap": train_components.get(
+                        "top_teacher_gap_min_base_min_gap",
+                        0.0,
+                    ),
+                    "train_top_teacher_gap_min_support_gain": train_components.get(
+                        "top_teacher_gap_min_support_gain",
+                        0.0,
                     ),
                     "train_branch_direct_score_margin": train_components.get(
                         "branch_direct_score_margin",
@@ -6814,6 +7319,30 @@ class Trainer(LoggingMixin):
                     "train_gate_best_branch_alignment_best_gate_weight": (
                         train_components.get(
                             "gate_best_branch_alignment_best_gate_weight",
+                            0.0,
+                        )
+                    ),
+                    "train_gate_best_branch_alignment_label_multiplier": (
+                        train_components.get(
+                            "gate_best_branch_alignment_label_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "train_gate_best_branch_alignment_min_best_margin": (
+                        train_components.get(
+                            "gate_best_branch_alignment_min_best_margin",
+                            0.0,
+                        )
+                    ),
+                    "train_gate_best_branch_alignment_max_best_margin": (
+                        train_components.get(
+                            "gate_best_branch_alignment_max_best_margin",
+                            0.0,
+                        )
+                    ),
+                    "train_gate_best_branch_alignment_mismatch_margin_drop": (
+                        train_components.get(
+                            "gate_best_branch_alignment_mismatch_margin_drop",
                             0.0,
                         )
                     ),
@@ -7065,6 +7594,24 @@ class Trainer(LoggingMixin):
                             0.0,
                         )
                     ),
+                    "val_class_top_branch_relative_margin_label_margin": (
+                        val_components.get(
+                            "class_top_branch_relative_margin_label_margin",
+                            0.0,
+                        )
+                    ),
+                    "val_class_top_branch_relative_margin_hardness_gain": (
+                        val_components.get(
+                            "class_top_branch_relative_margin_hardness_gain",
+                            0.0,
+                        )
+                    ),
+                    "val_class_top_branch_relative_margin_hardness_cap": (
+                        val_components.get(
+                            "class_top_branch_relative_margin_hardness_cap",
+                            0.0,
+                        )
+                    ),
                     "val_top_teacher_gap_min_constraint": val_components.get(
                         "top_teacher_gap_min_constraint",
                         0.0,
@@ -7088,6 +7635,14 @@ class Trainer(LoggingMixin):
                             "top_teacher_gap_min_weak_positive_target_boost",
                             0.0,
                         )
+                    ),
+                    "val_top_teacher_gap_min_base_min_gap": val_components.get(
+                        "top_teacher_gap_min_base_min_gap",
+                        0.0,
+                    ),
+                    "val_top_teacher_gap_min_support_gain": val_components.get(
+                        "top_teacher_gap_min_support_gain",
+                        0.0,
                     ),
                     "val_branch_direct_score_margin": val_components.get(
                         "branch_direct_score_margin",
@@ -7230,6 +7785,30 @@ class Trainer(LoggingMixin):
                     "val_gate_best_branch_alignment_best_gate_weight": (
                         val_components.get(
                             "gate_best_branch_alignment_best_gate_weight",
+                            0.0,
+                        )
+                    ),
+                    "val_gate_best_branch_alignment_label_multiplier": (
+                        val_components.get(
+                            "gate_best_branch_alignment_label_multiplier",
+                            0.0,
+                        )
+                    ),
+                    "val_gate_best_branch_alignment_min_best_margin": (
+                        val_components.get(
+                            "gate_best_branch_alignment_min_best_margin",
+                            0.0,
+                        )
+                    ),
+                    "val_gate_best_branch_alignment_max_best_margin": (
+                        val_components.get(
+                            "gate_best_branch_alignment_max_best_margin",
+                            0.0,
+                        )
+                    ),
+                    "val_gate_best_branch_alignment_mismatch_margin_drop": (
+                        val_components.get(
+                            "gate_best_branch_alignment_mismatch_margin_drop",
                             0.0,
                         )
                     ),

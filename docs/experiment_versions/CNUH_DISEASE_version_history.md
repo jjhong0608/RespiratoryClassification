@@ -1316,3 +1316,160 @@ Branch margin은 detach하고 gate만 업데이트한다.
 ### 주의점
 
 `VER18`은 새 구조 변경이 아니라 loss target과 gate mismatch 조건을 더 직접화하는 실험이다. Checkpoint tensor shape는 크게 바뀌지 않지만 loss semantics가 달라지므로 fresh run으로 비교한다.
+
+## CNUH_DISEASE_VER18 -> CNUH_DISEASE_VER19
+
+### 수정 이유
+
+`VER18` 최종 분석에서는 label-agnostic weak-positive 보정만으로는 Airway hard sample의 teacher-relative gap 붕괴가 충분히 해결되지 않았다. 특히 Airway는 `top_branch_margin_value > 0`인데도 `class_top_branch_relative_gap < 0`인 sample이 남았고, 이 경우 downstream `top_support_score_gap -> branch_support_score_gap -> class_evidence_gap -> final_gap`이 같은 방향으로 무너졌다.
+
+동시에 gate path에서는 `gate_best_branch_alignment`의 동작 여부를 synthetic test와 diagnostics로 더 명확히 검증할 필요가 있었다. 다만 Airway의 primary 병목은 gate alignment가 아니라 teacher-relative min gap이므로, gate alignment는 Normal/Lung 중심의 condition-based 보정으로 두고 Airway weight는 낮춘다.
+
+### 결정 사항
+
+#### 1. `top_teacher_gap_min_constraint` label-aware 확장
+
+Airway는 더 높은 base min gap, 더 큰 support gain, 더 큰 weak-positive target boost를 사용한다.
+
+```json
+"top_teacher_gap_min_constraint": {
+  "weight": 0.1,
+  "base_min_gap_by_label": {
+    "Normal": 0.0,
+    "Lung_Parenchymal": 0.0,
+    "Airway": 0.2
+  },
+  "support_gain_by_label": {
+    "Normal": 0.5,
+    "Lung_Parenchymal": 0.5,
+    "Airway": 1.0
+  },
+  "weak_positive_target_boost": {
+    "boost_by_label": {
+      "Normal": 0.2,
+      "Lung_Parenchymal": 0.2,
+      "Airway": 0.6
+    },
+    "support_band_by_label": {
+      "Airway": {
+        "min_support": 0.2,
+        "max_support": 1.2
+      }
+    }
+  }
+}
+```
+
+Effective target:
+
+```text
+target_min_gap =
+  base_min_gap[label]
+  + support_gain[label] * clamp(relu(top_branch_margin_value), 0, support_cap)
+  + weak_positive_target_boost[label] * I(label-specific weak-positive band)
+```
+
+#### 2. `class_top_branch_relative_margin` label-aware 확장
+
+Airway는 larger margin, larger weak-positive margin boost, stronger hardness weighting을 사용한다.
+
+```json
+"class_top_branch_relative_margin": {
+  "margin_by_label": {
+    "Normal": 0.3,
+    "Lung_Parenchymal": 0.3,
+    "Airway": 0.5
+  },
+  "weak_positive_margin_boost": {
+    "boost_by_label": {
+      "Normal": 0.1,
+      "Lung_Parenchymal": 0.2,
+      "Airway": 0.4
+    },
+    "support_band_by_label": {
+      "Airway": {
+        "min_support": 0.2,
+        "max_support": 1.2
+      }
+    }
+  },
+  "hardness_weighting_by_label": {
+    "Normal": {
+      "gain": 0.5,
+      "cap": 2.0
+    },
+    "Lung_Parenchymal": {
+      "gain": 0.75,
+      "cap": 2.5
+    },
+    "Airway": {
+      "gain": 1.0,
+      "cap": 3.0
+    }
+  }
+}
+```
+
+Effective margin:
+
+```text
+effective_margin =
+  margin[label]
+  + weak_positive_margin_boost[label] * I(label-specific weak-positive band)
+```
+
+#### 3. Airway top-support anchor 복원
+
+`top_support_score_margin.label_weight_by_label.Airway=2.0`과 `top_support_gap_min_constraint.base_min_gap_by_label.Airway=0.2`를 유지한다. Teacher-front 보정이 성공하더라도 top-support scorer가 Airway support를 다시 음수 gap으로 뒤집는지 계속 확인하기 위한 anchor다.
+
+#### 4. `gate_best_branch_alignment` label-aware 보정
+
+`gate_best_branch_alignment`는 class weighting을 끄고 explicit label weight를 사용한다.
+
+```json
+"gate_best_branch_alignment": {
+  "class_weighted": false,
+  "label_weight_by_label": {
+    "Normal": 1.0,
+    "Lung_Parenchymal": 0.75,
+    "Airway": 0.25
+  },
+  "max_best_margin_by_label": {
+    "Airway": 1.2
+  }
+}
+```
+
+이 설정의 목적은 Airway teacher correction과 gate alignment가 서로 과도하게 충돌하지 않도록 하면서, Normal/Lung gate mismatch는 condition-based로 계속 추적하는 것이다.
+
+### Code Impact
+
+- `src/utils/config.py`
+  - weak-positive boost에 `boost_by_label`, `support_band_by_label` 추가
+  - `class_top_branch_relative_margin.margin_by_label`, `hardness_weighting_by_label` 추가
+  - `top_teacher_gap_min_constraint.base_min_gap_by_label`, `support_gain_by_label`, `support_cap_by_label` 추가
+  - `gate_best_branch_alignment.label_weight_by_label`, `min_best_margin_by_label`, `max_best_margin_by_label`, `mismatch_margin_drop_by_label` 추가
+- `src/cli/training.py`, `src/cli/cv.py`
+  - 새 label mapping을 class-index tuple로 resolve
+- `src/training/trainer.py`
+  - teacher-relative target/margin/hardness/band를 label별로 계산
+  - gate alignment threshold/multiplier를 label별로 계산
+  - diagnostics에 effective label-specific values 기록
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER19`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver35`
+
+### Diagnostics Checkpoints
+
+`VER19` 분석에서는 다음을 우선 확인한다.
+
+- Airway sample에서 `top_teacher_gap_min_base_min_gap=0.2`, `top_teacher_gap_min_support_gain=1.0`, `top_teacher_gap_min_weak_positive_target_boost=0.6`이 기대대로 기록되는가?
+- Airway weak-positive support band가 `0.2~1.2`로 적용되어 `top_branch_margin_value=1.1` sample도 eligible이 되는가?
+- `class_top_branch_relative_margin_label_margin`, `class_top_branch_relative_margin_effective_target`, `class_top_branch_relative_margin_hardness_gain`, `class_top_branch_relative_margin_hardness_cap`이 label별 설정을 반영하는가?
+- `gate_best_branch_alignment_label_multiplier`, `gate_best_branch_alignment_max_best_margin`, `gate_best_branch_alignment_eligible`가 loss와 같은 조건으로 기록되는가?
+- final combiner는 계속 `final_gap ~= class_evidence_gap`인지 확인한다. 이 조건이 유지되면 병목은 final combiner가 아니라 teacher/support/evidence path다.
+
+### 주의점
+
+`VER19`부터는 label-specific correction을 허용한다. 따라서 비교 시 단순 macro metric뿐 아니라 label별 teacher/gate diagnostics를 같이 확인해야 한다. 특히 Airway recall 개선이 Normal false positive 증가로만 나타나는지, 또는 `class_top_branch_relative_gap -> top_support_score_gap -> class_evidence_gap` chain이 실제로 개선되는지를 분리해서 봐야 한다.

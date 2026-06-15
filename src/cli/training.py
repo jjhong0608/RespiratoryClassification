@@ -282,6 +282,116 @@ def main() -> None:
         overrides=cfg.train.loss.top_support_gap_min_constraint.base_min_gap_by_label,
         label_to_index=cfg.data.label_to_index,
     )
+    class_top_branch_relative_margin_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.class_top_branch_relative_margin.margin,
+        overrides=cfg.train.loss.class_top_branch_relative_margin.margin_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    class_top_branch_relative_hardness_gain_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.class_top_branch_relative_margin.hardness_weighting.gain,
+        overrides={
+            label: item.gain
+            for label, item in cfg.train.loss.class_top_branch_relative_margin.hardness_weighting_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    class_top_branch_relative_hardness_cap_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.class_top_branch_relative_margin.hardness_weighting.cap,
+        overrides={
+            label: item.cap
+            for label, item in cfg.train.loss.class_top_branch_relative_margin.hardness_weighting_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    class_top_branch_relative_weak_support_min_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.class_top_branch_relative_margin.weak_positive_support_weighting.min_support,
+        overrides={
+            label: item.min_support
+            for label, item in cfg.train.loss.class_top_branch_relative_margin.weak_positive_support_weighting.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    class_top_branch_relative_weak_support_max_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.class_top_branch_relative_margin.weak_positive_support_weighting.max_support,
+        overrides={
+            label: item.max_support
+            for label, item in cfg.train.loss.class_top_branch_relative_margin.weak_positive_support_weighting.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    class_top_branch_relative_margin_boost_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.class_top_branch_relative_margin.weak_positive_margin_boost.boost,
+        overrides=cfg.train.loss.class_top_branch_relative_margin.weak_positive_margin_boost.boost_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    class_top_branch_relative_margin_boost_min_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.class_top_branch_relative_margin.weak_positive_margin_boost.min_support,
+        overrides={
+            label: item.min_support
+            for label, item in cfg.train.loss.class_top_branch_relative_margin.weak_positive_margin_boost.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    class_top_branch_relative_margin_boost_max_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.class_top_branch_relative_margin.weak_positive_margin_boost.max_support,
+        overrides={
+            label: item.max_support
+            for label, item in cfg.train.loss.class_top_branch_relative_margin.weak_positive_margin_boost.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_teacher_gap_min_base_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_teacher_gap_min_constraint.base_min_gap,
+        overrides=cfg.train.loss.top_teacher_gap_min_constraint.base_min_gap_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_teacher_gap_min_support_gain_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_teacher_gap_min_constraint.support_gain,
+        overrides=cfg.train.loss.top_teacher_gap_min_constraint.support_gain_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_teacher_gap_min_support_cap_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_teacher_gap_min_constraint.support_cap,
+        overrides=cfg.train.loss.top_teacher_gap_min_constraint.support_cap_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_teacher_gap_min_weak_support_min_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_support_weighting.min_support,
+        overrides={
+            label: item.min_support
+            for label, item in cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_support_weighting.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_teacher_gap_min_weak_support_max_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_support_weighting.max_support,
+        overrides={
+            label: item.max_support
+            for label, item in cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_support_weighting.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_teacher_gap_min_target_boost_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_target_boost.boost,
+        overrides=cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_target_boost.boost_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_teacher_gap_min_target_boost_min_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_target_boost.min_support,
+        overrides={
+            label: item.min_support
+            for label, item in cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_target_boost.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
+    top_teacher_gap_min_target_boost_max_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_target_boost.max_support,
+        overrides={
+            label: item.max_support
+            for label, item in cfg.train.loss.top_teacher_gap_min_constraint.weak_positive_target_boost.support_band_by_label.items()
+        },
+        label_to_index=cfg.data.label_to_index,
+    )
     class_evidence_gap_cap_negative_cap_by_class = resolve_label_float_overrides(
         default=cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap,
         overrides=(
@@ -327,6 +437,26 @@ def main() -> None:
         overrides=(
             cfg.train.loss.gate_bad_branch_suppression.bad_margin_threshold_by_label
         ),
+        label_to_index=cfg.data.label_to_index,
+    )
+    gate_best_branch_alignment_label_weight_by_class = resolve_label_float_overrides(
+        default=1.0,
+        overrides=cfg.train.loss.gate_best_branch_alignment.label_weight_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    gate_best_branch_alignment_min_best_margin_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.gate_best_branch_alignment.min_best_margin,
+        overrides=cfg.train.loss.gate_best_branch_alignment.min_best_margin_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    gate_best_branch_alignment_max_best_margin_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.gate_best_branch_alignment.max_best_margin,
+        overrides=cfg.train.loss.gate_best_branch_alignment.max_best_margin_by_label,
+        label_to_index=cfg.data.label_to_index,
+    )
+    gate_best_branch_alignment_mismatch_drop_by_class = resolve_label_float_overrides(
+        default=cfg.train.loss.gate_best_branch_alignment.mismatch_margin_drop,
+        overrides=cfg.train.loss.gate_best_branch_alignment.mismatch_margin_drop_by_label,
         label_to_index=cfg.data.label_to_index,
     )
 
@@ -390,8 +520,54 @@ def main() -> None:
             class_top_branch_relative_margin=(
                 cfg.train.loss.class_top_branch_relative_margin
             ),
+            class_top_branch_relative_margin_by_class=(
+                class_top_branch_relative_margin_by_class
+            ),
+            class_top_branch_relative_hardness_gain_by_class=(
+                class_top_branch_relative_hardness_gain_by_class
+            ),
+            class_top_branch_relative_hardness_cap_by_class=(
+                class_top_branch_relative_hardness_cap_by_class
+            ),
+            class_top_branch_relative_weak_support_min_by_class=(
+                class_top_branch_relative_weak_support_min_by_class
+            ),
+            class_top_branch_relative_weak_support_max_by_class=(
+                class_top_branch_relative_weak_support_max_by_class
+            ),
+            class_top_branch_relative_margin_boost_by_class=(
+                class_top_branch_relative_margin_boost_by_class
+            ),
+            class_top_branch_relative_margin_boost_min_by_class=(
+                class_top_branch_relative_margin_boost_min_by_class
+            ),
+            class_top_branch_relative_margin_boost_max_by_class=(
+                class_top_branch_relative_margin_boost_max_by_class
+            ),
             top_teacher_gap_min_constraint=(
                 cfg.train.loss.top_teacher_gap_min_constraint
+            ),
+            top_teacher_gap_min_base_by_class=top_teacher_gap_min_base_by_class,
+            top_teacher_gap_min_support_gain_by_class=(
+                top_teacher_gap_min_support_gain_by_class
+            ),
+            top_teacher_gap_min_support_cap_by_class=(
+                top_teacher_gap_min_support_cap_by_class
+            ),
+            top_teacher_gap_min_weak_support_min_by_class=(
+                top_teacher_gap_min_weak_support_min_by_class
+            ),
+            top_teacher_gap_min_weak_support_max_by_class=(
+                top_teacher_gap_min_weak_support_max_by_class
+            ),
+            top_teacher_gap_min_target_boost_by_class=(
+                top_teacher_gap_min_target_boost_by_class
+            ),
+            top_teacher_gap_min_target_boost_min_by_class=(
+                top_teacher_gap_min_target_boost_min_by_class
+            ),
+            top_teacher_gap_min_target_boost_max_by_class=(
+                top_teacher_gap_min_target_boost_max_by_class
             ),
             branch_direct_score_margin=cfg.train.loss.branch_direct_score_margin,
             branch_support_score_margin=(cfg.train.loss.branch_support_score_margin),
@@ -421,6 +597,19 @@ def main() -> None:
                 cfg.train.loss.residual_contradiction_regularization
             ),
             gate_weighted_branch_margin=cfg.train.loss.gate_weighted_branch_margin,
+            gate_best_branch_alignment=cfg.train.loss.gate_best_branch_alignment,
+            gate_best_branch_alignment_label_weight_by_class=(
+                gate_best_branch_alignment_label_weight_by_class
+            ),
+            gate_best_branch_alignment_min_best_margin_by_class=(
+                gate_best_branch_alignment_min_best_margin_by_class
+            ),
+            gate_best_branch_alignment_max_best_margin_by_class=(
+                gate_best_branch_alignment_max_best_margin_by_class
+            ),
+            gate_best_branch_alignment_mismatch_drop_by_class=(
+                gate_best_branch_alignment_mismatch_drop_by_class
+            ),
             gate_branch_regret=cfg.train.loss.gate_branch_regret,
             gate_branch_regret_positive_threshold_by_class=(
                 gate_branch_regret_positive_threshold_by_class

@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "new_test_CNUH_3classes_ver34",
+    "name": "new_test_CNUH_3classes_ver35",
     "task": "normal_crackle_wheeze_rhonchi_pretrain",
     "mode": "clip",
     "seed": 1337,
@@ -532,6 +532,11 @@
         "target": "class_top_branch_margin_features",
         "mode": "true_vs_hardest_negative_hinge",
         "margin": 0.3,
+        "margin_by_label": {
+          "normal": 0.3,
+          "crackle": 0.3,
+          "wheeze": 0.5
+        },
         "class_weighted": true,
         "reduction": "mean",
         "warmup_epochs": 10,
@@ -549,17 +554,48 @@
           "gain": 0.75,
           "cap": 2.0
         },
+        "hardness_weighting_by_label": {
+          "normal": {
+            "gain": 0.5,
+            "cap": 2.0
+          },
+          "crackle": {
+            "gain": 0.75,
+            "cap": 2.5
+          },
+          "wheeze": {
+            "gain": 1.0,
+            "cap": 3.0
+          }
+        },
         "weak_positive_support_weighting": {
           "enabled": true,
           "min_support": 0.2,
           "max_support": 1.0,
-          "multiplier": 1.25
+          "multiplier": 1.25,
+          "support_band_by_label": {
+            "wheeze": {
+              "min_support": 0.2,
+              "max_support": 1.2
+            }
+          }
         },
         "weak_positive_margin_boost": {
           "enabled": true,
           "min_support": 0.2,
           "max_support": 1.0,
-          "boost": 0.2
+          "boost": 0.2,
+          "boost_by_label": {
+            "normal": 0.1,
+            "crackle": 0.2,
+            "wheeze": 0.4
+          },
+          "support_band_by_label": {
+            "wheeze": {
+              "min_support": 0.2,
+              "max_support": 1.2
+            }
+          }
         }
       },
       "top_teacher_gap_min_constraint": {
@@ -568,20 +604,47 @@
         "target": "class_top_branch_margin_features",
         "mode": "support_conditioned_min_gap",
         "base_min_gap": 0.0,
+        "base_min_gap_by_label": {
+          "normal": 0.0,
+          "crackle": 0.0,
+          "wheeze": 0.2
+        },
         "support_source": "top_branch_margin",
         "support_gain": 0.75,
+        "support_gain_by_label": {
+          "normal": 0.5,
+          "crackle": 0.5,
+          "wheeze": 1.0
+        },
         "support_cap": 2.0,
         "weak_positive_support_weighting": {
           "enabled": true,
           "min_support": 0.2,
           "max_support": 1.0,
-          "multiplier": 1.5
+          "multiplier": 1.5,
+          "support_band_by_label": {
+            "wheeze": {
+              "min_support": 0.2,
+              "max_support": 1.2
+            }
+          }
         },
         "weak_positive_target_boost": {
           "enabled": true,
           "min_support": 0.2,
           "max_support": 1.0,
-          "boost": 0.3
+          "boost": 0.3,
+          "boost_by_label": {
+            "normal": 0.2,
+            "crackle": 0.2,
+            "wheeze": 0.6
+          },
+          "support_band_by_label": {
+            "wheeze": {
+              "min_support": 0.2,
+              "max_support": 1.2
+            }
+          }
         },
         "class_weighted": true,
         "reduction": "mean",
@@ -718,10 +781,18 @@
         "margin_mode": "true_vs_hardest_negative",
         "min_best_margin": 0.2,
         "max_best_margin": 1.0,
+        "max_best_margin_by_label": {
+          "wheeze": 1.2
+        },
         "mismatch_margin_drop": 0.5,
+        "label_weight_by_label": {
+          "normal": 1.0,
+          "crackle": 0.75,
+          "wheeze": 0.25
+        },
         "loss": "negative_log_best_gate",
         "detach_branch_margin": true,
-        "class_weighted": true,
+        "class_weighted": false,
         "reduction": "mean",
         "warmup_epochs": 10
       },

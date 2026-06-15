@@ -373,11 +373,20 @@ class TopSupportGapMinConstraintConfig:
 
 
 @dataclass(frozen=True)
+class WeakPositiveSupportBandConfig:
+    min_support: float = 0.2
+    max_support: float = 1.0
+
+
+@dataclass(frozen=True)
 class WeakPositiveSupportWeightingConfig:
     enabled: bool = False
     min_support: float = 0.2
     max_support: float = 1.0
     multiplier: float = 1.0
+    support_band_by_label: Mapping[str, WeakPositiveSupportBandConfig] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -386,6 +395,10 @@ class WeakPositiveTargetBoostConfig:
     min_support: float = 0.2
     max_support: float = 1.0
     boost: float = 0.0
+    boost_by_label: Mapping[str, float] = field(default_factory=dict)
+    support_band_by_label: Mapping[str, WeakPositiveSupportBandConfig] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -394,6 +407,10 @@ class WeakPositiveMarginBoostConfig:
     min_support: float = 0.2
     max_support: float = 1.0
     boost: float = 0.0
+    boost_by_label: Mapping[str, float] = field(default_factory=dict)
+    support_band_by_label: Mapping[str, WeakPositiveSupportBandConfig] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -405,6 +422,7 @@ class ClassTopBranchRelativeMarginConfig:
     )
     mode: Literal["true_vs_hardest_negative_hinge"] = "true_vs_hardest_negative_hinge"
     margin: float = 0.3
+    margin_by_label: Mapping[str, float] = field(default_factory=dict)
     class_weighted: bool = False
     reduction: Literal["mean"] = "mean"
     warmup_epochs: int = 0
@@ -413,6 +431,9 @@ class ClassTopBranchRelativeMarginConfig:
     )
     hardness_weighting: MarginHardnessWeightingConfig = field(
         default_factory=MarginHardnessWeightingConfig
+    )
+    hardness_weighting_by_label: Mapping[str, MarginHardnessWeightingConfig] = field(
+        default_factory=dict
     )
     weak_positive_support_weighting: WeakPositiveSupportWeightingConfig = field(
         default_factory=WeakPositiveSupportWeightingConfig
@@ -431,9 +452,12 @@ class TopTeacherGapMinConstraintConfig:
     )
     mode: Literal["support_conditioned_min_gap"] = "support_conditioned_min_gap"
     base_min_gap: float = 0.0
+    base_min_gap_by_label: Mapping[str, float] = field(default_factory=dict)
     support_source: Literal["top_branch_margin"] = "top_branch_margin"
     support_gain: float = 0.5
+    support_gain_by_label: Mapping[str, float] = field(default_factory=dict)
     support_cap: float = 2.0
+    support_cap_by_label: Mapping[str, float] = field(default_factory=dict)
     class_weighted: bool = False
     reduction: Literal["mean"] = "mean"
     warmup_epochs: int = 0
@@ -716,8 +740,12 @@ class GateBestBranchAlignmentConfig:
     )
     margin_mode: Literal["true_vs_hardest_negative"] = "true_vs_hardest_negative"
     min_best_margin: float = 0.2
+    min_best_margin_by_label: Mapping[str, float] = field(default_factory=dict)
     max_best_margin: float = 1.0
+    max_best_margin_by_label: Mapping[str, float] = field(default_factory=dict)
     mismatch_margin_drop: float = 0.5
+    mismatch_margin_drop_by_label: Mapping[str, float] = field(default_factory=dict)
+    label_weight_by_label: Mapping[str, float] = field(default_factory=dict)
     loss: Literal["negative_log_best_gate"] = "negative_log_best_gate"
     detach_branch_margin: bool = True
     class_weighted: bool = False
@@ -1656,6 +1684,41 @@ class JsonConfigLoader:
             raise ValueError(
                 f"{field_name}.multiplier must be greater than or equal to 1.0"
             )
+
+    @staticmethod
+    def _validate_weak_positive_support_bands(
+        values: Mapping[str, WeakPositiveSupportBandConfig],
+        *,
+        field_name: str,
+        label_to_index: Mapping[str, int],
+    ) -> None:
+        if not isinstance(values, Mapping):
+            raise TypeError(f"{field_name} must be an object")
+        for label_name, band in values.items():
+            if not isinstance(label_name, str):
+                raise TypeError(f"{field_name} keys must be label names")
+            if label_name not in label_to_index:
+                raise ValueError(f"{field_name} contains unknown label {label_name!r}")
+            if not isinstance(band, WeakPositiveSupportBandConfig):
+                raise TypeError(f"{field_name}.{label_name} must be a support band")
+            for value, suffix in (
+                (band.min_support, "min_support"),
+                (band.max_support, "max_support"),
+            ):
+                if not isinstance(value, int | float) or isinstance(value, bool):
+                    raise TypeError(
+                        f"{field_name}.{label_name}.{suffix} must be numeric"
+                    )
+            if float(band.min_support) < 0.0:
+                raise ValueError(
+                    f"{field_name}.{label_name}.min_support must be greater than "
+                    "or equal to zero"
+                )
+            if float(band.max_support) <= float(band.min_support):
+                raise ValueError(
+                    f"{field_name}.{label_name}.max_support must be greater than "
+                    "min_support"
+                )
 
     @staticmethod
     def _validate_weak_positive_boost(
@@ -3869,6 +3932,13 @@ class JsonConfigLoader:
                 "train.loss.class_top_branch_relative_margin.margin must be "
                 "greater than zero"
             )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            class_top_branch_relative_cfg.margin_by_label,
+            field_name=("train.loss.class_top_branch_relative_margin.margin_by_label"),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=True,
+        )
         if not isinstance(
             class_top_branch_relative_cfg.warmup_epochs,
             int,
@@ -3912,6 +3982,38 @@ class JsonConfigLoader:
                 "train.loss.class_top_branch_relative_margin.hardness_weighting "
                 "supports only source='teacher_gap_deficit' and mode='linear'"
             )
+        if not isinstance(
+            class_top_branch_relative_cfg.hardness_weighting_by_label,
+            Mapping,
+        ):
+            raise TypeError(
+                "train.loss.class_top_branch_relative_margin."
+                "hardness_weighting_by_label must be an object"
+            )
+        for (
+            label_name,
+            hardness_cfg,
+        ) in class_top_branch_relative_cfg.hardness_weighting_by_label.items():
+            if label_name not in label_to_index:
+                raise ValueError(
+                    "train.loss.class_top_branch_relative_margin."
+                    f"hardness_weighting_by_label contains unknown label {label_name!r}"
+                )
+            JsonConfigLoader._validate_margin_hardness_weighting(
+                hardness_cfg,
+                field_name=(
+                    "train.loss.class_top_branch_relative_margin."
+                    f"hardness_weighting_by_label.{label_name}"
+                ),
+            )
+            if hardness_cfg.source != "teacher_gap_deficit" or (
+                hardness_cfg.mode != "linear"
+            ):
+                raise ValueError(
+                    "train.loss.class_top_branch_relative_margin."
+                    f"hardness_weighting_by_label.{label_name} supports only "
+                    "source='teacher_gap_deficit' and mode='linear'"
+                )
         JsonConfigLoader._validate_weak_positive_support_weighting(
             class_top_branch_relative_cfg.weak_positive_support_weighting,
             field_name=(
@@ -3919,11 +4021,37 @@ class JsonConfigLoader:
                 "weak_positive_support_weighting"
             ),
         )
+        JsonConfigLoader._validate_weak_positive_support_bands(
+            class_top_branch_relative_cfg.weak_positive_support_weighting.support_band_by_label,
+            field_name=(
+                "train.loss.class_top_branch_relative_margin."
+                "weak_positive_support_weighting.support_band_by_label"
+            ),
+            label_to_index=label_to_index,
+        )
         JsonConfigLoader._validate_weak_positive_boost(
             class_top_branch_relative_cfg.weak_positive_margin_boost,
             field_name=(
                 "train.loss.class_top_branch_relative_margin.weak_positive_margin_boost"
             ),
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            class_top_branch_relative_cfg.weak_positive_margin_boost.boost_by_label,
+            field_name=(
+                "train.loss.class_top_branch_relative_margin."
+                "weak_positive_margin_boost.boost_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_weak_positive_support_bands(
+            class_top_branch_relative_cfg.weak_positive_margin_boost.support_band_by_label,
+            field_name=(
+                "train.loss.class_top_branch_relative_margin."
+                "weak_positive_margin_boost.support_band_by_label"
+            ),
+            label_to_index=label_to_index,
         )
         if class_top_branch_relative_cfg.enabled:
             if class_top_branch_relative_cfg.weight <= 0:
@@ -4012,6 +4140,33 @@ class JsonConfigLoader:
                     f"train.loss.top_teacher_gap_min_constraint.{field_name} "
                     f"must be {comparator} {min_value}"
                 )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            top_teacher_min_cfg.base_min_gap_by_label,
+            field_name=(
+                "train.loss.top_teacher_gap_min_constraint.base_min_gap_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            top_teacher_min_cfg.support_gain_by_label,
+            field_name=(
+                "train.loss.top_teacher_gap_min_constraint.support_gain_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            top_teacher_min_cfg.support_cap_by_label,
+            field_name=(
+                "train.loss.top_teacher_gap_min_constraint.support_cap_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=True,
+        )
         if not isinstance(top_teacher_min_cfg.warmup_epochs, int) or isinstance(
             top_teacher_min_cfg.warmup_epochs,
             bool,
@@ -4032,11 +4187,37 @@ class JsonConfigLoader:
                 "weak_positive_support_weighting"
             ),
         )
+        JsonConfigLoader._validate_weak_positive_support_bands(
+            top_teacher_min_cfg.weak_positive_support_weighting.support_band_by_label,
+            field_name=(
+                "train.loss.top_teacher_gap_min_constraint."
+                "weak_positive_support_weighting.support_band_by_label"
+            ),
+            label_to_index=label_to_index,
+        )
         JsonConfigLoader._validate_weak_positive_boost(
             top_teacher_min_cfg.weak_positive_target_boost,
             field_name=(
                 "train.loss.top_teacher_gap_min_constraint.weak_positive_target_boost"
             ),
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            top_teacher_min_cfg.weak_positive_target_boost.boost_by_label,
+            field_name=(
+                "train.loss.top_teacher_gap_min_constraint."
+                "weak_positive_target_boost.boost_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_weak_positive_support_bands(
+            top_teacher_min_cfg.weak_positive_target_boost.support_band_by_label,
+            field_name=(
+                "train.loss.top_teacher_gap_min_constraint."
+                "weak_positive_target_boost.support_band_by_label"
+            ),
+            label_to_index=label_to_index,
         )
         if top_teacher_min_cfg.enabled:
             if top_teacher_min_cfg.weight <= 0:
@@ -5211,6 +5392,56 @@ class JsonConfigLoader:
                 "train.loss.gate_best_branch_alignment.max_best_margin must be "
                 "greater than min_best_margin"
             )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            gate_best_cfg.label_weight_by_label,
+            field_name="train.loss.gate_best_branch_alignment.label_weight_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            gate_best_cfg.min_best_margin_by_label,
+            field_name=(
+                "train.loss.gate_best_branch_alignment.min_best_margin_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            gate_best_cfg.max_best_margin_by_label,
+            field_name=(
+                "train.loss.gate_best_branch_alignment.max_best_margin_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=True,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            gate_best_cfg.mismatch_margin_drop_by_label,
+            field_name=(
+                "train.loss.gate_best_branch_alignment.mismatch_margin_drop_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        for label_name in set(gate_best_cfg.min_best_margin_by_label) | set(
+            gate_best_cfg.max_best_margin_by_label
+        ):
+            min_value = gate_best_cfg.min_best_margin_by_label.get(
+                label_name,
+                gate_best_cfg.min_best_margin,
+            )
+            max_value = gate_best_cfg.max_best_margin_by_label.get(
+                label_name,
+                gate_best_cfg.max_best_margin,
+            )
+            if float(max_value) <= float(min_value):
+                raise ValueError(
+                    "train.loss.gate_best_branch_alignment max_best_margin for "
+                    f"{label_name!r} must be greater than min_best_margin"
+                )
         if not isinstance(gate_best_cfg.warmup_epochs, int) or isinstance(
             gate_best_cfg.warmup_epochs,
             bool,
@@ -6304,6 +6535,66 @@ class JsonConfigLoader:
         return cfg
 
     @staticmethod
+    def _parse_weak_positive_support_bands(
+        raw: Mapping[str, Any] | None,
+    ) -> dict[str, WeakPositiveSupportBandConfig]:
+        if raw is None:
+            return {}
+        return {
+            str(label_name): WeakPositiveSupportBandConfig(**dict(value))
+            for label_name, value in dict(raw).items()
+        }
+
+    @staticmethod
+    def _parse_weak_positive_support_weighting(
+        raw: Mapping[str, Any],
+    ) -> WeakPositiveSupportWeightingConfig:
+        data = dict(raw)
+        data["support_band_by_label"] = (
+            JsonConfigLoader._parse_weak_positive_support_bands(
+                data.get("support_band_by_label", {})
+            )
+        )
+        return WeakPositiveSupportWeightingConfig(**data)
+
+    @staticmethod
+    def _parse_weak_positive_boost(
+        raw: Mapping[str, Any],
+        *,
+        config_type: type[Any],
+    ) -> WeakPositiveTargetBoostConfig | WeakPositiveMarginBoostConfig:
+        data = dict(raw)
+        data["boost_by_label"] = dict(data.get("boost_by_label", {}))
+        data["support_band_by_label"] = (
+            JsonConfigLoader._parse_weak_positive_support_bands(
+                data.get("support_band_by_label", {})
+            )
+        )
+        return config_type(**data)
+
+    @staticmethod
+    def _parse_margin_hardness_weighting_by_label(
+        raw: Mapping[str, Any] | None,
+        *,
+        defaults: MarginHardnessWeightingConfig | None = None,
+    ) -> dict[str, MarginHardnessWeightingConfig]:
+        if raw is None:
+            return {}
+        base = defaults or MarginHardnessWeightingConfig()
+        parsed: dict[str, MarginHardnessWeightingConfig] = {}
+        for label_name, value in dict(raw).items():
+            data: dict[str, Any] = {
+                "enabled": base.enabled,
+                "source": base.source,
+                "mode": base.mode,
+                "gain": base.gain,
+                "cap": base.cap,
+            }
+            data.update(dict(value))
+            parsed[str(label_name)] = MarginHardnessWeightingConfig(**data)
+        return parsed
+
+    @staticmethod
     def _parse_train(raw: Mapping[str, Any]) -> TrainConfig:
         kwargs = dict(raw)
         kwargs["optimizer"] = OptimizerConfig(**dict(raw["optimizer"]))
@@ -6415,6 +6706,9 @@ class JsonConfigLoader:
         class_top_branch_relative_margin = dict(
             loss.get("class_top_branch_relative_margin", {})
         )
+        class_top_branch_relative_margin["margin_by_label"] = dict(
+            class_top_branch_relative_margin.get("margin_by_label", {})
+        )
         class_top_branch_relative_margin["support_weighting"] = (
             MarginSupportWeightingConfig(
                 **dict(
@@ -6435,9 +6729,18 @@ class JsonConfigLoader:
                 )
             )
         )
+        class_top_branch_relative_margin["hardness_weighting_by_label"] = (
+            JsonConfigLoader._parse_margin_hardness_weighting_by_label(
+                class_top_branch_relative_margin.get(
+                    "hardness_weighting_by_label",
+                    {},
+                ),
+                defaults=class_top_branch_relative_margin["hardness_weighting"],
+            )
+        )
         class_top_branch_relative_margin["weak_positive_support_weighting"] = (
-            WeakPositiveSupportWeightingConfig(
-                **dict(
+            JsonConfigLoader._parse_weak_positive_support_weighting(
+                dict(
                     class_top_branch_relative_margin.get(
                         "weak_positive_support_weighting",
                         {},
@@ -6446,13 +6749,14 @@ class JsonConfigLoader:
             )
         )
         class_top_branch_relative_margin["weak_positive_margin_boost"] = (
-            WeakPositiveMarginBoostConfig(
-                **dict(
+            JsonConfigLoader._parse_weak_positive_boost(
+                dict(
                     class_top_branch_relative_margin.get(
                         "weak_positive_margin_boost",
                         {},
                     )
-                )
+                ),
+                config_type=WeakPositiveMarginBoostConfig,
             )
         )
         loss["class_top_branch_relative_margin"] = ClassTopBranchRelativeMarginConfig(
@@ -6461,9 +6765,18 @@ class JsonConfigLoader:
         top_teacher_gap_min_constraint = dict(
             loss.get("top_teacher_gap_min_constraint", {})
         )
+        top_teacher_gap_min_constraint["base_min_gap_by_label"] = dict(
+            top_teacher_gap_min_constraint.get("base_min_gap_by_label", {})
+        )
+        top_teacher_gap_min_constraint["support_gain_by_label"] = dict(
+            top_teacher_gap_min_constraint.get("support_gain_by_label", {})
+        )
+        top_teacher_gap_min_constraint["support_cap_by_label"] = dict(
+            top_teacher_gap_min_constraint.get("support_cap_by_label", {})
+        )
         top_teacher_gap_min_constraint["weak_positive_support_weighting"] = (
-            WeakPositiveSupportWeightingConfig(
-                **dict(
+            JsonConfigLoader._parse_weak_positive_support_weighting(
+                dict(
                     top_teacher_gap_min_constraint.get(
                         "weak_positive_support_weighting",
                         {},
@@ -6472,13 +6785,14 @@ class JsonConfigLoader:
             )
         )
         top_teacher_gap_min_constraint["weak_positive_target_boost"] = (
-            WeakPositiveTargetBoostConfig(
-                **dict(
+            JsonConfigLoader._parse_weak_positive_boost(
+                dict(
                     top_teacher_gap_min_constraint.get(
                         "weak_positive_target_boost",
                         {},
                     )
-                )
+                ),
+                config_type=WeakPositiveTargetBoostConfig,
             )
         )
         loss["top_teacher_gap_min_constraint"] = TopTeacherGapMinConstraintConfig(
@@ -6553,8 +6867,21 @@ class JsonConfigLoader:
         loss["gate_weighted_branch_margin"] = GateWeightedBranchMarginConfig(
             **gate_weighted_branch_margin
         )
+        gate_best_branch_alignment = dict(loss.get("gate_best_branch_alignment", {}))
+        gate_best_branch_alignment["label_weight_by_label"] = dict(
+            gate_best_branch_alignment.get("label_weight_by_label", {})
+        )
+        gate_best_branch_alignment["min_best_margin_by_label"] = dict(
+            gate_best_branch_alignment.get("min_best_margin_by_label", {})
+        )
+        gate_best_branch_alignment["max_best_margin_by_label"] = dict(
+            gate_best_branch_alignment.get("max_best_margin_by_label", {})
+        )
+        gate_best_branch_alignment["mismatch_margin_drop_by_label"] = dict(
+            gate_best_branch_alignment.get("mismatch_margin_drop_by_label", {})
+        )
         loss["gate_best_branch_alignment"] = GateBestBranchAlignmentConfig(
-            **dict(loss.get("gate_best_branch_alignment", {}))
+            **gate_best_branch_alignment
         )
         gate_branch_regret = dict(loss.get("gate_branch_regret", {}))
         gate_branch_regret["positive_threshold_by_label"] = dict(
