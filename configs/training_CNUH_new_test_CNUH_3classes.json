@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "name": "new_test_CNUH_3classes_ver37",
+    "name": "new_test_CNUH_3classes_ver39",
     "task": "normal_crackle_wheeze_rhonchi_pretrain",
     "mode": "clip",
     "seed": 1337,
@@ -259,6 +259,17 @@
               "branch_feature_transform": {
                 "mode": "tanh",
                 "temperature": 1.0
+              },
+              "teacher_calibration": {
+                "enabled": true,
+                "type": "class_axis_attention",
+                "input_mode": "branch_margin_summary",
+                "hidden_size": 256,
+                "num_attention_heads": 4,
+                "num_attention_layers": 1,
+                "dropout": 0.05,
+                "use_class_embedding": true,
+                "logit_centering": true
               }
             },
             "global_residual": {
@@ -442,7 +453,7 @@
         }
       },
       "class_evidence_gap_cap_regularization": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.02,
         "target": "class_evidence_logits",
         "mode": "negative_gap_hinge",
@@ -462,7 +473,7 @@
         "warmup_epochs": 10
       },
       "class_evidence_positive_gap_cap_regularization": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.015,
         "target": "class_evidence_logits",
         "mode": "positive_gap_hinge",
@@ -472,7 +483,7 @@
         "warmup_epochs": 10
       },
       "interaction_gap_cap_regularization": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.015,
         "target": "class_evidence_interaction_scores",
         "mode": "absolute_gap_hinge",
@@ -482,7 +493,7 @@
         "warmup_epochs": 10
       },
       "branch_support_score_margin": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.05,
         "target": "class_evidence_branch_support_scores",
         "mode": "softplus_true_vs_hardest_negative",
@@ -521,7 +532,7 @@
         }
       },
       "top_support_gap_min_constraint": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.05,
         "target": "class_evidence_top_support_scores",
         "mode": "support_conditioned_min_gap",
@@ -539,7 +550,7 @@
         "warmup_epochs": 10
       },
       "class_top_branch_relative_margin": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.05,
         "target": "class_top_branch_margin_features",
         "mode": "true_vs_hardest_negative_hinge",
@@ -611,7 +622,7 @@
         }
       },
       "top_teacher_gap_min_constraint": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.12,
         "target": "class_top_branch_margin_features",
         "mode": "support_conditioned_min_gap",
@@ -662,8 +673,48 @@
         "reduction": "mean",
         "warmup_epochs": 10
       },
+      "true_top_floor_constraint": {
+        "enabled": false,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "support_conditioned_true_top_floor",
+        "support_source": "top_branch_margin",
+        "base_floor": 0.0,
+        "base_floor_by_label": {
+          "normal": 0.0,
+          "crackle": 0.0,
+          "wheeze": 0.4
+        },
+        "support_gain": 0.25,
+        "support_gain_by_label": {
+          "normal": 0.25,
+          "crackle": 0.25,
+          "wheeze": 1.0
+        },
+        "support_cap": 2.0,
+        "weak_positive_boost": {
+          "enabled": true,
+          "min_support": 0.2,
+          "max_support": 1.0,
+          "boost": 0.0,
+          "boost_by_label": {
+            "normal": 0.0,
+            "crackle": 0.0,
+            "wheeze": 0.8
+          },
+          "support_band_by_label": {
+            "wheeze": {
+              "min_support": 0.2,
+              "max_support": 1.2
+            }
+          }
+        },
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
+      },
       "hard_negative_top_teacher_suppression": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.05,
         "target": "class_top_branch_margin_features",
         "mode": "detach_true_top_hardest_negative_hinge",
@@ -674,14 +725,19 @@
           "crackle": 0.1,
           "wheeze": 0.3
         },
+        "label_weight_by_label": {
+          "normal": 0.25,
+          "crackle": 0.25,
+          "wheeze": 1.0
+        },
         "weak_positive_band": {
           "enabled": true,
           "min_support": 0.2,
           "max_support": 1.0,
           "boost": 0.1,
           "boost_by_label": {
-            "normal": 0.1,
-            "crackle": 0.1,
+            "normal": 0.0,
+            "crackle": 0.0,
             "wheeze": 0.5
           },
           "support_band_by_label": {
@@ -708,7 +764,7 @@
         "warmup_epochs": 10
       },
       "branch_direct_score_margin": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.05,
         "target": "class_evidence_branch_direct_scores",
         "mode": "softplus_true_vs_hardest_negative",
@@ -747,7 +803,7 @@
         "warmup_epochs": 10
       },
       "branch_support_disagreement_cap_regularization": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.02,
         "branch_source": "class_evidence_branch_support_scores",
         "embedding_source": "class_evidence_embedding_scores",
@@ -772,7 +828,7 @@
         "reduction": "class_balanced_violating_mean"
       },
       "branch_to_evidence_ranking_consistency": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.1,
         "target": "class_evidence_logits",
         "source": "class_top_branch_margin_relative_features",
@@ -818,7 +874,7 @@
         "warmup_epochs": 10
       },
       "gate_weighted_branch_margin": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.1,
         "margin": 0.3,
         "target": "true_class_gate",
@@ -830,7 +886,7 @@
         "branch_selection": "gate_weighted"
       },
       "gate_best_branch_alignment": {
-        "enabled": true,
+        "enabled": false,
         "weight": 0.04,
         "target": "true_class_gate",
         "source": "branch_logits",
@@ -1024,6 +1080,22 @@
           "source": "train"
         },
         "aggregation": "mean"
+      },
+      "calibrated_teacher_margin": {
+        "enabled": true,
+        "weight": 0.1,
+        "target": "class_calibrated_top_teacher_features",
+        "mode": "softplus_margin_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "margin": 0.3,
+        "margin_by_label": {
+          "normal": 0.3,
+          "crackle": 0.3,
+          "wheeze": 0.6
+        },
+        "class_weighted": true,
+        "reduction": "mean",
+        "warmup_epochs": 10
       }
     },
     "sampler": {

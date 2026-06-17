@@ -146,6 +146,24 @@ def build_diagnostic_rows(
         if output.class_top_branch_margin_relative_features is not None
         else None
     )
+    class_calibrated_top_teacher_features = (
+        output.class_calibrated_top_teacher_features.detach().cpu()
+        if output.class_calibrated_top_teacher_features is not None
+        else None
+    )
+    class_calibrated_top_teacher_relative_features = (
+        output.class_calibrated_top_teacher_relative_features.detach().cpu()
+        if output.class_calibrated_top_teacher_relative_features is not None
+        else None
+    )
+    class_teacher_calibration_summary_features = (
+        output.class_teacher_calibration_summary_features.detach().cpu()
+        if output.class_teacher_calibration_summary_features is not None
+        else None
+    )
+    class_teacher_calibration_feature_names = (
+        output.class_teacher_calibration_feature_names
+    )
     class_evidence_scorer_branch_raw_features = (
         output.class_evidence_scorer_branch_raw_features.detach().cpu()
         if output.class_evidence_scorer_branch_raw_features is not None
@@ -571,6 +589,30 @@ def build_diagnostic_rows(
             if class_top_branch_margin_relative_features is not None:
                 row["class_top_branch_margin_relative_features"] = (
                     class_top_branch_margin_relative_features[index].tolist()
+                )
+            if class_calibrated_top_teacher_features is not None:
+                row["class_calibrated_top_teacher_features"] = (
+                    class_calibrated_top_teacher_features[index].tolist()
+                )
+                gap_payload = _true_vs_hardest_gap(
+                    class_calibrated_top_teacher_features[index],
+                    int(batch.labels[index].item()),
+                )
+                if gap_payload is not None:
+                    gap, negative_class = gap_payload
+                    row["class_calibrated_top_teacher_gap"] = gap
+                    row["class_calibrated_top_teacher_negative_class"] = negative_class
+            if class_calibrated_top_teacher_relative_features is not None:
+                row["class_calibrated_top_teacher_relative_features"] = (
+                    class_calibrated_top_teacher_relative_features[index].tolist()
+                )
+            if class_teacher_calibration_summary_features is not None:
+                row["class_teacher_calibration_summary_features"] = (
+                    class_teacher_calibration_summary_features[index].tolist()
+                )
+            if class_teacher_calibration_feature_names is not None:
+                row["class_teacher_calibration_feature_names"] = list(
+                    class_teacher_calibration_feature_names
                 )
             if class_evidence_scorer_branch_raw_features is not None:
                 row["class_evidence_scorer_branch_raw_features"] = (

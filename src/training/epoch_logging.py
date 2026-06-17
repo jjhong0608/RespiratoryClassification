@@ -248,6 +248,13 @@ def _format_component_line(
     )
     _append_raw_loss_pair(
         parts,
+        "cal_teacher",
+        components,
+        raw_key="calibrated_teacher_margin",
+        loss_key="calibrated_teacher_margin_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
         "evidence_gap_cap",
         components,
         raw_key="class_evidence_gap_cap_regularization",
@@ -283,6 +290,13 @@ def _format_component_line(
     )
     _append_raw_loss_pair(
         parts,
+        "true_top_floor",
+        components,
+        raw_key="true_top_floor_constraint",
+        loss_key="true_top_floor_constraint_loss",
+    )
+    _append_raw_loss_pair(
+        parts,
         "hard_neg_teacher",
         components,
         raw_key="hard_negative_top_teacher_suppression",
@@ -311,6 +325,20 @@ def _format_component_line(
     )
     if hard_neg_required_gap:
         parts.append(f"hard_neg_req={hard_neg_required_gap:.4f}")
+    true_top_floor_target = _component_float(
+        components,
+        "true_top_floor_target",
+        0.0,
+    )
+    if true_top_floor_target:
+        parts.append(f"true_top_floor_target={true_top_floor_target:.4f}")
+    hard_neg_label_mult = _component_float(
+        components,
+        "hard_negative_top_teacher_label_multiplier",
+        0.0,
+    )
+    if hard_neg_label_mult:
+        parts.append(f"hard_neg_label_mult={hard_neg_label_mult:.4f}")
     _append_raw_loss_pair(
         parts,
         "top_support",

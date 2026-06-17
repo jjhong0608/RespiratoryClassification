@@ -74,6 +74,27 @@ def _class_aware_output() -> AstModelOutput:
         class_gated_branch_logit_feature_mode="hardest_negative_margin",
         class_top_branch_margin_features=torch.tensor([[0.2, 0.4, 0.6]]),
         class_top_branch_margin_relative_features=torch.tensor([[-0.4, -0.2, 0.2]]),
+        class_calibrated_top_teacher_features=torch.tensor([[0.1, 0.7, 0.0]]),
+        class_calibrated_top_teacher_relative_features=torch.tensor(
+            [[-0.6, 0.6, -0.7]]
+        ),
+        class_teacher_calibration_summary_features=torch.tensor(
+            [
+                [
+                    [0.2, 0.1, 0.0, 0.1, 0.4, -0.2],
+                    [0.4, 0.2, 0.3, 0.2, 0.2, 0.2],
+                    [0.6, 0.3, 0.5, 0.3, 0.4, 0.2],
+                ]
+            ]
+        ),
+        class_teacher_calibration_feature_names=(
+            "top_margin",
+            "mean_margin",
+            "gated_margin",
+            "spread",
+            "hard_negative_margin",
+            "raw_relative_gap",
+        ),
         class_evidence_scorer_branch_raw_features=torch.tensor(
             [
                 [
@@ -336,6 +357,27 @@ def test_diagnostics_include_class_aware_gate_metadata() -> None:
             0.20000000298023224,
         ]
     )
+    assert row["class_calibrated_top_teacher_features"] == [
+        0.10000000149011612,
+        0.699999988079071,
+        0.0,
+    ]
+    assert row["class_calibrated_top_teacher_gap"] == pytest.approx(0.6)
+    assert row["class_calibrated_top_teacher_negative_class"] == 0
+    assert row["class_calibrated_top_teacher_relative_features"] == pytest.approx(
+        [-0.6, 0.6, -0.7]
+    )
+    assert row["class_teacher_calibration_summary_features"][1] == pytest.approx(
+        [0.4, 0.2, 0.3, 0.2, 0.2, 0.2]
+    )
+    assert row["class_teacher_calibration_feature_names"] == [
+        "top_margin",
+        "mean_margin",
+        "gated_margin",
+        "spread",
+        "hard_negative_margin",
+        "raw_relative_gap",
+    ]
     assert row["class_evidence_scorer_branch_raw_features"][1] == [
         -0.2199999988079071,
         -0.4399999976158142,

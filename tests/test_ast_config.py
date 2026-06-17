@@ -244,7 +244,7 @@ def test_retained_repo_configs_load() -> None:
     cv_cfg = JsonConfigLoader.load_cv(ROOT / "configs/cv_multiscale_rdt.json")
     eval_cfg = JsonConfigLoader.load_eval(ROOT / "configs/eval_multiscale_rdt.json")
 
-    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver37"
+    assert current_training_cfg.experiment.name == "new_test_CNUH_3classes_ver39"
     assert current_training_cfg.experiment.logging.terminal_width == 310
     assert current_training_cfg.model.encoder.type == "multiscale_rdt_ast"
     assert current_training_cfg.model.encoder.architecture.hidden_size == 512
@@ -257,708 +257,99 @@ def test_retained_repo_configs_load() -> None:
     current_class_gate = (
         current_training_cfg.model.encoder.architecture.evidence_pooling.class_gate
     )
-    assert current_class_gate.evidence_scorer.type == "class_axis_attention"
-    assert current_class_gate.evidence_scorer.embedding_hidden_size == 768
-    assert current_class_gate.evidence_scorer.branch_hidden_size == 128
-    assert current_class_gate.evidence_scorer.fusion_hidden_size == 1024
-    assert current_class_gate.evidence_scorer.num_attention_heads == 4
-    assert current_class_gate.evidence_scorer.num_attention_layers == 2
-    assert current_class_gate.evidence_scorer.use_class_embedding is True
-    assert current_class_gate.evidence_scorer.logit_centering is True
-    assert current_class_gate.evidence_scorer.dropout == pytest.approx(0.05)
-    assert current_class_gate.evidence_scorer.score_decomposition.enabled is True
-    assert (
-        current_class_gate.evidence_scorer.score_decomposition.branch_scale_mode
-        == "bounded_sigmoid"
-    )
-    assert (
-        current_class_gate.evidence_scorer.score_decomposition.branch_scale_min
-        == pytest.approx(0.7)
-    )
-    assert (
-        current_class_gate.evidence_scorer.score_decomposition.branch_scale_init
-        == pytest.approx(1.0)
-    )
-    assert (
-        current_class_gate.evidence_scorer.score_decomposition.branch_scale_max
-        == pytest.approx(2.0)
-    )
-    assert (
-        current_class_gate.evidence_scorer.score_decomposition.interaction_scale_mode
-        == "bounded_sigmoid"
-    )
-    assert (
-        current_class_gate.evidence_scorer.score_decomposition.interaction_scale_min
-        == pytest.approx(0.3)
-    )
-    assert (
-        current_class_gate.evidence_scorer.score_decomposition.interaction_scale_init
-        == pytest.approx(0.7)
-    )
-    schedule = current_class_gate.evidence_scorer.score_decomposition.interaction_scale_schedule
-    assert schedule.enabled is True
-    assert schedule.start_epoch == 11
-    assert schedule.end_epoch == 30
-    assert schedule.start_multiplier == pytest.approx(0.2)
-    assert schedule.end_multiplier == pytest.approx(1.0)
-    assert current_class_gate.evidence_scorer.branch_direct_score.enabled is True
-    assert (
-        current_class_gate.evidence_scorer.branch_direct_score.top_support_mode
-        == "raw_existential_plus_relative_correction"
-    )
-    correction = (
-        current_class_gate.evidence_scorer.branch_direct_score.top_relative_correction
-    )
-    assert correction.enabled is True
-    assert correction.positive_scale == pytest.approx(0.2)
-    assert correction.negative_scale == pytest.approx(0.05)
-    assert correction.negative_clip == pytest.approx(1.0)
-    assert (
-        current_class_gate.evidence_scorer.branch_direct_score.top_scale_init
-        == pytest.approx(1.0)
-    )
-    assert (
-        current_class_gate.evidence_scorer.branch_direct_score.gated_scale_init
-        == pytest.approx(0.5)
-    )
-    reliability = (
-        current_class_gate.evidence_scorer.branch_direct_score.gate_reliability_mixture
-    )
-    assert reliability.enabled is True
-    assert reliability.source == "top_vs_gated_margin_regret"
-    assert reliability.mode == "exp_neg_regret"
-    assert reliability.temperature == pytest.approx(1.0)
-    assert reliability.tolerance == pytest.approx(0.05)
-    assert reliability.detach is True
-    assert (
-        current_class_gate.evidence_scorer.branch_direct_score.residual_scale_init
-        == pytest.approx(0.2)
-    )
-    score_bounding = (
-        current_class_gate.evidence_scorer.score_decomposition.score_bounding
-    )
-    assert score_bounding.enabled is True
-    assert score_bounding.embedding.enabled is True
-    assert score_bounding.embedding.bound == pytest.approx(8.0)
-    assert score_bounding.embedding.temperature == pytest.approx(1.0)
-    assert score_bounding.interaction.enabled is True
-    assert score_bounding.interaction.bound == pytest.approx(6.0)
-    assert score_bounding.interaction.temperature == pytest.approx(1.0)
-    direct_path = (
-        current_class_gate.evidence_scorer.branch_direct_score.top_support_direct_path
-    )
-    assert direct_path.enabled is True
-    assert direct_path.mode == "monotonic_raw_relative"
-    assert direct_path.raw_scale_min == pytest.approx(0.7)
-    assert direct_path.raw_scale_init == pytest.approx(1.0)
-    assert direct_path.raw_scale_max == pytest.approx(2.0)
-    assert direct_path.relative_positive_scale_min == pytest.approx(0.2)
-    assert direct_path.relative_positive_scale_init == pytest.approx(0.5)
-    assert direct_path.relative_positive_scale_max == pytest.approx(1.5)
-    assert direct_path.relative_negative_scale_init == pytest.approx(0.1)
-    assert direct_path.relative_negative_scale_max == pytest.approx(0.5)
-    assert direct_path.residual_hidden_size == 64
-    assert direct_path.residual_scale_init == pytest.approx(0.05)
-    assert direct_path.residual_scale_max == pytest.approx(0.3)
-    current_negative_cap = direct_path.negative_relative_cap
-    assert current_negative_cap.enabled is True
-    assert current_negative_cap.mode == "raw_fraction_cap"
-    assert current_negative_cap.max_negative_fraction == pytest.approx(0.75)
-    assert current_negative_cap.negative_cap == pytest.approx(1.5)
-    assert current_negative_cap.max_negative_fraction_by_label == {"wheeze": 0.5}
-    assert current_negative_cap.negative_cap_by_label == {"wheeze": 1.0}
-    assert current_negative_cap.max_negative_fraction_by_class == pytest.approx(
-        (0.75, 0.75, 0.5)
-    )
-    assert current_negative_cap.negative_cap_by_class == pytest.approx((1.5, 1.5, 1.0))
-    assert current_training_cfg.train.loss.top_support_score_margin.enabled is True
-    assert (
-        current_training_cfg.train.loss.top_support_score_margin.weight
-        == pytest.approx(0.05)
-    )
-    assert (
-        current_training_cfg.train.loss.top_support_score_margin.label_weight_by_label
-        == {
-            "normal": 1.0,
-            "crackle": 1.0,
-            "wheeze": 2.0,
-        }
-    )
-    hardness = (
-        current_training_cfg.train.loss.top_support_score_margin.hardness_weighting
-    )
-    assert hardness.enabled is True
-    assert hardness.source == "top_support_gap"
-    assert hardness.mode == "negative_gap"
-    assert hardness.gain == pytest.approx(1.0)
-    assert hardness.cap == pytest.approx(3.0)
-    support_multiplier = current_training_cfg.train.loss.top_support_score_margin.support_conditioned_multiplier
-    assert support_multiplier.enabled is True
-    assert support_multiplier.source == "top_branch_margin"
-    assert support_multiplier.mode == "linear"
-    assert support_multiplier.gain == pytest.approx(1.0)
-    assert support_multiplier.cap == pytest.approx(2.0)
-    min_gap = current_training_cfg.train.loss.top_support_gap_min_constraint
-    assert min_gap.enabled is True
-    assert min_gap.weight == pytest.approx(0.05)
-    assert min_gap.base_min_gap_by_label == {
-        "normal": 0.0,
-        "crackle": 0.0,
-        "wheeze": 0.2,
-    }
-    assert min_gap.support_gain == pytest.approx(0.5)
-    assert min_gap.support_cap == pytest.approx(2.0)
-    teacher_rel = current_training_cfg.train.loss.class_top_branch_relative_margin
-    assert teacher_rel.enabled is True
-    assert teacher_rel.weight == pytest.approx(0.05)
-    assert teacher_rel.target == "class_top_branch_margin_features"
-    assert teacher_rel.mode == "true_vs_hardest_negative_hinge"
-    assert teacher_rel.margin == pytest.approx(0.3)
-    assert teacher_rel.support_weighting.enabled is True
-    assert teacher_rel.support_weighting.source == "top_branch_margin"
-    assert teacher_rel.support_weighting.mode == "linear"
-    assert teacher_rel.support_weighting.gain == pytest.approx(0.75)
-    assert teacher_rel.support_weighting.cap == pytest.approx(2.0)
-    assert teacher_rel.hardness_weighting.enabled is True
-    assert teacher_rel.hardness_weighting.source == "teacher_gap_deficit"
-    assert teacher_rel.hardness_weighting.mode == "linear"
-    assert teacher_rel.hardness_weighting.gain == pytest.approx(0.75)
-    assert teacher_rel.hardness_weighting.cap == pytest.approx(2.0)
-    assert teacher_rel.margin_by_label == {
+    current_scorer = current_class_gate.evidence_scorer
+    assert current_scorer.type == "class_axis_attention"
+    assert current_scorer.embedding_hidden_size == 768
+    assert current_scorer.branch_hidden_size == 128
+    assert current_scorer.fusion_hidden_size == 1024
+    assert current_scorer.num_attention_heads == 4
+    assert current_scorer.num_attention_layers == 2
+    assert current_scorer.use_class_embedding is True
+    assert current_scorer.logit_centering is True
+    assert current_scorer.dropout == pytest.approx(0.05)
+    assert current_scorer.score_decomposition.enabled is True
+    assert current_scorer.branch_direct_score.enabled is True
+    assert current_scorer.branch_direct_score.top_support_direct_path.enabled is True
+    assert current_scorer.teacher_calibration.enabled is True
+    assert current_scorer.teacher_calibration.type == "class_axis_attention"
+    assert current_scorer.teacher_calibration.input_mode == "branch_margin_summary"
+    assert current_scorer.teacher_calibration.hidden_size == 256
+    assert current_scorer.teacher_calibration.num_attention_heads == 4
+    assert current_scorer.teacher_calibration.num_attention_layers == 1
+    assert current_scorer.teacher_calibration.dropout == pytest.approx(0.05)
+    assert current_scorer.teacher_calibration.use_class_embedding is True
+    assert current_scorer.teacher_calibration.logit_centering is True
+
+    current_calibrated = current_training_cfg.train.loss.calibrated_teacher_margin
+    assert current_calibrated.enabled is True
+    assert current_calibrated.weight == pytest.approx(0.1)
+    assert current_calibrated.target == "class_calibrated_top_teacher_features"
+    assert current_calibrated.mode == "softplus_margin_true_vs_hardest_negative"
+    assert current_calibrated.temperature == pytest.approx(1.0)
+    assert current_calibrated.class_weighted is True
+    assert current_calibrated.reduction == "mean"
+    assert current_calibrated.warmup_epochs == 10
+    assert current_calibrated.margin_by_label == {
         "normal": 0.3,
         "crackle": 0.3,
-        "wheeze": 0.8,
+        "wheeze": 0.6,
     }
-    assert set(teacher_rel.hardness_weighting_by_label) == {
-        "normal",
-        "crackle",
-        "wheeze",
-    }
-    assert teacher_rel.hardness_weighting_by_label["wheeze"].gain == pytest.approx(1.5)
-    assert teacher_rel.hardness_weighting_by_label["wheeze"].cap == pytest.approx(4.0)
-    assert teacher_rel.weak_positive_support_weighting.enabled is True
-    assert teacher_rel.weak_positive_support_weighting.min_support == pytest.approx(0.2)
-    assert teacher_rel.weak_positive_support_weighting.max_support == pytest.approx(1.0)
-    assert teacher_rel.weak_positive_support_weighting.multiplier == pytest.approx(1.25)
-    assert teacher_rel.weak_positive_support_weighting.support_band_by_label[
-        "wheeze"
-    ].max_support == pytest.approx(1.2)
-    assert teacher_rel.weak_positive_margin_boost.boost_by_label == {
-        "normal": 0.1,
-        "crackle": 0.2,
-        "wheeze": 0.8,
-    }
-    assert teacher_rel.weak_positive_margin_boost.support_band_by_label[
-        "wheeze"
-    ].max_support == pytest.approx(1.2)
-    teacher_min = current_training_cfg.train.loss.top_teacher_gap_min_constraint
-    assert teacher_min.enabled is True
-    assert teacher_min.weight == pytest.approx(0.12)
-    assert teacher_min.target == "class_top_branch_margin_features"
-    assert teacher_min.mode == "support_conditioned_min_gap"
-    assert teacher_min.base_min_gap == pytest.approx(0.0)
-    assert teacher_min.support_source == "top_branch_margin"
-    assert teacher_min.support_gain == pytest.approx(0.75)
-    assert teacher_min.support_cap == pytest.approx(2.0)
-    assert teacher_min.base_min_gap_by_label == {
-        "normal": 0.0,
-        "crackle": 0.0,
-        "wheeze": 0.4,
-    }
-    assert teacher_min.support_gain_by_label == {
-        "normal": 0.5,
-        "crackle": 0.5,
-        "wheeze": 1.25,
-    }
-    assert teacher_min.weak_positive_support_weighting.enabled is True
-    assert teacher_min.weak_positive_support_weighting.min_support == pytest.approx(0.2)
-    assert teacher_min.weak_positive_support_weighting.max_support == pytest.approx(1.0)
-    assert teacher_min.weak_positive_support_weighting.multiplier == pytest.approx(1.5)
-    assert teacher_min.weak_positive_support_weighting.support_band_by_label[
-        "wheeze"
-    ].max_support == pytest.approx(1.2)
-    assert teacher_min.weak_positive_target_boost.boost_by_label == {
-        "normal": 0.2,
-        "crackle": 0.2,
-        "wheeze": 1.0,
-    }
-    assert teacher_min.weak_positive_target_boost.support_band_by_label[
-        "wheeze"
-    ].max_support == pytest.approx(1.2)
-    hard_neg_teacher = (
-        current_training_cfg.train.loss.hard_negative_top_teacher_suppression
+
+    retained_loss = current_training_cfg.train.loss
+    assert retained_loss.top_branch_margin.enabled is True
+    assert retained_loss.top_branch_margin.weight == pytest.approx(0.2)
+    assert retained_loss.top_support_score_margin.enabled is True
+    assert retained_loss.top_support_score_margin.weight == pytest.approx(0.05)
+    assert retained_loss.branch_path_dominance_constraint.enabled is True
+    assert retained_loss.branch_path_dominance_constraint.weight == pytest.approx(0.05)
+    assert retained_loss.class_evidence_margin.enabled is True
+    assert retained_loss.class_evidence_margin.weight == pytest.approx(0.05)
+    assert retained_loss.gate_branch_regret.enabled is True
+    assert retained_loss.gate_branch_regret.weight == pytest.approx(0.05)
+    assert retained_loss.gate_bad_branch_suppression.enabled is True
+    assert retained_loss.gate_bad_branch_suppression.weight == pytest.approx(0.025)
+    assert retained_loss.global_residual_anti_veto.enabled is True
+    assert retained_loss.global_residual_anti_veto.weight == pytest.approx(0.1)
+    assert retained_loss.class_weighting.type == "power_inverse_frequency"
+    assert retained_loss.class_weighting.power == pytest.approx(0.75)
+
+    disabled_loss_names = (
+        "class_top_branch_relative_margin",
+        "top_teacher_gap_min_constraint",
+        "true_top_floor_constraint",
+        "hard_negative_top_teacher_suppression",
+        "top_support_gap_min_constraint",
+        "branch_direct_score_margin",
+        "branch_support_score_margin",
+        "branch_support_disagreement_cap_regularization",
+        "branch_to_evidence_ranking_consistency",
+        "class_evidence_gap_cap_regularization",
+        "class_evidence_positive_gap_cap_regularization",
+        "interaction_gap_cap_regularization",
+        "gate_weighted_branch_margin",
+        "gate_best_branch_alignment",
     )
-    assert hard_neg_teacher.enabled is True
-    assert hard_neg_teacher.weight == pytest.approx(0.05)
-    assert hard_neg_teacher.target == "class_top_branch_margin_features"
-    assert hard_neg_teacher.mode == "detach_true_top_hardest_negative_hinge"
-    assert hard_neg_teacher.support_source == "top_branch_margin"
-    assert hard_neg_teacher.base_required_gap == pytest.approx(0.1)
-    assert hard_neg_teacher.base_required_gap_by_label == {
-        "normal": 0.1,
-        "crackle": 0.1,
-        "wheeze": 0.3,
-    }
-    assert hard_neg_teacher.weak_positive_band.enabled is True
-    assert hard_neg_teacher.weak_positive_band.min_support == pytest.approx(0.2)
-    assert hard_neg_teacher.weak_positive_band.max_support == pytest.approx(1.0)
-    assert hard_neg_teacher.weak_positive_band.boost_by_label == {
-        "normal": 0.1,
-        "crackle": 0.1,
-        "wheeze": 0.5,
-    }
-    assert hard_neg_teacher.weak_positive_band.support_band_by_label[
-        "wheeze"
-    ].max_support == pytest.approx(1.2)
-    assert hard_neg_teacher.moderate_positive_band.enabled is True
-    assert hard_neg_teacher.moderate_positive_band.min_support == pytest.approx(1.2)
-    assert hard_neg_teacher.moderate_positive_band.max_support == pytest.approx(2.0)
-    assert hard_neg_teacher.moderate_positive_band.boost_by_label == {
-        "normal": 0.0,
-        "crackle": 0.0,
-        "wheeze": 0.2,
-    }
-    assert hard_neg_teacher.detach_true_top is True
-    assert hard_neg_teacher.class_weighted is True
-    phase_schedule = (
-        current_training_cfg.train.loss.top_branch_margin.phase_weight_schedule
-    )
-    assert phase_schedule.enabled is True
-    assert phase_schedule.start_epoch == 21
-    assert phase_schedule.end_epoch == 31
-    assert phase_schedule.start_multiplier_by_label == {
-        "normal": 1.0,
-        "crackle": 1.0,
-        "wheeze": 1.0,
-    }
-    assert phase_schedule.label_multiplier_by_label == {
-        "normal": 1.0,
-        "crackle": 1.0,
-        "wheeze": 2.0,
-    }
-    top_branch_hardness = (
-        current_training_cfg.train.loss.top_branch_margin.hardness_weighting
-    )
-    assert top_branch_hardness.enabled is True
-    assert top_branch_hardness.source == "margin_deficit"
-    assert top_branch_hardness.mode == "linear"
-    assert top_branch_hardness.gain == pytest.approx(1.0)
-    assert top_branch_hardness.cap == pytest.approx(3.0)
-    assert current_training_cfg.train.loss.branch_direct_score_margin.enabled is True
-    assert (
-        current_training_cfg.train.loss.branch_direct_score_margin.weight
-        == pytest.approx(0.05)
-    )
-    assert current_training_cfg.train.loss.branch_support_score_margin.enabled is True
-    assert (
-        current_training_cfg.train.loss.branch_support_score_margin.weight
-        == pytest.approx(0.05)
-    )
-    dominance = current_training_cfg.train.loss.branch_path_dominance_constraint
-    assert dominance.enabled is True
-    assert dominance.weight == pytest.approx(0.05)
-    assert dominance.allowed_drop == pytest.approx(0.5)
-    assert dominance.label_weight_by_label == {
-        "normal": 0.75,
-        "crackle": 0.75,
-        "wheeze": 1.5,
-    }
-    disagreement_cap = (
-        current_training_cfg.train.loss.branch_support_disagreement_cap_regularization
-    )
-    assert disagreement_cap.enabled is True
-    assert disagreement_cap.weight == pytest.approx(0.02)
-    assert disagreement_cap.embedding_gap_cap == pytest.approx(6.0)
-    assert disagreement_cap.interaction_gap_cap == pytest.approx(4.0)
-    assert dominance.allowed_drop_by_label == {
-        "normal": 0.5,
-        "crackle": 0.75,
-        "wheeze": 0.3,
-    }
-    assert dominance.support_weighting.enabled is True
-    assert dominance.support_weighting.gain == pytest.approx(0.5)
-    assert dominance.support_weighting.cap == pytest.approx(3.0)
-    assert current_class_gate.evidence_scorer.branch_feature_transform.mode == "tanh"
-    assert (
-        current_class_gate.evidence_scorer.branch_feature_transform.temperature
-        == pytest.approx(1.0)
-    )
-    assert (
-        current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.enabled
-        is True
-    )
-    assert (
-        current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.mode
-        == "true_label_anchored_softplus"
-    )
-    assert (
-        current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.source
-        == "class_top_branch_margin_relative_features"
-    )
-    assert (
-        current_training_cfg.train.loss.branch_to_evidence_ranking_consistency.weight
-        == pytest.approx(0.1)
-    )
-    assert current_training_cfg.train.loss.global_residual_anti_veto.enabled is True
-    assert current_training_cfg.train.loss.top_branch_margin.enabled is True
-    assert current_training_cfg.train.loss.gate_bad_branch_suppression.enabled is True
-    assert (
-        current_training_cfg.train.loss.class_weighting.type
-        == "power_inverse_frequency"
-    )
-    assert current_training_cfg.train.loss.class_weighting.power == pytest.approx(0.75)
-    assert (
-        current_training_cfg.train.loss.class_evidence_margin.mode
-        == "softplus_true_vs_hardest_negative"
-    )
-    assert current_training_cfg.train.loss.class_evidence_margin.margin == 0.0
-    assert current_training_cfg.train.loss.class_evidence_margin.reduction == "mean"
-    assert (
-        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.enabled
-        is True
-    )
-    assert (
-        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.weight
-        == pytest.approx(0.02)
-    )
-    assert (
-        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap
-        == pytest.approx(3.0)
-    )
-    assert (
-        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.label_weight_by_label
-        == {
-            "normal": 1.0,
-            "crackle": 1.0,
-            "wheeze": 1.5,
-        }
-    )
-    assert (
-        current_training_cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap_by_label
-        == {
-            "normal": 3.0,
-            "crackle": 3.0,
-            "wheeze": 2.5,
-        }
-    )
-    assert (
-        current_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.enabled
-        is True
-    )
-    assert (
-        current_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.positive_gap_cap
-        == pytest.approx(8.0)
-    )
-    assert (
-        current_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.weight
-        == pytest.approx(0.015)
-    )
-    assert current_training_cfg.train.loss.interaction_gap_cap_regularization.enabled
-    assert (
-        current_training_cfg.train.loss.interaction_gap_cap_regularization.gap_cap
-        == pytest.approx(6.0)
-    )
-    assert (
-        current_training_cfg.train.loss.interaction_gap_cap_regularization.weight
-        == pytest.approx(0.015)
-    )
-    assert current_training_cfg.model.classifier.hidden_dim == 1024
-    assert current_training_cfg.model.classifier.fusion_projector.type == "mlp"
-    assert current_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
-    assert current_training_cfg.model.classifier.fusion_projector.layer_norm is True
-    assert current_class_gate.global_residual.correction.confidence_aware_gate.enabled
-    assert (
-        current_class_gate.global_residual.correction.confidence_aware_gate.damping
-        == pytest.approx(0.7)
-    )
-    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER21"
+    for loss_name in disabled_loss_names:
+        assert getattr(retained_loss, loss_name).enabled is False
+
+    assert disease_training_cfg.experiment.name == "CNUH_DISEASE_VER23"
     assert disease_training_cfg.model.encoder.architecture.hidden_size == 512
     assert disease_training_cfg.model.encoder.architecture.adapter_depth == 8
-    assert disease_training_cfg.model.classifier.hidden_dim == 1024
-    assert disease_training_cfg.model.classifier.fusion_projector.type == "mlp"
-    assert disease_training_cfg.model.classifier.fusion_projector.hidden_dim == 640
-    assert disease_training_cfg.model.classifier.fusion_projector.layer_norm is True
-    assert (
-        disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.mode
-        == "true_label_anchored_softplus"
+    disease_class_gate = (
+        disease_training_cfg.model.encoder.architecture.evidence_pooling.class_gate
     )
-    assert (
-        disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.source
-        == "class_top_branch_margin_relative_features"
-    )
-    assert (
-        disease_training_cfg.train.loss.branch_to_evidence_ranking_consistency.weight
-        == pytest.approx(0.1)
-    )
-    assert (
-        disease_training_cfg.train.loss.class_weighting.type
-        == "power_inverse_frequency"
-    )
-    assert disease_training_cfg.train.loss.class_weighting.power == pytest.approx(0.75)
-    assert (
-        disease_training_cfg.train.loss.class_evidence_margin.mode
-        == "softplus_true_vs_hardest_negative"
-    )
-    assert disease_training_cfg.train.loss.branch_support_score_margin.enabled is True
-    assert disease_training_cfg.train.loss.branch_support_score_margin.weight == (
-        pytest.approx(0.05)
-    )
-    assert disease_training_cfg.train.loss.top_support_score_margin.enabled is True
-    assert disease_training_cfg.train.loss.top_support_score_margin.weight == (
-        pytest.approx(0.05)
-    )
-    disease_min_gap = disease_training_cfg.train.loss.top_support_gap_min_constraint
-    assert disease_min_gap.enabled is True
-    assert disease_min_gap.base_min_gap_by_label == {
-        "Normal": 0.0,
-        "Lung_Parenchymal": 0.0,
-        "Airway": 0.2,
-    }
-    disease_teacher_rel = (
-        disease_training_cfg.train.loss.class_top_branch_relative_margin
-    )
-    assert disease_teacher_rel.enabled is True
-    assert disease_teacher_rel.weight == pytest.approx(0.05)
-    assert disease_teacher_rel.margin == pytest.approx(0.3)
-    assert disease_teacher_rel.support_weighting.enabled is True
-    assert disease_teacher_rel.support_weighting.source == "top_branch_margin"
-    assert disease_teacher_rel.support_weighting.gain == pytest.approx(0.75)
-    assert disease_teacher_rel.support_weighting.cap == pytest.approx(2.0)
-    assert disease_teacher_rel.hardness_weighting.enabled is True
-    assert disease_teacher_rel.hardness_weighting.source == "teacher_gap_deficit"
-    assert disease_teacher_rel.hardness_weighting.mode == "linear"
-    assert disease_teacher_rel.hardness_weighting.gain == pytest.approx(0.75)
-    assert disease_teacher_rel.hardness_weighting.cap == pytest.approx(2.0)
-    assert disease_teacher_rel.margin_by_label == {
+    assert disease_class_gate.evidence_scorer.teacher_calibration.enabled is True
+    disease_calibrated = disease_training_cfg.train.loss.calibrated_teacher_margin
+    assert disease_calibrated.enabled is True
+    assert disease_calibrated.weight == pytest.approx(0.1)
+    assert disease_calibrated.margin_by_label == {
         "Normal": 0.3,
         "Lung_Parenchymal": 0.3,
-        "Airway": 0.8,
+        "Airway": 0.6,
     }
-    assert disease_teacher_rel.hardness_weighting_by_label["Normal"].gain == (
-        pytest.approx(0.5)
-    )
-    assert disease_teacher_rel.hardness_weighting_by_label[
-        "Lung_Parenchymal"
-    ].cap == pytest.approx(2.5)
-    assert disease_teacher_rel.hardness_weighting_by_label["Airway"].gain == (
-        pytest.approx(1.5)
-    )
-    assert disease_teacher_rel.hardness_weighting_by_label["Airway"].cap == (
-        pytest.approx(4.0)
-    )
-    assert disease_teacher_rel.weak_positive_support_weighting.enabled is True
-    assert (
-        disease_teacher_rel.weak_positive_support_weighting.multiplier
-        == pytest.approx(1.25)
-    )
-    assert disease_teacher_rel.weak_positive_support_weighting.support_band_by_label[
-        "Airway"
-    ].max_support == pytest.approx(1.2)
-    assert disease_teacher_rel.weak_positive_margin_boost.enabled is True
-    assert disease_teacher_rel.weak_positive_margin_boost.boost == pytest.approx(0.2)
-    assert disease_teacher_rel.weak_positive_margin_boost.boost_by_label == {
-        "Normal": 0.1,
-        "Lung_Parenchymal": 0.2,
-        "Airway": 0.8,
-    }
-    assert disease_teacher_rel.weak_positive_margin_boost.support_band_by_label[
-        "Airway"
-    ].max_support == pytest.approx(1.2)
-    disease_teacher_min = disease_training_cfg.train.loss.top_teacher_gap_min_constraint
-    assert disease_teacher_min.enabled is True
-    assert disease_teacher_min.weight == pytest.approx(0.12)
-    assert disease_teacher_min.base_min_gap == pytest.approx(0.0)
-    assert disease_teacher_min.support_gain == pytest.approx(0.75)
-    assert disease_teacher_min.support_cap == pytest.approx(2.0)
-    assert disease_teacher_min.base_min_gap_by_label == {
-        "Normal": 0.0,
-        "Lung_Parenchymal": 0.0,
-        "Airway": 0.4,
-    }
-    assert disease_teacher_min.support_gain_by_label == {
-        "Normal": 0.5,
-        "Lung_Parenchymal": 0.5,
-        "Airway": 1.25,
-    }
-    assert disease_teacher_min.weak_positive_support_weighting.enabled is True
-    assert (
-        disease_teacher_min.weak_positive_support_weighting.multiplier
-        == pytest.approx(1.5)
-    )
-    assert disease_teacher_min.weak_positive_support_weighting.support_band_by_label[
-        "Airway"
-    ].max_support == pytest.approx(1.2)
-    assert disease_teacher_min.weak_positive_target_boost.enabled is True
-    assert disease_teacher_min.weak_positive_target_boost.boost == pytest.approx(0.3)
-    assert disease_teacher_min.weak_positive_target_boost.boost_by_label == {
-        "Normal": 0.2,
-        "Lung_Parenchymal": 0.2,
-        "Airway": 1.0,
-    }
-    assert disease_teacher_min.weak_positive_target_boost.support_band_by_label[
-        "Airway"
-    ].max_support == pytest.approx(1.2)
-    disease_hard_neg_teacher = (
-        disease_training_cfg.train.loss.hard_negative_top_teacher_suppression
-    )
-    assert disease_hard_neg_teacher.enabled is True
-    assert disease_hard_neg_teacher.weight == pytest.approx(0.05)
-    assert disease_hard_neg_teacher.base_required_gap_by_label == {
-        "Normal": 0.1,
-        "Lung_Parenchymal": 0.1,
-        "Airway": 0.3,
-    }
-    assert disease_hard_neg_teacher.weak_positive_band.enabled is True
-    assert disease_hard_neg_teacher.weak_positive_band.boost_by_label == {
-        "Normal": 0.1,
-        "Lung_Parenchymal": 0.1,
-        "Airway": 0.5,
-    }
-    assert disease_hard_neg_teacher.weak_positive_band.support_band_by_label[
-        "Airway"
-    ].max_support == pytest.approx(1.2)
-    assert disease_hard_neg_teacher.moderate_positive_band.enabled is True
-    assert disease_hard_neg_teacher.moderate_positive_band.boost_by_label == {
-        "Normal": 0.0,
-        "Lung_Parenchymal": 0.0,
-        "Airway": 0.2,
-    }
-    assert disease_hard_neg_teacher.detach_true_top is True
-    assert disease_hard_neg_teacher.class_weighted is True
-    disease_gate_align = disease_training_cfg.train.loss.gate_best_branch_alignment
-    assert disease_gate_align.enabled is True
-    assert disease_gate_align.weight == pytest.approx(0.04)
-    assert disease_gate_align.min_best_margin == pytest.approx(0.2)
-    assert disease_gate_align.max_best_margin == pytest.approx(1.0)
-    assert disease_gate_align.mismatch_margin_drop == pytest.approx(0.5)
-    assert disease_gate_align.class_weighted is False
-    assert disease_gate_align.label_weight_by_label == {
-        "Normal": 1.5,
-        "Lung_Parenchymal": 1.0,
-        "Airway": 0.1,
-    }
-    assert disease_gate_align.max_best_margin_by_label == {"Airway": 1.2}
-    negative_cap = disease_training_cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_direct_score.top_support_direct_path.negative_relative_cap
-    assert negative_cap.enabled is True
-    assert negative_cap.mode == "raw_fraction_cap"
-    assert negative_cap.max_negative_fraction == pytest.approx(0.75)
-    assert negative_cap.negative_cap == pytest.approx(1.5)
-    assert negative_cap.max_negative_fraction_by_label == {"Airway": 0.5}
-    assert negative_cap.negative_cap_by_label == {"Airway": 1.0}
-    assert negative_cap.max_negative_fraction_by_class == pytest.approx(
-        (0.75, 0.75, 0.5)
-    )
-    assert negative_cap.negative_cap_by_class == pytest.approx((1.5, 1.5, 1.0))
-    assert (
-        disease_training_cfg.train.loss.top_support_score_margin.label_weight_by_label
-        == {
-            "Normal": 1.0,
-            "Lung_Parenchymal": 1.0,
-            "Airway": 2.0,
-        }
-    )
-    disease_hardness = (
-        disease_training_cfg.train.loss.top_support_score_margin.hardness_weighting
-    )
-    assert disease_hardness.enabled is True
-    assert disease_hardness.source == "top_support_gap"
-    assert disease_hardness.mode == "negative_gap"
-    assert disease_hardness.gain == pytest.approx(1.0)
-    assert disease_hardness.cap == pytest.approx(3.0)
-    assert (
-        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.label_multiplier_by_label
-        == {
-            "Normal": 1.0,
-            "Lung_Parenchymal": 1.0,
-            "Airway": 2.0,
-        }
-    )
-    assert (
-        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.enabled
-        is True
-    )
-    assert (
-        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.start_epoch
-        == 21
-    )
-    assert (
-        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.end_epoch
-        == 31
-    )
-    assert (
-        disease_training_cfg.train.loss.top_branch_margin.phase_weight_schedule.start_multiplier_by_label
-        == {
-            "Normal": 1.0,
-            "Lung_Parenchymal": 1.0,
-            "Airway": 1.0,
-        }
-    )
-    assert disease_training_cfg.train.loss.branch_direct_score_margin.enabled is True
-    assert disease_training_cfg.train.loss.branch_direct_score_margin.weight == (
-        pytest.approx(0.05)
-    )
-    assert (
-        disease_training_cfg.train.loss.branch_path_dominance_constraint.enabled is True
-    )
-    assert (
-        disease_training_cfg.train.loss.branch_path_dominance_constraint.label_weight_by_label
-        == {
-            "Normal": 0.75,
-            "Lung_Parenchymal": 0.75,
-            "Airway": 1.5,
-        }
-    )
-    assert (
-        disease_training_cfg.train.loss.branch_path_dominance_constraint.allowed_drop_by_label
-        == {
-            "Normal": 0.5,
-            "Lung_Parenchymal": 0.75,
-            "Airway": 0.3,
-        }
-    )
-    disease_disagreement_cap = (
-        disease_training_cfg.train.loss.branch_support_disagreement_cap_regularization
-    )
-    assert disease_disagreement_cap.enabled is True
-    assert disease_disagreement_cap.embedding_gap_cap == pytest.approx(6.0)
-    assert disease_disagreement_cap.interaction_gap_cap == pytest.approx(4.0)
-    assert (
-        disease_training_cfg.train.loss.class_evidence_gap_cap_regularization.label_weight_by_label
-        == {
-            "Normal": 1.0,
-            "Lung_Parenchymal": 1.0,
-            "Airway": 1.5,
-        }
-    )
-    assert (
-        disease_training_cfg.train.loss.class_evidence_gap_cap_regularization.negative_gap_cap_by_label
-        == {
-            "Normal": 3.0,
-            "Lung_Parenchymal": 3.0,
-            "Airway": 2.5,
-        }
-    )
-    assert (
-        disease_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.enabled
-        is True
-    )
-    assert (
-        disease_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.positive_gap_cap
-        == pytest.approx(8.0)
-    )
-    assert (
-        disease_training_cfg.train.loss.class_evidence_positive_gap_cap_regularization.weight
-        == pytest.approx(0.015)
-    )
-    assert disease_training_cfg.train.loss.interaction_gap_cap_regularization.enabled
-    assert (
-        disease_training_cfg.train.loss.interaction_gap_cap_regularization.gap_cap
-        == pytest.approx(6.0)
-    )
-    assert (
-        disease_training_cfg.train.loss.interaction_gap_cap_regularization.weight
-        == pytest.approx(0.015)
-    )
+    for loss_name in disabled_loss_names:
+        assert getattr(disease_training_cfg.train.loss, loss_name).enabled is False
+
     assert baseline_training_cfg.experiment.name == "test_CNUH_3classes"
     assert baseline_training_cfg.experiment.logging.terminal_width is None
     assert baseline_training_cfg.model.encoder.type == "multiscale_rdt_ast"
@@ -2384,6 +1775,228 @@ def test_valid_positive_and_interaction_gap_cap_configs_load(
     assert interaction_cfg.reduction == "mean"
 
 
+def test_teacher_calibration_and_calibrated_teacher_margin_config_loads(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "dropout": 0.05,
+        "use_class_embedding": True,
+        "logit_centering": True,
+        "score_decomposition": {"enabled": True},
+        "branch_direct_score": {"enabled": True},
+        "teacher_calibration": {
+            "enabled": True,
+            "type": "class_axis_attention",
+            "input_mode": "branch_margin_summary",
+            "hidden_size": 32,
+            "num_attention_heads": 4,
+            "num_attention_layers": 1,
+            "dropout": 0.05,
+            "use_class_embedding": True,
+            "logit_centering": True,
+        },
+    }
+    payload["train"]["loss"]["calibrated_teacher_margin"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_calibrated_top_teacher_features",
+        "mode": "softplus_margin_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "margin": 0.3,
+        "margin_by_label": {"wheeze": 0.6},
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(tmp_path / "calibrated_teacher.json", payload)
+
+    cfg = JsonConfigLoader.load_training(config_path)
+
+    scorer = cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer
+    teacher_cfg = scorer.teacher_calibration
+    assert teacher_cfg.enabled is True
+    assert teacher_cfg.type == "class_axis_attention"
+    assert teacher_cfg.input_mode == "branch_margin_summary"
+    assert teacher_cfg.hidden_size == 32
+    assert teacher_cfg.num_attention_heads == 4
+    assert teacher_cfg.num_attention_layers == 1
+    assert teacher_cfg.dropout == pytest.approx(0.05)
+    assert teacher_cfg.use_class_embedding is True
+    assert teacher_cfg.logit_centering is True
+    margin_cfg = cfg.train.loss.calibrated_teacher_margin
+    assert margin_cfg.enabled is True
+    assert margin_cfg.weight == pytest.approx(0.1)
+    assert margin_cfg.target == "class_calibrated_top_teacher_features"
+    assert margin_cfg.mode == "softplus_margin_true_vs_hardest_negative"
+    assert margin_cfg.margin_by_label == {"wheeze": 0.6}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("type", "mlp", "teacher_calibration.type"),
+        ("input_mode", "raw", "teacher_calibration.input_mode"),
+        ("hidden_size", 0, "teacher_calibration.hidden_size"),
+        ("num_attention_heads", 0, "teacher_calibration.num_attention_heads"),
+        ("num_attention_layers", 0, "teacher_calibration.num_attention_layers"),
+        ("dropout", 1.0, "teacher_calibration.dropout"),
+        ("use_class_embedding", "yes", "teacher_calibration.use_class_embedding"),
+        ("logit_centering", "yes", "teacher_calibration.logit_centering"),
+    ],
+)
+def test_invalid_teacher_calibration_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "embedding_hidden_size": 32,
+        "branch_hidden_size": 8,
+        "fusion_hidden_size": 24,
+        "num_attention_heads": 4,
+        "num_attention_layers": 1,
+        "score_decomposition": {"enabled": True},
+        "teacher_calibration": {
+            "enabled": True,
+            "type": "class_axis_attention",
+            "input_mode": "branch_margin_summary",
+            "hidden_size": 32,
+            "num_attention_heads": 4,
+            "num_attention_layers": 1,
+            "dropout": 0.05,
+            "use_class_embedding": True,
+            "logit_centering": True,
+        },
+    }
+    class_gate["evidence_scorer"]["teacher_calibration"][field] = value
+    config_path = _write_json(tmp_path / "bad_teacher_calibration.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("target", "class_evidence_logits", "calibrated_teacher_margin.target"),
+        ("mode", "hinge", "calibrated_teacher_margin.mode"),
+        ("temperature", 0.0, "calibrated_teacher_margin.temperature"),
+        ("margin", -0.1, "calibrated_teacher_margin.margin"),
+        (
+            "margin_by_label",
+            {"ghost": 0.4},
+            "calibrated_teacher_margin.margin_by_label",
+        ),
+        ("class_weighted", "yes", "calibrated_teacher_margin.class_weighted"),
+        ("reduction", "sum", "calibrated_teacher_margin.reduction"),
+        ("warmup_epochs", -1, "calibrated_teacher_margin.warmup_epochs"),
+        ("weight", 0.0, "calibrated_teacher_margin.weight"),
+    ],
+)
+def test_invalid_calibrated_teacher_margin_config_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
+        "class_gate"
+    ]
+    class_gate["evidence_scorer"] = {
+        "type": "class_axis_attention",
+        "score_decomposition": {"enabled": True},
+        "teacher_calibration": {"enabled": True},
+    }
+    payload["train"]["loss"]["calibrated_teacher_margin"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_calibrated_top_teacher_features",
+        "mode": "softplus_margin_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "margin": 0.3,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    payload["train"]["loss"]["calibrated_teacher_margin"][field] = value
+    config_path = _write_json(tmp_path / "bad_calibrated_teacher_margin.json", payload)
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        JsonConfigLoader.load_training(config_path)
+
+
+def test_calibrated_teacher_margin_requires_teacher_calibration(
+    tmp_path: Path,
+) -> None:
+    payload = _class_aware_cross_entropy_payload()
+    payload["train"]["loss"]["class_weighting"] = {
+        "enabled": True,
+        "type": "power_inverse_frequency",
+        "normalize": "mean_one",
+        "source": "train",
+        "power": 0.75,
+    }
+    payload["model"]["encoder"]["architecture"]["evidence_pooling"]["class_gate"][
+        "evidence_scorer"
+    ] = {
+        "type": "class_axis_attention",
+        "score_decomposition": {"enabled": True},
+        "teacher_calibration": {"enabled": False},
+    }
+    payload["train"]["loss"]["calibrated_teacher_margin"] = {
+        "enabled": True,
+        "weight": 0.1,
+        "target": "class_calibrated_top_teacher_features",
+        "mode": "softplus_margin_true_vs_hardest_negative",
+        "temperature": 1.0,
+        "margin": 0.3,
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
+    config_path = _write_json(
+        tmp_path / "calibrated_margin_without_teacher_calibration.json",
+        payload,
+    )
+
+    with pytest.raises(
+        (TypeError, ValueError),
+        match="teacher_calibration.enabled=true",
+    ):
+        JsonConfigLoader.load_training(config_path)
+
+
 def test_valid_branch_direct_score_margin_config_loads(tmp_path: Path) -> None:
     payload = _class_aware_cross_entropy_payload()
     class_gate = payload["model"]["encoder"]["architecture"]["evidence_pooling"][
@@ -2566,6 +2179,34 @@ def test_valid_teacher_relative_top_branch_config_loads(tmp_path: Path) -> None:
         "reduction": "mean",
         "warmup_epochs": 10,
     }
+    payload["train"]["loss"]["true_top_floor_constraint"] = {
+        "enabled": True,
+        "weight": 0.05,
+        "target": "class_top_branch_margin_features",
+        "mode": "support_conditioned_true_top_floor",
+        "support_source": "top_branch_margin",
+        "base_floor": 0.0,
+        "base_floor_by_label": {"wheeze": 0.4},
+        "support_gain": 0.25,
+        "support_gain_by_label": {"wheeze": 1.0},
+        "support_cap": 2.0,
+        "weak_positive_boost": {
+            "enabled": True,
+            "min_support": 0.2,
+            "max_support": 1.0,
+            "boost": 0.0,
+            "boost_by_label": {"wheeze": 0.8},
+            "support_band_by_label": {
+                "wheeze": {
+                    "min_support": 0.2,
+                    "max_support": 1.2,
+                }
+            },
+        },
+        "class_weighted": True,
+        "reduction": "mean",
+        "warmup_epochs": 10,
+    }
     config_path = _write_json(tmp_path / "teacher_relative_top_branch.json", payload)
 
     cfg = JsonConfigLoader.load_training(config_path)
@@ -2622,6 +2263,17 @@ def test_valid_teacher_relative_top_branch_config_loads(tmp_path: Path) -> None:
     assert teacher_min_cfg.weak_positive_target_boost.support_band_by_label[
         "wheeze"
     ].max_support == pytest.approx(1.2)
+    true_top_floor_cfg = cfg.train.loss.true_top_floor_constraint
+    assert true_top_floor_cfg.enabled is True
+    assert true_top_floor_cfg.weight == pytest.approx(0.05)
+    assert true_top_floor_cfg.base_floor_by_label == {"wheeze": 0.4}
+    assert true_top_floor_cfg.support_gain_by_label == {"wheeze": 1.0}
+    assert true_top_floor_cfg.support_cap == pytest.approx(2.0)
+    assert true_top_floor_cfg.weak_positive_boost.enabled is True
+    assert true_top_floor_cfg.weak_positive_boost.boost_by_label == {"wheeze": 0.8}
+    assert true_top_floor_cfg.weak_positive_boost.support_band_by_label[
+        "wheeze"
+    ].max_support == pytest.approx(1.2)
 
 
 def test_valid_hard_negative_top_teacher_suppression_config_loads(
@@ -2643,6 +2295,7 @@ def test_valid_hard_negative_top_teacher_suppression_config_loads(
         "support_source": "top_branch_margin",
         "base_required_gap": 0.1,
         "base_required_gap_by_label": {"wheeze": 0.3},
+        "label_weight_by_label": {"normal": 0.25, "wheeze": 1.0},
         "weak_positive_band": {
             "enabled": True,
             "min_support": 0.2,
@@ -2676,6 +2329,7 @@ def test_valid_hard_negative_top_teacher_suppression_config_loads(
     assert hard_neg_cfg.enabled is True
     assert hard_neg_cfg.weight == pytest.approx(0.05)
     assert hard_neg_cfg.base_required_gap_by_label == {"wheeze": 0.3}
+    assert hard_neg_cfg.label_weight_by_label == {"normal": 0.25, "wheeze": 1.0}
     assert hard_neg_cfg.weak_positive_band.enabled is True
     assert hard_neg_cfg.weak_positive_band.boost_by_label == {"wheeze": 0.5}
     assert hard_neg_cfg.weak_positive_band.support_band_by_label[

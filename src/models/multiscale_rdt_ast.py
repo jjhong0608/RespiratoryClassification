@@ -336,6 +336,19 @@ class ClassGateBranchDirectScoreConfig:
 
 
 @dataclass(frozen=True)
+class ClassGateTeacherCalibrationConfig:
+    enabled: bool = False
+    type: Literal["class_axis_attention"] = "class_axis_attention"
+    input_mode: Literal["branch_margin_summary"] = "branch_margin_summary"
+    hidden_size: int = 256
+    num_attention_heads: int = 4
+    num_attention_layers: int = 1
+    dropout: float = 0.05
+    use_class_embedding: bool = True
+    logit_centering: bool = True
+
+
+@dataclass(frozen=True)
 class ClassGateEvidenceScorerConfig:
     type: Literal[
         "embedding_mlp",
@@ -358,6 +371,9 @@ class ClassGateEvidenceScorerConfig:
     )
     branch_feature_transform: ClassGateBranchFeatureTransformConfig = field(
         default_factory=ClassGateBranchFeatureTransformConfig
+    )
+    teacher_calibration: ClassGateTeacherCalibrationConfig = field(
+        default_factory=ClassGateTeacherCalibrationConfig
     )
 
 
@@ -514,6 +530,10 @@ class AstModelOutput:
     class_top_branch_margin_features: Tensor | None = None
     class_gated_branch_logit_relative_features: Tensor | None = None
     class_top_branch_margin_relative_features: Tensor | None = None
+    class_calibrated_top_teacher_features: Tensor | None = None
+    class_calibrated_top_teacher_relative_features: Tensor | None = None
+    class_teacher_calibration_summary_features: Tensor | None = None
+    class_teacher_calibration_feature_names: tuple[str, ...] | None = None
     class_evidence_scorer_branch_raw_features: Tensor | None = None
     class_evidence_scorer_branch_features: Tensor | None = None
     class_evidence_attention_weights: Tensor | None = None
@@ -684,6 +704,14 @@ class ClassEvidenceScoreOutput:
     embedding_score_temperature: Tensor | None = None
     interaction_score_bound: Tensor | None = None
     interaction_score_temperature: Tensor | None = None
+
+
+@dataclass(frozen=True)
+class ClassTeacherCalibrationOutput:
+    features: Tensor
+    relative_features: Tensor
+    summary_features: Tensor
+    feature_names: tuple[str, ...]
 
 
 def compute_token_grid(
@@ -886,6 +914,25 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         self.gate_mixing = cfg.class_gate.gate_mixing
         self.evidence_scorer_cfg = cfg.class_gate.evidence_scorer
         self.evidence_scorer_type = self.evidence_scorer_cfg.type
+        teacher_calibration_cfg = self.evidence_scorer_cfg.teacher_calibration
+        if isinstance(teacher_calibration_cfg, Mapping):
+            teacher_calibration_cfg = ClassGateTeacherCalibrationConfig(
+                **dict(teacher_calibration_cfg)
+            )
+        if not isinstance(teacher_calibration_cfg, ClassGateTeacherCalibrationConfig):
+            raise TypeError(
+                "class_gate.evidence_scorer.teacher_calibration must be "
+                "ClassGateTeacherCalibrationConfig or a mapping"
+            )
+        self.teacher_calibration_cfg = teacher_calibration_cfg
+        self.teacher_calibration_feature_names = (
+            "top_margin",
+            "mean_margin",
+            "gated_margin",
+            "spread",
+            "hard_negative_margin",
+            "raw_relative_gap",
+        )
         self.scorer_branch_feature_count = 0
         if self.evidence_scorer_type == "two_tower_mlp":
             self.scorer_branch_feature_count = 2
@@ -935,6 +982,11 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
         self.class_axis_top_support_direct_residual_mlp: nn.Module | None
         self.class_axis_branch_direct_residual_mlp: nn.Module | None
         self.class_axis_interaction_scale_param: nn.Parameter | None
+        self.teacher_calibration_input_projector: nn.Module | None = None
+        self.teacher_calibration_encoder: nn.TransformerEncoder | None = None
+        self.teacher_calibration_logit_norm: nn.Module | None = None
+        self.teacher_calibration_logit_head: nn.Module | None = None
+        self.teacher_calibration_class_embeddings: nn.Parameter | None = None
         if self.evidence_scorer_type == "two_tower_mlp":
             self.class_scorer_weight = None
             self.class_scorer_bias = None
@@ -1256,6 +1308,50 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
                 if self.evidence_scorer_cfg.use_class_embedding
                 else None
             )
+            if self.teacher_calibration_cfg.enabled:
+                if self.teacher_calibration_cfg.type != "class_axis_attention":
+                    raise ValueError("teacher calibration type is unsupported")
+                if self.teacher_calibration_cfg.input_mode != "branch_margin_summary":
+                    raise ValueError("teacher calibration input_mode is unsupported")
+                self.teacher_calibration_input_projector = nn.Sequential(
+                    nn.LayerNorm(len(self.teacher_calibration_feature_names)),
+                    nn.Linear(
+                        len(self.teacher_calibration_feature_names),
+                        self.teacher_calibration_cfg.hidden_size,
+                    ),
+                    nn.GELU(),
+                    nn.Dropout(self.teacher_calibration_cfg.dropout),
+                )
+                teacher_encoder_layer = nn.TransformerEncoderLayer(
+                    d_model=self.teacher_calibration_cfg.hidden_size,
+                    nhead=self.teacher_calibration_cfg.num_attention_heads,
+                    dim_feedforward=self.teacher_calibration_cfg.hidden_size * 2,
+                    dropout=self.teacher_calibration_cfg.dropout,
+                    activation="gelu",
+                    batch_first=True,
+                    norm_first=False,
+                )
+                self.teacher_calibration_encoder = nn.TransformerEncoder(
+                    teacher_encoder_layer,
+                    num_layers=self.teacher_calibration_cfg.num_attention_layers,
+                )
+                self.teacher_calibration_logit_norm = nn.LayerNorm(
+                    self.teacher_calibration_cfg.hidden_size
+                )
+                self.teacher_calibration_logit_head = nn.Linear(
+                    self.teacher_calibration_cfg.hidden_size,
+                    1,
+                )
+                self.teacher_calibration_class_embeddings = (
+                    nn.Parameter(
+                        torch.empty(
+                            num_classes,
+                            self.teacher_calibration_cfg.hidden_size,
+                        )
+                    )
+                    if self.teacher_calibration_cfg.use_class_embedding
+                    else None
+                )
         elif self.class_gate_scorer == "diagonal":
             self.class_scorer_weight = nn.Parameter(
                 torch.empty(num_classes, hidden_size)
@@ -1346,6 +1442,11 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
             nn.init.normal_(self.class_scorer_weight, std=PATCH_INIT_STD)
         if self.class_axis_class_embeddings is not None:
             nn.init.normal_(self.class_axis_class_embeddings, std=PATCH_INIT_STD)
+        if self.teacher_calibration_class_embeddings is not None:
+            nn.init.normal_(
+                self.teacher_calibration_class_embeddings,
+                std=PATCH_INIT_STD,
+            )
 
     def set_runtime_epoch(self, epoch: int | None) -> None:
         self._runtime_epoch = None if epoch is None else int(epoch)
@@ -1363,6 +1464,120 @@ class ClassAwareBranchGatedEvidencePooling(nn.Module):
     @staticmethod
     def _center_class_scores(scores: Tensor) -> Tensor:
         return scores - scores.mean(dim=-1, keepdim=True)
+
+    @staticmethod
+    def _class_relative_scores(scores: Tensor) -> Tensor:
+        if scores.ndim != 2:
+            raise ValueError(
+                "class relative score calculation expects shape (B, C), "
+                f"got {tuple(scores.shape)}"
+            )
+        if scores.shape[1] < 2:
+            raise ValueError("class relative score calculation requires C >= 2")
+        top_values, top_indices = scores.topk(k=2, dim=-1)
+        class_indices = torch.arange(scores.shape[1], device=scores.device).view(1, -1)
+        hardest_negative = torch.where(
+            top_indices[:, 0:1] == class_indices,
+            top_values[:, 1:2],
+            top_values[:, 0:1],
+        )
+        return scores - hardest_negative
+
+    @staticmethod
+    def _branch_margin_matrix(branch_logits: Tensor) -> Tensor:
+        if branch_logits.ndim != 3:
+            raise ValueError(
+                "teacher calibration expects branch_logits shape (B, R, C), "
+                f"got {tuple(branch_logits.shape)}"
+            )
+        if branch_logits.shape[2] < 2:
+            raise ValueError("teacher calibration requires C >= 2")
+        top_values, top_indices = branch_logits.topk(k=2, dim=-1)
+        class_indices = torch.arange(
+            branch_logits.shape[2],
+            device=branch_logits.device,
+        ).view(1, 1, -1)
+        hardest_negative = torch.where(
+            top_indices[..., 0:1] == class_indices,
+            top_values[..., 1:2],
+            top_values[..., 0:1],
+        )
+        return branch_logits - hardest_negative
+
+    def calibrate_top_teacher(
+        self,
+        *,
+        branch_logits: Tensor,
+        class_gate_weights: Tensor,
+    ) -> ClassTeacherCalibrationOutput | None:
+        if not self.teacher_calibration_cfg.enabled:
+            return None
+        if (
+            self.teacher_calibration_input_projector is None
+            or self.teacher_calibration_encoder is None
+            or self.teacher_calibration_logit_norm is None
+            or self.teacher_calibration_logit_head is None
+        ):
+            raise RuntimeError("teacher calibration modules are not initialized")
+        if class_gate_weights.ndim != 3:
+            raise ValueError(
+                "teacher calibration expects class_gate_weights shape (B, C, R), "
+                f"got {tuple(class_gate_weights.shape)}"
+            )
+        if branch_logits.ndim != 3:
+            raise ValueError(
+                "teacher calibration expects branch_logits shape (B, R, C), "
+                f"got {tuple(branch_logits.shape)}"
+            )
+        if (
+            class_gate_weights.shape[0] != branch_logits.shape[0]
+            or class_gate_weights.shape[1] != branch_logits.shape[2]
+            or class_gate_weights.shape[2] != branch_logits.shape[1]
+        ):
+            raise ValueError(
+                "teacher calibration class_gate_weights must align with branch "
+                "logits as (B, C, R) vs (B, R, C); got "
+                f"{tuple(class_gate_weights.shape)} and {tuple(branch_logits.shape)}"
+            )
+        branch_margin_matrix = self._branch_margin_matrix(branch_logits)
+        top_margin = branch_margin_matrix.max(dim=1).values
+        mean_margin = branch_margin_matrix.mean(dim=1)
+        gated_margin = torch.einsum(
+            "bcr,brc->bc",
+            class_gate_weights,
+            branch_margin_matrix,
+        )
+        spread = top_margin - mean_margin
+        hard_negative_margin = top_margin - self._class_relative_scores(top_margin)
+        raw_relative_gap = top_margin - hard_negative_margin
+        summary_features = torch.stack(
+            [
+                top_margin,
+                mean_margin,
+                gated_margin,
+                spread,
+                hard_negative_margin,
+                raw_relative_gap,
+            ],
+            dim=-1,
+        )
+        teacher_tokens = self.teacher_calibration_input_projector(summary_features)
+        if self.teacher_calibration_class_embeddings is not None:
+            teacher_tokens = (
+                teacher_tokens + self.teacher_calibration_class_embeddings.unsqueeze(0)
+            )
+        teacher_tokens = self.teacher_calibration_encoder(teacher_tokens)
+        calibrated = self.teacher_calibration_logit_head(
+            self.teacher_calibration_logit_norm(teacher_tokens)
+        ).squeeze(-1)
+        if self.teacher_calibration_cfg.logit_centering:
+            calibrated = self._center_class_scores(calibrated)
+        return ClassTeacherCalibrationOutput(
+            features=calibrated,
+            relative_features=self._class_relative_scores(calibrated),
+            summary_features=summary_features,
+            feature_names=self.teacher_calibration_feature_names,
+        )
 
     @staticmethod
     def _score_scale_parameter_init(
@@ -3509,6 +3724,10 @@ class MultiScaleRdtAstModel(nn.Module):
         class_top_branch_margin_features: Tensor | None = None
         class_gated_branch_logit_relative_features: Tensor | None = None
         class_top_branch_margin_relative_features: Tensor | None = None
+        class_calibrated_top_teacher_features: Tensor | None = None
+        class_calibrated_top_teacher_relative_features: Tensor | None = None
+        class_teacher_calibration_summary_features: Tensor | None = None
+        class_teacher_calibration_feature_names: tuple[str, ...] | None = None
         class_evidence_scorer_branch_raw_features: Tensor | None = None
         class_evidence_scorer_branch_features: Tensor | None = None
         class_evidence_embedding_scores: Tensor | None = None
@@ -3627,6 +3846,39 @@ class MultiScaleRdtAstModel(nn.Module):
             class_top_branch_margin_relative_features = self._class_relative_features(
                 class_top_branch_margin_features
             )
+            calibrate_top_teacher = getattr(
+                self.evidence_pooler,
+                "calibrate_top_teacher",
+                None,
+            )
+            if callable(calibrate_top_teacher):
+                teacher_calibration_output = calibrate_top_teacher(
+                    branch_logits=stacked_branch_logits,
+                    class_gate_weights=class_evidence_gate_weights,
+                )
+                if teacher_calibration_output is not None:
+                    class_calibrated_top_teacher_features = (
+                        teacher_calibration_output.features
+                    )
+                    class_calibrated_top_teacher_relative_features = (
+                        teacher_calibration_output.relative_features
+                    )
+                    class_teacher_calibration_summary_features = (
+                        teacher_calibration_output.summary_features
+                    )
+                    class_teacher_calibration_feature_names = (
+                        teacher_calibration_output.feature_names
+                    )
+            primary_top_teacher_features = (
+                class_calibrated_top_teacher_features
+                if class_calibrated_top_teacher_features is not None
+                else class_top_branch_margin_features
+            )
+            primary_top_teacher_relative_features = (
+                class_calibrated_top_teacher_relative_features
+                if class_calibrated_top_teacher_relative_features is not None
+                else class_top_branch_margin_relative_features
+            )
             class_evidence_scorer_branch_raw_features = (
                 self._class_evidence_scorer_branch_raw_features(
                     class_gated_branch_logit_features=(
@@ -3635,9 +3887,9 @@ class MultiScaleRdtAstModel(nn.Module):
                     class_gated_branch_logit_relative_features=(
                         class_gated_branch_logit_relative_features
                     ),
-                    class_top_branch_margin_features=(class_top_branch_margin_features),
+                    class_top_branch_margin_features=(primary_top_teacher_features),
                     class_top_branch_margin_relative_features=(
-                        class_top_branch_margin_relative_features
+                        primary_top_teacher_relative_features
                     ),
                 )
             )
@@ -3988,9 +4240,9 @@ class MultiScaleRdtAstModel(nn.Module):
                     class_gated_branch_logit_relative_features=(
                         class_gated_branch_logit_relative_features
                     ),
-                    class_top_branch_margin_features=(class_top_branch_margin_features),
+                    class_top_branch_margin_features=(primary_top_teacher_features),
                     class_top_branch_margin_relative_features=(
-                        class_top_branch_margin_relative_features
+                        primary_top_teacher_relative_features
                     ),
                 )
                 bounded_global_residual_logits = (
@@ -4102,6 +4354,18 @@ class MultiScaleRdtAstModel(nn.Module):
             ),
             class_top_branch_margin_relative_features=(
                 class_top_branch_margin_relative_features
+            ),
+            class_calibrated_top_teacher_features=(
+                class_calibrated_top_teacher_features
+            ),
+            class_calibrated_top_teacher_relative_features=(
+                class_calibrated_top_teacher_relative_features
+            ),
+            class_teacher_calibration_summary_features=(
+                class_teacher_calibration_summary_features
+            ),
+            class_teacher_calibration_feature_names=(
+                class_teacher_calibration_feature_names
             ),
             class_evidence_scorer_branch_raw_features=(
                 class_evidence_scorer_branch_raw_features

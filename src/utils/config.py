@@ -27,6 +27,7 @@ from src.models.model import (
     ClassGateScoreBoundComponentConfig,
     ClassGateScoreBoundingConfig,
     ClassGateScoreDecompositionConfig,
+    ClassGateTeacherCalibrationConfig,
     ClassGateTopRelativeCorrectionConfig,
     ClassGateTopSupportDirectPathConfig,
     ClassGateTopSupportNegativeRelativeCapConfig,
@@ -293,6 +294,24 @@ class ClassEvidenceMarginConfig:
 
 
 @dataclass(frozen=True)
+class CalibratedTeacherMarginConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_calibrated_top_teacher_features"] = (
+        "class_calibrated_top_teacher_features"
+    )
+    mode: Literal["softplus_margin_true_vs_hardest_negative"] = (
+        "softplus_margin_true_vs_hardest_negative"
+    )
+    temperature: float = 1.0
+    margin: float = 0.3
+    margin_by_label: Mapping[str, float] = field(default_factory=dict)
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
 class ClassEvidenceGapCapRegularizationConfig:
     enabled: bool = False
     weight: float = 0.0
@@ -471,6 +490,31 @@ class TopTeacherGapMinConstraintConfig:
 
 
 @dataclass(frozen=True)
+class TrueTopFloorConstraintConfig:
+    enabled: bool = False
+    weight: float = 0.0
+    target: Literal["class_top_branch_margin_features"] = (
+        "class_top_branch_margin_features"
+    )
+    mode: Literal["support_conditioned_true_top_floor"] = (
+        "support_conditioned_true_top_floor"
+    )
+    support_source: Literal["top_branch_margin"] = "top_branch_margin"
+    base_floor: float = 0.0
+    base_floor_by_label: Mapping[str, float] = field(default_factory=dict)
+    support_gain: float = 0.25
+    support_gain_by_label: Mapping[str, float] = field(default_factory=dict)
+    support_cap: float = 2.0
+    support_cap_by_label: Mapping[str, float] = field(default_factory=dict)
+    weak_positive_boost: WeakPositiveTargetBoostConfig = field(
+        default_factory=WeakPositiveTargetBoostConfig
+    )
+    class_weighted: bool = False
+    reduction: Literal["mean"] = "mean"
+    warmup_epochs: int = 0
+
+
+@dataclass(frozen=True)
 class HardNegativeTopTeacherSuppressionBandConfig:
     enabled: bool = False
     min_support: float = 0.2
@@ -495,6 +539,7 @@ class HardNegativeTopTeacherSuppressionConfig:
     support_source: Literal["top_branch_margin"] = "top_branch_margin"
     base_required_gap: float = 0.1
     base_required_gap_by_label: Mapping[str, float] = field(default_factory=dict)
+    label_weight_by_label: Mapping[str, float] = field(default_factory=dict)
     weak_positive_band: HardNegativeTopTeacherSuppressionBandConfig = field(
         default_factory=HardNegativeTopTeacherSuppressionBandConfig
     )
@@ -915,6 +960,9 @@ class LossConfig:
     class_evidence_margin: ClassEvidenceMarginConfig = field(
         default_factory=ClassEvidenceMarginConfig
     )
+    calibrated_teacher_margin: CalibratedTeacherMarginConfig = field(
+        default_factory=CalibratedTeacherMarginConfig
+    )
     class_evidence_gap_cap_regularization: ClassEvidenceGapCapRegularizationConfig = (
         field(default_factory=ClassEvidenceGapCapRegularizationConfig)
     )
@@ -935,6 +983,9 @@ class LossConfig:
     )
     top_teacher_gap_min_constraint: TopTeacherGapMinConstraintConfig = field(
         default_factory=TopTeacherGapMinConstraintConfig
+    )
+    true_top_floor_constraint: TrueTopFloorConstraintConfig = field(
+        default_factory=TrueTopFloorConstraintConfig
     )
     hard_negative_top_teacher_suppression: HardNegativeTopTeacherSuppressionConfig = (
         field(default_factory=HardNegativeTopTeacherSuppressionConfig)
@@ -1137,6 +1188,8 @@ class JsonConfigLoader:
         "two_tower_mlp",
         "class_axis_attention",
     }
+    _CLASS_GATE_TEACHER_CALIBRATION_TYPES = {"class_axis_attention"}
+    _CLASS_GATE_TEACHER_CALIBRATION_INPUT_MODES = {"branch_margin_summary"}
     _CLASS_GATE_SCORE_DECOMPOSITION_SCALE_MODES = {
         "sigmoid_max",
         "bounded_sigmoid",
@@ -1182,6 +1235,9 @@ class JsonConfigLoader:
         "true_vs_hardest_negative",
         "softplus_true_vs_hardest_negative",
     }
+    _CALIBRATED_TEACHER_MARGIN_TARGETS = {"class_calibrated_top_teacher_features"}
+    _CALIBRATED_TEACHER_MARGIN_MODES = {"softplus_margin_true_vs_hardest_negative"}
+    _CALIBRATED_TEACHER_MARGIN_REDUCTIONS = {"mean"}
     _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_TARGETS = {"class_evidence_logits"}
     _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_MODES = {"negative_gap_hinge"}
     _CLASS_EVIDENCE_GAP_CAP_REGULARIZATION_REDUCTIONS = {"mean"}
@@ -1205,6 +1261,10 @@ class JsonConfigLoader:
     _TOP_TEACHER_GAP_MIN_CONSTRAINT_MODES = {"support_conditioned_min_gap"}
     _TOP_TEACHER_GAP_MIN_CONSTRAINT_SUPPORT_SOURCES = {"top_branch_margin"}
     _TOP_TEACHER_GAP_MIN_CONSTRAINT_REDUCTIONS = {"mean"}
+    _TRUE_TOP_FLOOR_CONSTRAINT_TARGETS = {"class_top_branch_margin_features"}
+    _TRUE_TOP_FLOOR_CONSTRAINT_MODES = {"support_conditioned_true_top_floor"}
+    _TRUE_TOP_FLOOR_CONSTRAINT_SUPPORT_SOURCES = {"top_branch_margin"}
+    _TRUE_TOP_FLOOR_CONSTRAINT_REDUCTIONS = {"mean"}
     _HARD_NEGATIVE_TOP_TEACHER_SUPPRESSION_TARGETS = {
         "class_top_branch_margin_features"
     }
@@ -2351,6 +2411,91 @@ class JsonConfigLoader:
                 "model.encoder.architecture.evidence_pooling.class_gate."
                 "evidence_scorer.logit_centering must be a boolean"
             )
+        teacher_calibration = evidence_scorer.teacher_calibration
+        if not isinstance(teacher_calibration.enabled, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.teacher_calibration.enabled must be a boolean"
+            )
+        if (
+            teacher_calibration.type
+            not in JsonConfigLoader._CLASS_GATE_TEACHER_CALIBRATION_TYPES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.teacher_calibration.type must be "
+                "'class_axis_attention'"
+            )
+        if (
+            teacher_calibration.input_mode
+            not in JsonConfigLoader._CLASS_GATE_TEACHER_CALIBRATION_INPUT_MODES
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.teacher_calibration.input_mode must be "
+                "'branch_margin_summary'"
+            )
+        for field_name in (
+            "hidden_size",
+            "num_attention_heads",
+            "num_attention_layers",
+        ):
+            value = getattr(teacher_calibration, field_name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.teacher_calibration.{field_name} must be "
+                    "an integer"
+                )
+            if value <= 0:
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    f"evidence_scorer.teacher_calibration.{field_name} must be "
+                    "greater than zero"
+                )
+        if (
+            teacher_calibration.hidden_size % teacher_calibration.num_attention_heads
+            != 0
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.teacher_calibration.hidden_size must be "
+                "divisible by num_attention_heads"
+            )
+        if (
+            not isinstance(teacher_calibration.dropout, int | float)
+            or isinstance(teacher_calibration.dropout, bool)
+            or not (0.0 <= float(teacher_calibration.dropout) < 1.0)
+        ):
+            raise ValueError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.teacher_calibration.dropout must be within [0, 1)"
+            )
+        if not isinstance(teacher_calibration.use_class_embedding, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.teacher_calibration.use_class_embedding must "
+                "be a boolean"
+            )
+        if not isinstance(teacher_calibration.logit_centering, bool):
+            raise TypeError(
+                "model.encoder.architecture.evidence_pooling.class_gate."
+                "evidence_scorer.teacher_calibration.logit_centering must be "
+                "a boolean"
+            )
+        if teacher_calibration.enabled:
+            if architecture.evidence_pooling.type != "class_aware_branch_gated":
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.teacher_calibration requires "
+                    "evidence_pooling.type='class_aware_branch_gated'"
+                )
+            if evidence_scorer.type != "class_axis_attention":
+                raise ValueError(
+                    "model.encoder.architecture.evidence_pooling.class_gate."
+                    "evidence_scorer.teacher_calibration requires "
+                    "evidence_scorer.type='class_axis_attention'"
+                )
         score_decomposition = evidence_scorer.score_decomposition
         if not isinstance(score_decomposition.enabled, bool):
             raise TypeError(
@@ -3293,6 +3438,7 @@ class JsonConfigLoader:
         evidence_scorer_type: str,
         score_decomposition_enabled: bool,
         branch_direct_score_enabled: bool,
+        teacher_calibration_enabled: bool,
     ) -> None:
         if cfg.epochs <= 0:
             raise ValueError("train.epochs must be greater than zero")
@@ -3543,6 +3689,107 @@ class JsonConfigLoader:
                 raise ValueError(
                     "train.loss.class_evidence_margin.major_class is required "
                     "when mode='minority_vs_major'"
+                )
+        calibrated_teacher_cfg = cfg.loss.calibrated_teacher_margin
+        if not isinstance(calibrated_teacher_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.calibrated_teacher_margin.enabled must be a boolean"
+            )
+        if not isinstance(calibrated_teacher_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.calibrated_teacher_margin.class_weighted must be a boolean"
+            )
+        if (
+            calibrated_teacher_cfg.target
+            not in JsonConfigLoader._CALIBRATED_TEACHER_MARGIN_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.calibrated_teacher_margin.target must be "
+                "'class_calibrated_top_teacher_features'"
+            )
+        if (
+            calibrated_teacher_cfg.mode
+            not in JsonConfigLoader._CALIBRATED_TEACHER_MARGIN_MODES
+        ):
+            raise ValueError(
+                "train.loss.calibrated_teacher_margin.mode must be "
+                "'softplus_margin_true_vs_hardest_negative'"
+            )
+        if (
+            calibrated_teacher_cfg.reduction
+            not in JsonConfigLoader._CALIBRATED_TEACHER_MARGIN_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.calibrated_teacher_margin.reduction must be 'mean'"
+            )
+        for field_name, value, min_value, strict_min in (
+            ("temperature", calibrated_teacher_cfg.temperature, 0.0, True),
+            ("margin", calibrated_teacher_cfg.margin, 0.0, False),
+        ):
+            if (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or (
+                    float(value) <= min_value
+                    if strict_min
+                    else float(value) < min_value
+                )
+            ):
+                comparator = (
+                    "greater than" if strict_min else "greater than or equal to"
+                )
+                raise ValueError(
+                    f"train.loss.calibrated_teacher_margin.{field_name} must be "
+                    f"{comparator} {min_value}"
+                )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            calibrated_teacher_cfg.margin_by_label,
+            field_name="train.loss.calibrated_teacher_margin.margin_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        if not isinstance(
+            calibrated_teacher_cfg.warmup_epochs,
+            int,
+        ) or isinstance(calibrated_teacher_cfg.warmup_epochs, bool):
+            raise TypeError(
+                "train.loss.calibrated_teacher_margin.warmup_epochs must be an integer"
+            )
+        if calibrated_teacher_cfg.warmup_epochs < 0:
+            raise ValueError(
+                "train.loss.calibrated_teacher_margin.warmup_epochs must be "
+                "non-negative"
+            )
+        if calibrated_teacher_cfg.enabled:
+            if calibrated_teacher_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.calibrated_teacher_margin.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.calibrated_teacher_margin is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.calibrated_teacher_margin requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if not teacher_calibration_enabled:
+                raise ValueError(
+                    "train.loss.calibrated_teacher_margin requires "
+                    "evidence_scorer.teacher_calibration.enabled=true"
+                )
+            if (
+                calibrated_teacher_cfg.class_weighted
+                and not cfg.loss.class_weighting.enabled
+            ):
+                raise ValueError(
+                    "train.loss.calibrated_teacher_margin.class_weighted "
+                    "requires train.loss.class_weighting.enabled=true"
                 )
         gap_cap_cfg = cfg.loss.class_evidence_gap_cap_regularization
         if not isinstance(gap_cap_cfg.enabled, bool):
@@ -4402,6 +4649,135 @@ class JsonConfigLoader:
                     "train.loss.top_teacher_gap_min_constraint.class_weighted "
                     "requires train.loss.class_weighting.enabled=true"
                 )
+        true_top_floor_cfg = cfg.loss.true_top_floor_constraint
+        if not isinstance(true_top_floor_cfg.enabled, bool):
+            raise TypeError(
+                "train.loss.true_top_floor_constraint.enabled must be a boolean"
+            )
+        if not isinstance(true_top_floor_cfg.class_weighted, bool):
+            raise TypeError(
+                "train.loss.true_top_floor_constraint.class_weighted must be a boolean"
+            )
+        if (
+            true_top_floor_cfg.target
+            not in JsonConfigLoader._TRUE_TOP_FLOOR_CONSTRAINT_TARGETS
+        ):
+            raise ValueError(
+                "train.loss.true_top_floor_constraint.target must be "
+                "'class_top_branch_margin_features'"
+            )
+        if (
+            true_top_floor_cfg.mode
+            not in JsonConfigLoader._TRUE_TOP_FLOOR_CONSTRAINT_MODES
+        ):
+            raise ValueError(
+                "train.loss.true_top_floor_constraint.mode must be "
+                "'support_conditioned_true_top_floor'"
+            )
+        if (
+            true_top_floor_cfg.support_source
+            not in JsonConfigLoader._TRUE_TOP_FLOOR_CONSTRAINT_SUPPORT_SOURCES
+        ):
+            raise ValueError(
+                "train.loss.true_top_floor_constraint.support_source must be "
+                "'top_branch_margin'"
+            )
+        if (
+            true_top_floor_cfg.reduction
+            not in JsonConfigLoader._TRUE_TOP_FLOOR_CONSTRAINT_REDUCTIONS
+        ):
+            raise ValueError(
+                "train.loss.true_top_floor_constraint.reduction must be 'mean'"
+            )
+        for field_name, value, min_value, strict_min in (
+            ("base_floor", true_top_floor_cfg.base_floor, 0.0, False),
+            ("support_gain", true_top_floor_cfg.support_gain, 0.0, False),
+            ("support_cap", true_top_floor_cfg.support_cap, 0.0, True),
+        ):
+            if (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or (
+                    float(value) <= min_value
+                    if strict_min
+                    else float(value) < min_value
+                )
+            ):
+                comparator = (
+                    "greater than" if strict_min else "greater than or equal to"
+                )
+                raise ValueError(
+                    f"train.loss.true_top_floor_constraint.{field_name} must be "
+                    f"{comparator} {min_value}"
+                )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            true_top_floor_cfg.base_floor_by_label,
+            field_name="train.loss.true_top_floor_constraint.base_floor_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            true_top_floor_cfg.support_gain_by_label,
+            field_name="train.loss.true_top_floor_constraint.support_gain_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            true_top_floor_cfg.support_cap_by_label,
+            field_name="train.loss.true_top_floor_constraint.support_cap_by_label",
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=True,
+        )
+        JsonConfigLoader._validate_weak_positive_boost(
+            true_top_floor_cfg.weak_positive_boost,
+            field_name="train.loss.true_top_floor_constraint.weak_positive_boost",
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            true_top_floor_cfg.weak_positive_boost.boost_by_label,
+            field_name=(
+                "train.loss.true_top_floor_constraint."
+                "weak_positive_boost.boost_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_weak_positive_support_bands(
+            true_top_floor_cfg.weak_positive_boost.support_band_by_label,
+            field_name=(
+                "train.loss.true_top_floor_constraint."
+                "weak_positive_boost.support_band_by_label"
+            ),
+            label_to_index=label_to_index,
+        )
+        if true_top_floor_cfg.enabled:
+            if true_top_floor_cfg.weight <= 0:
+                raise ValueError(
+                    "train.loss.true_top_floor_constraint.weight must be "
+                    "greater than zero when enabled"
+                )
+            if cfg.loss.type != "cross_entropy":
+                raise ValueError(
+                    "train.loss.true_top_floor_constraint is supported only "
+                    "for cross_entropy runs"
+                )
+            if evidence_pooling_type != "class_aware_branch_gated":
+                raise ValueError(
+                    "train.loss.true_top_floor_constraint requires "
+                    "model.encoder.architecture.evidence_pooling.type="
+                    "'class_aware_branch_gated'"
+                )
+            if (
+                true_top_floor_cfg.class_weighted
+                and not cfg.loss.class_weighting.enabled
+            ):
+                raise ValueError(
+                    "train.loss.true_top_floor_constraint.class_weighted requires "
+                    "train.loss.class_weighting.enabled=true"
+                )
         hard_negative_teacher_cfg = cfg.loss.hard_negative_top_teacher_suppression
         if not isinstance(hard_negative_teacher_cfg.enabled, bool):
             raise TypeError(
@@ -4464,6 +4840,15 @@ class JsonConfigLoader:
             field_name=(
                 "train.loss.hard_negative_top_teacher_suppression."
                 "base_required_gap_by_label"
+            ),
+            label_to_index=label_to_index,
+            min_value=0.0,
+            strict_min=False,
+        )
+        JsonConfigLoader._validate_numeric_label_mapping(
+            hard_negative_teacher_cfg.label_weight_by_label,
+            field_name=(
+                "train.loss.hard_negative_top_teacher_suppression.label_weight_by_label"
             ),
             label_to_index=label_to_index,
             min_value=0.0,
@@ -6759,6 +7144,9 @@ class JsonConfigLoader:
                 **dict(evidence_scorer.get("branch_feature_transform", {}))
             )
         )
+        evidence_scorer["teacher_calibration"] = ClassGateTeacherCalibrationConfig(
+            **dict(evidence_scorer.get("teacher_calibration", {}))
+        )
         class_gate["evidence_scorer"] = ClassGateEvidenceScorerConfig(**evidence_scorer)
         class_gate["evidence_auxiliary"] = ClassGateEvidenceAuxiliaryConfig(
             **dict(class_gate.get("evidence_auxiliary", {}))
@@ -6968,6 +7356,13 @@ class JsonConfigLoader:
         loss["class_evidence_margin"] = ClassEvidenceMarginConfig(
             **class_evidence_margin
         )
+        calibrated_teacher_margin = dict(loss.get("calibrated_teacher_margin", {}))
+        calibrated_teacher_margin["margin_by_label"] = dict(
+            calibrated_teacher_margin.get("margin_by_label", {})
+        )
+        loss["calibrated_teacher_margin"] = CalibratedTeacherMarginConfig(
+            **calibrated_teacher_margin
+        )
         class_evidence_gap_cap = dict(
             loss.get("class_evidence_gap_cap_regularization", {})
         )
@@ -7119,11 +7514,33 @@ class JsonConfigLoader:
         loss["top_teacher_gap_min_constraint"] = TopTeacherGapMinConstraintConfig(
             **top_teacher_gap_min_constraint
         )
+        true_top_floor_constraint = dict(loss.get("true_top_floor_constraint", {}))
+        true_top_floor_constraint["base_floor_by_label"] = dict(
+            true_top_floor_constraint.get("base_floor_by_label", {})
+        )
+        true_top_floor_constraint["support_gain_by_label"] = dict(
+            true_top_floor_constraint.get("support_gain_by_label", {})
+        )
+        true_top_floor_constraint["support_cap_by_label"] = dict(
+            true_top_floor_constraint.get("support_cap_by_label", {})
+        )
+        true_top_floor_constraint["weak_positive_boost"] = (
+            JsonConfigLoader._parse_weak_positive_boost(
+                dict(true_top_floor_constraint.get("weak_positive_boost", {})),
+                config_type=WeakPositiveTargetBoostConfig,
+            )
+        )
+        loss["true_top_floor_constraint"] = TrueTopFloorConstraintConfig(
+            **true_top_floor_constraint
+        )
         hard_negative_top_teacher = dict(
             loss.get("hard_negative_top_teacher_suppression", {})
         )
         hard_negative_top_teacher["base_required_gap_by_label"] = dict(
             hard_negative_top_teacher.get("base_required_gap_by_label", {})
+        )
+        hard_negative_top_teacher["label_weight_by_label"] = dict(
+            hard_negative_top_teacher.get("label_weight_by_label", {})
         )
         hard_negative_top_teacher["weak_positive_band"] = (
             JsonConfigLoader._parse_hard_negative_top_teacher_band(
@@ -7384,6 +7801,9 @@ class JsonConfigLoader:
             branch_direct_score_enabled=(
                 cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_direct_score.enabled
             ),
+            teacher_calibration_enabled=(
+                cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.teacher_calibration.enabled
+            ),
         )
         JsonConfigLoader._validate_val(cfg.val)
         JsonConfigLoader._validate_checkpointing(cfg.checkpointing)
@@ -7441,6 +7861,9 @@ class JsonConfigLoader:
             ),
             branch_direct_score_enabled=(
                 cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.branch_direct_score.enabled
+            ),
+            teacher_calibration_enabled=(
+                cfg.model.encoder.architecture.evidence_pooling.class_gate.evidence_scorer.teacher_calibration.enabled
             ),
         )
         JsonConfigLoader._validate_val(cfg.val)

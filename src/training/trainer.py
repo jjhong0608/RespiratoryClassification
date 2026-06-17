@@ -39,6 +39,7 @@ from src.utils.config import (
     BranchSupportDisagreementCapRegularizationConfig,
     BranchSupportScoreMarginConfig,
     BranchToEvidenceRankingConsistencyConfig,
+    CalibratedTeacherMarginConfig,
     CheckpointingConfig,
     ClassEvidenceGapCapRegularizationConfig,
     ClassEvidenceMarginConfig,
@@ -63,6 +64,7 @@ from src.utils.config import (
     TopSupportGapMinConstraintConfig,
     TopSupportScoreMarginConfig,
     TopTeacherGapMinConstraintConfig,
+    TrueTopFloorConstraintConfig,
     WeakPositiveMarginBoostConfig,
     WeakPositiveSupportWeightingConfig,
     WeakPositiveTargetBoostConfig,
@@ -113,6 +115,10 @@ class TrainerConfig:
         default_factory=ClassEvidenceMarginConfig
     )
     class_evidence_margin_major_index: int | None = None
+    calibrated_teacher_margin: CalibratedTeacherMarginConfig = field(
+        default_factory=CalibratedTeacherMarginConfig
+    )
+    calibrated_teacher_margin_by_class: tuple[float, ...] | None = None
     class_evidence_gap_cap_regularization: ClassEvidenceGapCapRegularizationConfig = (
         field(default_factory=ClassEvidenceGapCapRegularizationConfig)
     )
@@ -154,6 +160,15 @@ class TrainerConfig:
     top_teacher_gap_min_target_boost_by_class: tuple[float, ...] | None = None
     top_teacher_gap_min_target_boost_min_by_class: tuple[float, ...] | None = None
     top_teacher_gap_min_target_boost_max_by_class: tuple[float, ...] | None = None
+    true_top_floor_constraint: TrueTopFloorConstraintConfig = field(
+        default_factory=TrueTopFloorConstraintConfig
+    )
+    true_top_floor_base_by_class: tuple[float, ...] | None = None
+    true_top_floor_support_gain_by_class: tuple[float, ...] | None = None
+    true_top_floor_support_cap_by_class: tuple[float, ...] | None = None
+    true_top_floor_weak_boost_by_class: tuple[float, ...] | None = None
+    true_top_floor_weak_min_by_class: tuple[float, ...] | None = None
+    true_top_floor_weak_max_by_class: tuple[float, ...] | None = None
     hard_negative_top_teacher_suppression: HardNegativeTopTeacherSuppressionConfig = (
         field(default_factory=HardNegativeTopTeacherSuppressionConfig)
     )
@@ -166,6 +181,7 @@ class TrainerConfig:
     hard_negative_top_teacher_moderate_boost_by_class: tuple[float, ...] | None = None
     hard_negative_top_teacher_moderate_min_by_class: tuple[float, ...] | None = None
     hard_negative_top_teacher_moderate_max_by_class: tuple[float, ...] | None = None
+    hard_negative_top_teacher_label_weight_by_class: tuple[float, ...] | None = None
     branch_support_score_margin: BranchSupportScoreMarginConfig = field(
         default_factory=BranchSupportScoreMarginConfig
     )
@@ -238,6 +254,10 @@ class LossComponents:
     class_gate_diversity_regularization: Tensor | None = None
     class_evidence_margin: Tensor | None = None
     class_evidence_margin_loss: Tensor | None = None
+    calibrated_teacher_margin: Tensor | None = None
+    calibrated_teacher_margin_loss: Tensor | None = None
+    calibrated_teacher_margin_gap: Tensor | None = None
+    calibrated_teacher_margin_effective_margin: Tensor | None = None
     class_evidence_gap_cap_regularization: Tensor | None = None
     class_evidence_gap_cap_regularization_loss: Tensor | None = None
     class_evidence_gap_cap_label_multiplier: Tensor | None = None
@@ -271,11 +291,21 @@ class LossComponents:
     top_teacher_gap_min_weak_positive_target_boost: Tensor | None = None
     top_teacher_gap_min_base_min_gap: Tensor | None = None
     top_teacher_gap_min_support_gain: Tensor | None = None
+    true_top_floor_constraint: Tensor | None = None
+    true_top_floor_constraint_loss: Tensor | None = None
+    true_top_floor_target: Tensor | None = None
+    true_top_floor_support_value: Tensor | None = None
+    true_top_floor_base_floor: Tensor | None = None
+    true_top_floor_support_gain: Tensor | None = None
+    true_top_floor_weak_positive_boost: Tensor | None = None
+    true_top_floor_weak_positive_eligible_fraction: Tensor | None = None
+    true_top_floor_penalty_eligible_fraction: Tensor | None = None
     hard_negative_top_teacher_suppression: Tensor | None = None
     hard_negative_top_teacher_suppression_loss: Tensor | None = None
     hard_negative_top_teacher_required_gap: Tensor | None = None
     hard_negative_top_teacher_weak_band_boost: Tensor | None = None
     hard_negative_top_teacher_moderate_band_boost: Tensor | None = None
+    hard_negative_top_teacher_label_multiplier: Tensor | None = None
     hard_negative_top_teacher_weak_band_eligible_fraction: Tensor | None = None
     hard_negative_top_teacher_moderate_band_eligible_fraction: Tensor | None = None
     hard_negative_top_teacher_penalty_eligible_fraction: Tensor | None = None
@@ -1504,6 +1534,71 @@ class Trainer(LoggingMixin):
         weighted_loss = float(self.cfg.class_evidence_margin.weight) * raw_loss
         return raw_loss, weighted_loss
 
+    def _compute_calibrated_teacher_margin_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        cfg = self.cfg.calibrated_teacher_margin
+        if cfg.target != "class_calibrated_top_teacher_features":
+            raise ValueError(
+                "calibrated teacher margin supports only "
+                "target='class_calibrated_top_teacher_features'"
+            )
+        if cfg.mode != "softplus_margin_true_vs_hardest_negative":
+            raise ValueError(
+                "calibrated teacher margin supports only "
+                "mode='softplus_margin_true_vs_hardest_negative'"
+            )
+        if output.class_calibrated_top_teacher_features is None:
+            raise ValueError(
+                "calibrated teacher margin enabled but model did not return "
+                "class_calibrated_top_teacher_features"
+            )
+        logits = output.class_calibrated_top_teacher_features
+        label_indices = self._validate_class_margin_inputs(
+            logits,
+            labels,
+            logits_name="class_calibrated_top_teacher_features",
+            loss_name="calibrated teacher margin",
+        )
+        if label_indices.numel() == 0 or int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = logits.sum() * 0.0
+            return raw_loss, raw_loss, raw_loss.detach(), raw_loss.detach()
+        teacher_gap, _ = self._true_vs_hardest_negative_gap(logits, label_indices)
+        effective_margin = self._class_values_tensor(
+            self.cfg.calibrated_teacher_margin_by_class,
+            label_indices,
+            device=logits.device,
+            dtype=logits.dtype,
+            fallback=float(cfg.margin),
+        )
+        temperature = float(cfg.temperature)
+        penalties = temperature * F.softplus(
+            (effective_margin - teacher_gap) / temperature
+        )
+        class_weights = self._class_margin_weights(
+            label_indices,
+            logits,
+            enabled=cfg.class_weighted,
+            loss_name="calibrated_teacher_margin",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        return (
+            raw_loss,
+            weighted_loss,
+            teacher_gap.detach().mean(),
+            effective_margin.detach().mean(),
+        )
+
     def _compute_class_evidence_gap_cap_regularization_loss(
         self,
         output: AstModelOutput,
@@ -2359,13 +2454,144 @@ class Trainer(LoggingMixin):
             support_gain.detach().mean(),
         )
 
+    def _compute_true_top_floor_constraint_loss(
+        self,
+        output: AstModelOutput,
+        labels: Tensor,
+        *,
+        epoch: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        cfg = self.cfg.true_top_floor_constraint
+        if cfg.target != "class_top_branch_margin_features":
+            raise ValueError(
+                "true top floor constraint supports only "
+                "target='class_top_branch_margin_features'"
+            )
+        if cfg.mode != "support_conditioned_true_top_floor":
+            raise ValueError(
+                "true top floor constraint supports only "
+                "mode='support_conditioned_true_top_floor'"
+            )
+        if cfg.support_source != "top_branch_margin":
+            raise ValueError(
+                "true top floor constraint supports only "
+                "support_source='top_branch_margin'"
+            )
+        if output.class_top_branch_margin_features is None:
+            raise ValueError(
+                "true top floor constraint enabled but model did not return "
+                "class_top_branch_margin_features"
+            )
+        teacher_logits = output.class_top_branch_margin_features
+        label_indices = self._validate_class_margin_inputs(
+            teacher_logits,
+            labels,
+            logits_name="class_top_branch_margin_features",
+            loss_name="true top floor constraint",
+        )
+        if label_indices.numel() == 0:
+            raw_loss = teacher_logits.sum() * 0.0
+            return (
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+            )
+        if int(epoch) <= int(cfg.warmup_epochs):
+            raw_loss = teacher_logits.sum() * 0.0
+            return (
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+                raw_loss,
+            )
+
+        batch_indices = torch.arange(
+            label_indices.numel(),
+            device=teacher_logits.device,
+        )
+        true_top = teacher_logits[batch_indices, label_indices]
+        support_gap = self._top_branch_support_gap(
+            output,
+            labels,
+            label_indices,
+            loss_name="true_top_floor_constraint",
+        ).detach()
+        support_cap = self._class_values_tensor(
+            self.cfg.true_top_floor_support_cap_by_class,
+            label_indices,
+            device=teacher_logits.device,
+            dtype=teacher_logits.dtype,
+            fallback=float(cfg.support_cap),
+        )
+        support = torch.minimum(torch.relu(support_gap), support_cap)
+        base_floor = self._class_values_tensor(
+            self.cfg.true_top_floor_base_by_class,
+            label_indices,
+            device=teacher_logits.device,
+            dtype=teacher_logits.dtype,
+            fallback=float(cfg.base_floor),
+        )
+        support_gain = self._class_values_tensor(
+            self.cfg.true_top_floor_support_gain_by_class,
+            label_indices,
+            device=teacher_logits.device,
+            dtype=teacher_logits.dtype,
+            fallback=float(cfg.support_gain),
+        )
+        weak_boost, weak_eligible = self._weak_positive_boost_values(
+            support_gap,
+            cfg.weak_positive_boost,
+            label_indices=label_indices,
+            boost_by_class=self.cfg.true_top_floor_weak_boost_by_class,
+            min_support_by_class=self.cfg.true_top_floor_weak_min_by_class,
+            max_support_by_class=self.cfg.true_top_floor_weak_max_by_class,
+        )
+        target_floor = base_floor + (support_gain * support) + weak_boost
+        penalties = torch.relu(target_floor - true_top)
+        class_weights = self._class_margin_weights(
+            label_indices,
+            teacher_logits,
+            enabled=cfg.class_weighted,
+            loss_name="true_top_floor_constraint",
+        )
+        raw_loss = self._reduce_class_margin_penalties(
+            penalties,
+            label_indices,
+            class_weights,
+            reduction=cfg.reduction,
+        )
+        weighted_loss = float(cfg.weight) * raw_loss
+        penalty_eligible = penalties > 0
+        return (
+            raw_loss,
+            weighted_loss,
+            target_floor.detach().mean(),
+            support_gap.detach().mean(),
+            base_floor.detach().mean(),
+            support_gain.detach().mean(),
+            weak_boost.detach().mean(),
+            weak_eligible.to(dtype=teacher_logits.dtype).detach().mean(),
+            penalty_eligible.to(dtype=teacher_logits.dtype).detach().mean(),
+        )
+
     def _compute_hard_negative_top_teacher_suppression_loss(
         self,
         output: AstModelOutput,
         labels: Tensor,
         *,
         epoch: int,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         cfg = self.cfg.hard_negative_top_teacher_suppression
         if cfg.target != "class_top_branch_margin_features":
             raise ValueError(
@@ -2397,6 +2623,7 @@ class Trainer(LoggingMixin):
         if label_indices.numel() == 0 or int(epoch) <= int(cfg.warmup_epochs):
             raw_loss = teacher_logits.sum() * 0.0
             return (
+                raw_loss,
                 raw_loss,
                 raw_loss,
                 raw_loss,
@@ -2446,7 +2673,15 @@ class Trainer(LoggingMixin):
         )
         required_gap = base_required_gap + weak_boost + moderate_boost
         anchor_true_top = true_top.detach() if cfg.detach_true_top else true_top
-        penalties = torch.relu(negative_top - anchor_true_top + required_gap)
+        unweighted_penalties = torch.relu(negative_top - anchor_true_top + required_gap)
+        label_multiplier = self._class_values_tensor(
+            self.cfg.hard_negative_top_teacher_label_weight_by_class,
+            label_indices,
+            device=teacher_logits.device,
+            dtype=teacher_logits.dtype,
+            fallback=1.0,
+        )
+        penalties = unweighted_penalties * label_multiplier
         class_weights = self._class_margin_weights(
             label_indices,
             teacher_logits,
@@ -2467,6 +2702,7 @@ class Trainer(LoggingMixin):
             required_gap.detach().mean(),
             weak_boost.detach().mean(),
             moderate_boost.detach().mean(),
+            label_multiplier.detach().mean(),
             weak_eligible.to(dtype=teacher_logits.dtype).detach().mean(),
             moderate_eligible.to(dtype=teacher_logits.dtype).detach().mean(),
             penalty_eligible.to(dtype=teacher_logits.dtype).detach().mean(),
@@ -4096,6 +4332,23 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + class_evidence_margin_loss
             monitor_total = monitor_total + class_evidence_margin_loss
+        calibrated_teacher_margin: Tensor | None = None
+        calibrated_teacher_margin_loss: Tensor | None = None
+        calibrated_teacher_margin_gap: Tensor | None = None
+        calibrated_teacher_margin_effective_margin: Tensor | None = None
+        if self.cfg.calibrated_teacher_margin.enabled:
+            (
+                calibrated_teacher_margin,
+                calibrated_teacher_margin_loss,
+                calibrated_teacher_margin_gap,
+                calibrated_teacher_margin_effective_margin,
+            ) = self._compute_calibrated_teacher_margin_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + calibrated_teacher_margin_loss
+            monitor_total = monitor_total + calibrated_teacher_margin_loss
         class_evidence_gap_cap_regularization: Tensor | None = None
         class_evidence_gap_cap_regularization_loss: Tensor | None = None
         class_evidence_gap_cap_label_multiplier: Tensor | None = None
@@ -4183,6 +4436,15 @@ class Trainer(LoggingMixin):
         top_teacher_gap_min_weak_positive_target_boost: Tensor | None = None
         top_teacher_gap_min_base_min_gap: Tensor | None = None
         top_teacher_gap_min_support_gain: Tensor | None = None
+        true_top_floor_constraint: Tensor | None = None
+        true_top_floor_constraint_loss: Tensor | None = None
+        true_top_floor_target: Tensor | None = None
+        true_top_floor_support_value: Tensor | None = None
+        true_top_floor_base_floor: Tensor | None = None
+        true_top_floor_support_gain: Tensor | None = None
+        true_top_floor_weak_positive_boost: Tensor | None = None
+        true_top_floor_weak_positive_eligible_fraction: Tensor | None = None
+        true_top_floor_penalty_eligible_fraction: Tensor | None = None
         if self.cfg.top_teacher_gap_min_constraint.enabled:
             (
                 top_teacher_gap_min_constraint,
@@ -4199,11 +4461,30 @@ class Trainer(LoggingMixin):
             )
             scheduled_total = scheduled_total + top_teacher_gap_min_constraint_loss
             monitor_total = monitor_total + top_teacher_gap_min_constraint_loss
+        if self.cfg.true_top_floor_constraint.enabled:
+            (
+                true_top_floor_constraint,
+                true_top_floor_constraint_loss,
+                true_top_floor_target,
+                true_top_floor_support_value,
+                true_top_floor_base_floor,
+                true_top_floor_support_gain,
+                true_top_floor_weak_positive_boost,
+                true_top_floor_weak_positive_eligible_fraction,
+                true_top_floor_penalty_eligible_fraction,
+            ) = self._compute_true_top_floor_constraint_loss(
+                output,
+                labels,
+                epoch=epoch,
+            )
+            scheduled_total = scheduled_total + true_top_floor_constraint_loss
+            monitor_total = monitor_total + true_top_floor_constraint_loss
         hard_negative_top_teacher_suppression: Tensor | None = None
         hard_negative_top_teacher_suppression_loss: Tensor | None = None
         hard_negative_top_teacher_required_gap: Tensor | None = None
         hard_negative_top_teacher_weak_band_boost: Tensor | None = None
         hard_negative_top_teacher_moderate_band_boost: Tensor | None = None
+        hard_negative_top_teacher_label_multiplier: Tensor | None = None
         hard_negative_top_teacher_weak_band_eligible_fraction: Tensor | None = None
         hard_negative_top_teacher_moderate_band_eligible_fraction: Tensor | None = None
         hard_negative_top_teacher_penalty_eligible_fraction: Tensor | None = None
@@ -4214,6 +4495,7 @@ class Trainer(LoggingMixin):
                 hard_negative_top_teacher_required_gap,
                 hard_negative_top_teacher_weak_band_boost,
                 hard_negative_top_teacher_moderate_band_boost,
+                hard_negative_top_teacher_label_multiplier,
                 hard_negative_top_teacher_weak_band_eligible_fraction,
                 hard_negative_top_teacher_moderate_band_eligible_fraction,
                 hard_negative_top_teacher_penalty_eligible_fraction,
@@ -4487,6 +4769,12 @@ class Trainer(LoggingMixin):
             class_gate_diversity_regularization=class_gate_diversity_regularization,
             class_evidence_margin=class_evidence_margin,
             class_evidence_margin_loss=class_evidence_margin_loss,
+            calibrated_teacher_margin=calibrated_teacher_margin,
+            calibrated_teacher_margin_loss=calibrated_teacher_margin_loss,
+            calibrated_teacher_margin_gap=calibrated_teacher_margin_gap,
+            calibrated_teacher_margin_effective_margin=(
+                calibrated_teacher_margin_effective_margin
+            ),
             class_evidence_gap_cap_regularization=(
                 class_evidence_gap_cap_regularization
             ),
@@ -4560,6 +4848,19 @@ class Trainer(LoggingMixin):
             ),
             top_teacher_gap_min_base_min_gap=top_teacher_gap_min_base_min_gap,
             top_teacher_gap_min_support_gain=top_teacher_gap_min_support_gain,
+            true_top_floor_constraint=true_top_floor_constraint,
+            true_top_floor_constraint_loss=true_top_floor_constraint_loss,
+            true_top_floor_target=true_top_floor_target,
+            true_top_floor_support_value=true_top_floor_support_value,
+            true_top_floor_base_floor=true_top_floor_base_floor,
+            true_top_floor_support_gain=true_top_floor_support_gain,
+            true_top_floor_weak_positive_boost=true_top_floor_weak_positive_boost,
+            true_top_floor_weak_positive_eligible_fraction=(
+                true_top_floor_weak_positive_eligible_fraction
+            ),
+            true_top_floor_penalty_eligible_fraction=(
+                true_top_floor_penalty_eligible_fraction
+            ),
             hard_negative_top_teacher_suppression=(
                 hard_negative_top_teacher_suppression
             ),
@@ -4574,6 +4875,9 @@ class Trainer(LoggingMixin):
             ),
             hard_negative_top_teacher_moderate_band_boost=(
                 hard_negative_top_teacher_moderate_band_boost
+            ),
+            hard_negative_top_teacher_label_multiplier=(
+                hard_negative_top_teacher_label_multiplier
             ),
             hard_negative_top_teacher_weak_band_eligible_fraction=(
                 hard_negative_top_teacher_weak_band_eligible_fraction
@@ -5308,6 +5612,89 @@ class Trainer(LoggingMixin):
                     )
                     row["top_teacher_gap_min_eligible"] = bool(active)
         if (
+            self.cfg.true_top_floor_constraint.enabled
+            and output.class_top_branch_margin_features is not None
+        ):
+            true_top_cfg = self.cfg.true_top_floor_constraint
+            teacher_logits = output.class_top_branch_margin_features.detach()
+            if tuple(teacher_logits.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
+                true_top = teacher_logits.gather(
+                    1,
+                    label_indices.unsqueeze(1),
+                ).squeeze(1)
+                support_gap = self._top_branch_support_gap(
+                    output,
+                    labels,
+                    label_indices,
+                    loss_name="true_top_floor_constraint",
+                ).detach()
+                support_cap = self._class_values_tensor(
+                    self.cfg.true_top_floor_support_cap_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(true_top_cfg.support_cap),
+                )
+                support = torch.minimum(torch.relu(support_gap), support_cap)
+                base_floor = self._class_values_tensor(
+                    self.cfg.true_top_floor_base_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(true_top_cfg.base_floor),
+                )
+                support_gain = self._class_values_tensor(
+                    self.cfg.true_top_floor_support_gain_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(true_top_cfg.support_gain),
+                )
+                weak_boost, weak_eligible = self._weak_positive_boost_values(
+                    support_gap,
+                    true_top_cfg.weak_positive_boost,
+                    label_indices=label_indices,
+                    boost_by_class=self.cfg.true_top_floor_weak_boost_by_class,
+                    min_support_by_class=self.cfg.true_top_floor_weak_min_by_class,
+                    max_support_by_class=self.cfg.true_top_floor_weak_max_by_class,
+                )
+                target_floor = base_floor + (support_gain * support) + weak_boost
+                active = int(epoch) > int(true_top_cfg.warmup_epochs)
+                penalties = torch.relu(target_floor - true_top)
+                if not active:
+                    penalties = torch.zeros_like(penalties)
+                for index, row in enumerate(rows):
+                    row["true_top_floor_true_top"] = float(
+                        true_top[index].detach().cpu().item()
+                    )
+                    row["true_top_floor_target"] = float(
+                        target_floor[index].detach().cpu().item()
+                    )
+                    row["true_top_floor_support_value"] = float(
+                        support_gap[index].detach().cpu().item()
+                    )
+                    row["true_top_floor_base_floor"] = float(
+                        base_floor[index].detach().cpu().item()
+                    )
+                    row["true_top_floor_support_gain"] = float(
+                        support_gain[index].detach().cpu().item()
+                    )
+                    row["true_top_floor_weak_positive_boost"] = float(
+                        weak_boost[index].detach().cpu().item()
+                    )
+                    row["true_top_floor_weak_positive_eligible"] = bool(
+                        active and bool(weak_eligible[index].detach().cpu().item())
+                    )
+                    row["true_top_floor_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
+                    row["true_top_floor_eligible"] = bool(
+                        active and bool((penalties[index] > 0).detach().cpu().item())
+                    )
+        if (
             self.cfg.hard_negative_top_teacher_suppression.enabled
             and output.class_top_branch_margin_features is not None
         ):
@@ -5368,10 +5755,21 @@ class Trainer(LoggingMixin):
                 anchor_true_top = (
                     true_top.detach() if hard_neg_cfg.detach_true_top else true_top
                 )
-                penalties = torch.relu(negative_top - anchor_true_top + required_gap)
+                unweighted_penalties = torch.relu(
+                    negative_top - anchor_true_top + required_gap
+                )
+                label_multiplier = self._class_values_tensor(
+                    self.cfg.hard_negative_top_teacher_label_weight_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=1.0,
+                )
+                penalties = unweighted_penalties * label_multiplier
                 active = int(epoch) > int(hard_neg_cfg.warmup_epochs)
                 if not active:
                     penalties = torch.zeros_like(penalties)
+                    unweighted_penalties = torch.zeros_like(unweighted_penalties)
                 for index, row in enumerate(rows):
                     row["hard_negative_top_teacher_true_top"] = float(
                         true_top[index].detach().cpu().item()
@@ -5403,11 +5801,20 @@ class Trainer(LoggingMixin):
                     row["hard_negative_top_teacher_moderate_band_eligible"] = bool(
                         active and bool(moderate_eligible[index].detach().cpu().item())
                     )
+                    row["hard_negative_top_teacher_label_multiplier"] = float(
+                        label_multiplier[index].detach().cpu().item()
+                    )
                     row["hard_negative_top_teacher_penalty"] = float(
+                        unweighted_penalties[index].detach().cpu().item()
+                    )
+                    row["hard_negative_top_teacher_weighted_penalty"] = float(
                         penalties[index].detach().cpu().item()
                     )
                     row["hard_negative_top_teacher_eligible"] = bool(
-                        active and bool((penalties[index] > 0).detach().cpu().item())
+                        active
+                        and bool(
+                            (unweighted_penalties[index] > 0).detach().cpu().item()
+                        )
                     )
                     row["hard_negative_top_teacher_detach_true_top"] = bool(
                         hard_neg_cfg.detach_true_top
@@ -5493,6 +5900,49 @@ class Trainer(LoggingMixin):
                         row["class_evidence_margin_eligible"] = bool(
                             eligible[index].detach().cpu().item()
                         )
+        if (
+            self.cfg.calibrated_teacher_margin.enabled
+            and output.class_calibrated_top_teacher_features is not None
+        ):
+            teacher_cfg = self.cfg.calibrated_teacher_margin
+            teacher_logits = output.class_calibrated_top_teacher_features.detach()
+            if tuple(teacher_logits.shape) == (
+                int(labels.numel()),
+                int(branch_logits.shape[2]),
+            ):
+                teacher_gap, teacher_negative = self._true_vs_hardest_negative_gap(
+                    teacher_logits,
+                    label_indices,
+                )
+                effective_margin = self._class_values_tensor(
+                    self.cfg.calibrated_teacher_margin_by_class,
+                    label_indices,
+                    device=teacher_logits.device,
+                    dtype=teacher_logits.dtype,
+                    fallback=float(teacher_cfg.margin),
+                )
+                temperature = float(teacher_cfg.temperature)
+                active = int(epoch) > int(teacher_cfg.warmup_epochs)
+                penalties = temperature * F.softplus(
+                    (effective_margin - teacher_gap) / temperature
+                )
+                for index, row in enumerate(rows):
+                    row["calibrated_teacher_margin_gap"] = float(
+                        teacher_gap[index].detach().cpu().item()
+                    )
+                    row["calibrated_teacher_margin_negative_class"] = int(
+                        teacher_negative[index].detach().cpu().item()
+                    )
+                    row["calibrated_teacher_margin_effective_margin"] = float(
+                        effective_margin[index].detach().cpu().item()
+                    )
+                    row["calibrated_teacher_margin_penalty"] = float(
+                        penalties[index].detach().cpu().item()
+                    )
+                    row["calibrated_teacher_margin_temperature"] = float(
+                        teacher_cfg.temperature
+                    )
+                    row["calibrated_teacher_margin_eligible"] = bool(active)
         if (
             self.cfg.class_evidence_gap_cap_regularization.enabled
             and output.class_evidence_logits is not None
@@ -6663,6 +7113,10 @@ class Trainer(LoggingMixin):
             "class_gate_diversity_regularization": 0.0,
             "class_evidence_margin": 0.0,
             "class_evidence_margin_loss": 0.0,
+            "calibrated_teacher_margin": 0.0,
+            "calibrated_teacher_margin_loss": 0.0,
+            "calibrated_teacher_margin_gap": 0.0,
+            "calibrated_teacher_margin_effective_margin": 0.0,
             "class_evidence_gap_cap_regularization": 0.0,
             "class_evidence_gap_cap_regularization_loss": 0.0,
             "class_evidence_gap_cap_label_multiplier": 0.0,
@@ -6696,11 +7150,21 @@ class Trainer(LoggingMixin):
             "top_teacher_gap_min_weak_positive_target_boost": 0.0,
             "top_teacher_gap_min_base_min_gap": 0.0,
             "top_teacher_gap_min_support_gain": 0.0,
+            "true_top_floor_constraint": 0.0,
+            "true_top_floor_constraint_loss": 0.0,
+            "true_top_floor_target": 0.0,
+            "true_top_floor_support_value": 0.0,
+            "true_top_floor_base_floor": 0.0,
+            "true_top_floor_support_gain": 0.0,
+            "true_top_floor_weak_positive_boost": 0.0,
+            "true_top_floor_weak_positive_eligible_fraction": 0.0,
+            "true_top_floor_penalty_eligible_fraction": 0.0,
             "hard_negative_top_teacher_suppression": 0.0,
             "hard_negative_top_teacher_suppression_loss": 0.0,
             "hard_negative_top_teacher_required_gap": 0.0,
             "hard_negative_top_teacher_weak_band_boost": 0.0,
             "hard_negative_top_teacher_moderate_band_boost": 0.0,
+            "hard_negative_top_teacher_label_multiplier": 0.0,
             "hard_negative_top_teacher_weak_band_eligible_fraction": 0.0,
             "hard_negative_top_teacher_moderate_band_eligible_fraction": 0.0,
             "hard_negative_top_teacher_penalty_eligible_fraction": 0.0,
@@ -6835,6 +7299,18 @@ class Trainer(LoggingMixin):
                 "class_evidence_margin_loss": (
                     loss_components.class_evidence_margin_loss
                 ),
+                "calibrated_teacher_margin": (
+                    loss_components.calibrated_teacher_margin
+                ),
+                "calibrated_teacher_margin_loss": (
+                    loss_components.calibrated_teacher_margin_loss
+                ),
+                "calibrated_teacher_margin_gap": (
+                    loss_components.calibrated_teacher_margin_gap
+                ),
+                "calibrated_teacher_margin_effective_margin": (
+                    loss_components.calibrated_teacher_margin_effective_margin
+                ),
                 "class_evidence_gap_cap_regularization": (
                     loss_components.class_evidence_gap_cap_regularization
                 ),
@@ -6932,6 +7408,29 @@ class Trainer(LoggingMixin):
                 "top_teacher_gap_min_support_gain": (
                     loss_components.top_teacher_gap_min_support_gain
                 ),
+                "true_top_floor_constraint": (
+                    loss_components.true_top_floor_constraint
+                ),
+                "true_top_floor_constraint_loss": (
+                    loss_components.true_top_floor_constraint_loss
+                ),
+                "true_top_floor_target": loss_components.true_top_floor_target,
+                "true_top_floor_support_value": (
+                    loss_components.true_top_floor_support_value
+                ),
+                "true_top_floor_base_floor": loss_components.true_top_floor_base_floor,
+                "true_top_floor_support_gain": (
+                    loss_components.true_top_floor_support_gain
+                ),
+                "true_top_floor_weak_positive_boost": (
+                    loss_components.true_top_floor_weak_positive_boost
+                ),
+                "true_top_floor_weak_positive_eligible_fraction": (
+                    loss_components.true_top_floor_weak_positive_eligible_fraction
+                ),
+                "true_top_floor_penalty_eligible_fraction": (
+                    loss_components.true_top_floor_penalty_eligible_fraction
+                ),
                 "hard_negative_top_teacher_suppression": (
                     loss_components.hard_negative_top_teacher_suppression
                 ),
@@ -6946,6 +7445,9 @@ class Trainer(LoggingMixin):
                 ),
                 "hard_negative_top_teacher_moderate_band_boost": (
                     loss_components.hard_negative_top_teacher_moderate_band_boost
+                ),
+                "hard_negative_top_teacher_label_multiplier": (
+                    loss_components.hard_negative_top_teacher_label_multiplier
                 ),
                 "hard_negative_top_teacher_weak_band_eligible_fraction": (
                     loss_components.hard_negative_top_teacher_weak_band_eligible_fraction
@@ -7333,6 +7835,24 @@ class Trainer(LoggingMixin):
                         "class_evidence_margin_loss",
                         0.0,
                     ),
+                    "train_calibrated_teacher_margin": train_components.get(
+                        "calibrated_teacher_margin",
+                        0.0,
+                    ),
+                    "train_loss_calibrated_teacher_margin": train_components.get(
+                        "calibrated_teacher_margin_loss",
+                        0.0,
+                    ),
+                    "train_calibrated_teacher_margin_gap": train_components.get(
+                        "calibrated_teacher_margin_gap",
+                        0.0,
+                    ),
+                    "train_calibrated_teacher_margin_effective_margin": (
+                        train_components.get(
+                            "calibrated_teacher_margin_effective_margin",
+                            0.0,
+                        )
+                    ),
                     "train_class_evidence_gap_cap_regularization": (
                         train_components.get(
                             "class_evidence_gap_cap_regularization",
@@ -7511,6 +8031,46 @@ class Trainer(LoggingMixin):
                         "top_teacher_gap_min_support_gain",
                         0.0,
                     ),
+                    "train_true_top_floor_constraint": train_components.get(
+                        "true_top_floor_constraint",
+                        0.0,
+                    ),
+                    "train_loss_true_top_floor_constraint": train_components.get(
+                        "true_top_floor_constraint_loss",
+                        0.0,
+                    ),
+                    "train_true_top_floor_target": train_components.get(
+                        "true_top_floor_target",
+                        0.0,
+                    ),
+                    "train_true_top_floor_support_value": train_components.get(
+                        "true_top_floor_support_value",
+                        0.0,
+                    ),
+                    "train_true_top_floor_base_floor": train_components.get(
+                        "true_top_floor_base_floor",
+                        0.0,
+                    ),
+                    "train_true_top_floor_support_gain": train_components.get(
+                        "true_top_floor_support_gain",
+                        0.0,
+                    ),
+                    "train_true_top_floor_weak_positive_boost": train_components.get(
+                        "true_top_floor_weak_positive_boost",
+                        0.0,
+                    ),
+                    "train_true_top_floor_weak_positive_eligible_fraction": (
+                        train_components.get(
+                            "true_top_floor_weak_positive_eligible_fraction",
+                            0.0,
+                        )
+                    ),
+                    "train_true_top_floor_penalty_eligible_fraction": (
+                        train_components.get(
+                            "true_top_floor_penalty_eligible_fraction",
+                            0.0,
+                        )
+                    ),
                     "train_hard_negative_top_teacher_suppression": (
                         train_components.get(
                             "hard_negative_top_teacher_suppression",
@@ -7538,6 +8098,12 @@ class Trainer(LoggingMixin):
                     "train_hard_negative_top_teacher_moderate_band_boost": (
                         train_components.get(
                             "hard_negative_top_teacher_moderate_band_boost",
+                            0.0,
+                        )
+                    ),
+                    "train_hard_negative_top_teacher_label_multiplier": (
+                        train_components.get(
+                            "hard_negative_top_teacher_label_multiplier",
                             0.0,
                         )
                     ),
@@ -7857,6 +8423,24 @@ class Trainer(LoggingMixin):
                         "class_evidence_margin_loss",
                         0.0,
                     ),
+                    "val_calibrated_teacher_margin": val_components.get(
+                        "calibrated_teacher_margin",
+                        0.0,
+                    ),
+                    "val_loss_calibrated_teacher_margin": val_components.get(
+                        "calibrated_teacher_margin_loss",
+                        0.0,
+                    ),
+                    "val_calibrated_teacher_margin_gap": val_components.get(
+                        "calibrated_teacher_margin_gap",
+                        0.0,
+                    ),
+                    "val_calibrated_teacher_margin_effective_margin": (
+                        val_components.get(
+                            "calibrated_teacher_margin_effective_margin",
+                            0.0,
+                        )
+                    ),
                     "val_class_evidence_gap_cap_regularization": val_components.get(
                         "class_evidence_gap_cap_regularization",
                         0.0,
@@ -8029,6 +8613,46 @@ class Trainer(LoggingMixin):
                         "top_teacher_gap_min_support_gain",
                         0.0,
                     ),
+                    "val_true_top_floor_constraint": val_components.get(
+                        "true_top_floor_constraint",
+                        0.0,
+                    ),
+                    "val_loss_true_top_floor_constraint": val_components.get(
+                        "true_top_floor_constraint_loss",
+                        0.0,
+                    ),
+                    "val_true_top_floor_target": val_components.get(
+                        "true_top_floor_target",
+                        0.0,
+                    ),
+                    "val_true_top_floor_support_value": val_components.get(
+                        "true_top_floor_support_value",
+                        0.0,
+                    ),
+                    "val_true_top_floor_base_floor": val_components.get(
+                        "true_top_floor_base_floor",
+                        0.0,
+                    ),
+                    "val_true_top_floor_support_gain": val_components.get(
+                        "true_top_floor_support_gain",
+                        0.0,
+                    ),
+                    "val_true_top_floor_weak_positive_boost": val_components.get(
+                        "true_top_floor_weak_positive_boost",
+                        0.0,
+                    ),
+                    "val_true_top_floor_weak_positive_eligible_fraction": (
+                        val_components.get(
+                            "true_top_floor_weak_positive_eligible_fraction",
+                            0.0,
+                        )
+                    ),
+                    "val_true_top_floor_penalty_eligible_fraction": (
+                        val_components.get(
+                            "true_top_floor_penalty_eligible_fraction",
+                            0.0,
+                        )
+                    ),
                     "val_hard_negative_top_teacher_suppression": val_components.get(
                         "hard_negative_top_teacher_suppression",
                         0.0,
@@ -8052,6 +8676,12 @@ class Trainer(LoggingMixin):
                     "val_hard_negative_top_teacher_moderate_band_boost": (
                         val_components.get(
                             "hard_negative_top_teacher_moderate_band_boost",
+                            0.0,
+                        )
+                    ),
+                    "val_hard_negative_top_teacher_label_multiplier": (
+                        val_components.get(
+                            "hard_negative_top_teacher_label_multiplier",
                             0.0,
                         )
                     ),

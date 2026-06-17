@@ -1681,3 +1681,178 @@ Airway hard FN은 weak-positive support band뿐 아니라 그보다 약간 큰 s
 - `hard_negative_top_teacher_penalty`가 후반으로 갈수록 감소하고, 동시에 `class_top_branch_relative_gap`이 음수로 무너지는 비율이 줄어드는가?
 - downstream chain인 `top_support_score_gap -> branch_support_score_gap -> class_evidence_gap -> final_gap`이 teacher-front 개선을 실제로 따라가는가?
 - final combiner는 계속 `final_gap ~= class_evidence_gap`인지 확인한다. 이 조건이 유지되면 병목은 final path가 아니라 teacher/support/evidence path다.
+
+## CNUH_DISEASE_VER21 -> CNUH_DISEASE_VER22
+
+### Date
+
+2026-06-16
+
+### Motivation
+
+`VER21` 중간 결과에서는 `hard_negative_top_teacher_suppression`이 hard negative 문제를 감지했지만, `detach_true_top=true` 구조 때문에 true Airway top teacher를 직접 올리지 못하는 한계가 있었다. 즉 hardest negative를 낮추는 힘과 true top을 올리는 힘을 분리할 필요가 생겼다.
+
+`VER22`는 model capacity, final combiner, residual path는 유지하고 teacher-front loss만 조정한다. 핵심은 `true_top_floor_constraint`로 true class top teacher를 직접 올리고, 기존 hard-negative loss는 Airway hard-negative lowering 전담으로 좁히는 것이다.
+
+### Changes
+
+#### 1. `true_top_floor_constraint` 추가
+
+새 loss는 `class_top_branch_margin_features[y]` 자체가 support-conditioned floor 이상이 되도록 요구한다.
+
+```text
+true_top = class_top_branch_margin_features[y]
+support = detach(top_branch_margin_value[y])
+target_floor =
+  base_floor[label]
+  + support_gain[label] * clamp(relu(support), 0, support_cap)
+  + weak_positive_boost[label] * I(label-specific weak-positive band)
+loss = relu(target_floor - true_top)
+```
+
+Airway 기본값은 `base_floor=0.4`, `support_gain=1.0`, weak-positive boost `0.8`이며 weak-positive band는 기존처럼 `0.2 <= support <= 1.2`로 둔다. `true_top`은 detach하지 않으므로 이 loss는 true class top teacher를 직접 올리는 역할을 맡는다.
+
+#### 2. `hard_negative_top_teacher_suppression` Airway 중심화
+
+기존 hard-negative suppression은 유지하되 label multiplier를 추가한다.
+
+```json
+"label_weight_by_label": {
+  "Normal": 0.25,
+  "Lung_Parenchymal": 0.25,
+  "Airway": 1.0
+}
+```
+
+Normal/Lung weak-positive boost는 `0.0`으로 낮추고, Airway weak/moderate band boost는 유지한다. 이 loss는 `detach_true_top=true`를 유지하므로 hard negative lowering 전담으로 해석한다.
+
+### Config Names
+
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER22`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver38`
+
+### Diagnostics Checkpoints
+
+`VER22` 분석에서는 다음을 확인한다.
+
+- Airway weak-positive sample에서 `true_top_floor_target`이 `base_floor + support_gain * support + weak_positive_boost`를 반영하는가?
+- `true_top_floor_penalty`가 후반으로 갈수록 감소하면서 `hard_negative_top_teacher_penalty`만 낮아지는 것이 아니라 `hard_negative_top_teacher_true_top`도 실제로 올라가는가?
+- `hard_negative_top_teacher_label_multiplier`와 `hard_negative_top_teacher_weighted_penalty`가 Airway 중심으로 적용되는가?
+- `class_top_branch_relative_gap -> top_support_score_gap -> branch_support_score_gap -> class_evidence_gap -> final_gap` chain이 teacher-front 개선을 따라 회복되는가?
+- final combiner는 계속 `final_gap ~= class_evidence_gap`인지 확인한다.
+
+## CNUH_DISEASE_VER22 -> CNUH_DISEASE_VER23
+
+### Date
+
+2026-06-17
+
+### Motivation
+
+`VER22`까지의 반복된 분석에서는 hard sample 병목이 final combiner나 model capacity보다 raw teacher-front에 집중되어 있었다. 구체적으로 `max_r` 기반 `class_top_branch_margin_features`는 true class top과 hard negative class top을 독립적으로 크게 만들 수 있고, class-relative competition은 후단 loss가 사후 보정하는 구조였다.
+
+`VER23`은 이 구조를 유지하면서 loss를 더 추가하는 대신, raw `class_top_branch_margin_features`를 primary teacher에서 제거하고 learnable class-axis calibrated teacher로 교체한다. 또한 raw teacher-front를 보상하던 다수의 loss를 끄고, 새 teacher를 직접 학습하는 `calibrated_teacher_margin` 중심으로 loss stack을 정리한다.
+
+### Changes
+
+#### 1. Learnable calibrated teacher module 추가
+
+새 `teacher_calibration` module은 `branch_margin_matrix [B, R, C]`에서 class별 summary feature `[B, C, 6]`를 만든다.
+
+```text
+teacher_summary_features[c] =
+  [top_margin, mean_margin, gated_margin, spread,
+   hard_negative_margin, raw_relative_gap]
+```
+
+이 summary를 `LayerNorm(6) -> Linear(6, 256) -> GELU -> Dropout -> class-axis TransformerEncoder -> LayerNorm -> Linear(256, 1)`에 통과시켜 `class_calibrated_top_teacher_features [B, C]`를 만든다. `logit_centering=true`이면 class axis 평균을 빼서 calibrated teacher가 shared offset보다 class competition을 표현하게 한다.
+
+#### 2. Primary teacher source 교체
+
+`top_support_direct_path`, evidence scorer branch feature slot 2/3, residual gate input은 이제 raw top teacher 대신 다음 calibrated fields를 사용한다.
+
+```text
+class_calibrated_top_teacher_features
+class_calibrated_top_teacher_relative_features
+```
+
+`class_top_branch_margin_features`와 `class_top_branch_margin_relative_features`는 legacy diagnostics/reference로 남길 수 있지만, `VER23`의 source of truth는 calibrated teacher다.
+
+#### 3. `calibrated_teacher_margin` 추가
+
+새 primary teacher supervision은 calibrated teacher gap에 직접 걸린다.
+
+```text
+teacher_gap =
+  class_calibrated_top_teacher_features[y]
+  - max(class_calibrated_top_teacher_features[j != y])
+
+loss =
+  temperature * softplus((margin[label] - teacher_gap) / temperature)
+```
+
+Disease config의 첫 실험값은 `Normal=0.3`, `Lung_Parenchymal=0.3`, `Airway=0.6`이다.
+
+#### 4. Loss stack 정리
+
+다음 loss는 raw teacher-front 보정 또는 과도한 보조 regularization 성격이므로 `VER23` config에서 비활성화한다.
+
+```text
+class_top_branch_relative_margin
+top_teacher_gap_min_constraint
+true_top_floor_constraint
+hard_negative_top_teacher_suppression
+top_support_gap_min_constraint
+branch_direct_score_margin
+branch_support_score_margin
+branch_support_disagreement_cap_regularization
+branch_to_evidence_ranking_consistency
+class_evidence_gap_cap_regularization
+class_evidence_positive_gap_cap_regularization
+interaction_gap_cap_regularization
+gate_weighted_branch_margin
+gate_best_branch_alignment
+```
+
+유지하는 핵심 loss는 다음이다.
+
+```text
+top_branch_margin
+calibrated_teacher_margin
+top_support_score_margin
+branch_path_dominance_constraint
+class_evidence_margin
+gate_branch_regret
+gate_bad_branch_suppression
+global_residual_anti_veto
+```
+
+### Config Names
+
+- `configs/training_CNUH_disease_3classes.json`
+  - `experiment.name=CNUH_DISEASE_VER23`
+- `configs/training_CNUH_new_test_CNUH_3classes.json`
+  - `experiment.name=new_test_CNUH_3classes_ver39`
+
+### Diagnostics Checkpoints
+
+`VER23` 분석에서는 raw teacher-front chain 대신 다음 calibrated chain을 primary로 본다.
+
+```text
+branch_margin_matrix
+-> class_calibrated_top_teacher_gap
+-> class_evidence_top_support_score_gap
+-> class_evidence_branch_direct_score_gap
+-> class_evidence_branch_support_score_gap
+-> class_evidence_total_gap
+-> final_gap
+```
+
+확인할 질문은 다음이다.
+
+- `class_calibrated_top_teacher_gap`이 Airway hard sample에서 raw teacher-front collapse를 줄이는가?
+- calibrated teacher gap이 양수인데 `top_support_score_gap`이 음수라면, top-support direct path가 새 병목인가?
+- branch support gap은 양수인데 `class_evidence_total_gap`이 음수라면, embedding/interaction path가 branch path를 뒤집는가?
+- final combiner는 계속 `final_gap ~= class_evidence_total_gap`인지 확인한다. 이 조건이 유지되면 final path는 주 병목이 아니다.

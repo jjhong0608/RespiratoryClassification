@@ -53,6 +53,7 @@ from src.utils.config import (
     BranchSupportDisagreementCapRegularizationConfig,
     BranchSupportScoreMarginConfig,
     BranchToEvidenceRankingConsistencyConfig,
+    CalibratedTeacherMarginConfig,
     CheckpointingConfig,
     CheckpointMonitorConfig,
     ClassEvidenceGapCapRegularizationConfig,
@@ -93,6 +94,7 @@ from src.utils.config import (
     TopSupportGapMinConstraintConfig,
     TopSupportScoreMarginConfig,
     TopTeacherGapMinConstraintConfig,
+    TrueTopFloorConstraintConfig,
     WeakPositiveMarginBoostConfig,
     WeakPositiveSupportWeightingConfig,
     WeakPositiveTargetBoostConfig,
@@ -296,6 +298,13 @@ def _trainer_cfg(
     ] = "mean",
     class_evidence_margin_temperature: float = 1.0,
     class_evidence_margin_support_weighting: MarginSupportWeightingConfig | None = None,
+    calibrated_teacher_margin_enabled: bool = False,
+    calibrated_teacher_margin_weight: float = 0.0,
+    calibrated_teacher_margin_temperature: float = 1.0,
+    calibrated_teacher_margin_value: float = 0.3,
+    calibrated_teacher_margin_by_class: tuple[float, ...] | None = None,
+    calibrated_teacher_margin_class_weighted: bool = False,
+    calibrated_teacher_margin_warmup_epochs: int = 0,
     class_evidence_gap_cap_enabled: bool = False,
     class_evidence_gap_cap_weight: float = 0.0,
     class_evidence_gap_cap_negative_gap_cap: float = 3.0,
@@ -387,6 +396,20 @@ def _trainer_cfg(
     top_teacher_gap_min_weak_positive_target_boost: (
         WeakPositiveTargetBoostConfig | None
     ) = None,
+    true_top_floor_enabled: bool = False,
+    true_top_floor_weight: float = 0.0,
+    true_top_floor_base_floor: float = 0.0,
+    true_top_floor_support_gain: float = 0.25,
+    true_top_floor_support_cap: float = 2.0,
+    true_top_floor_base_by_class: tuple[float, ...] | None = None,
+    true_top_floor_support_gain_by_class: tuple[float, ...] | None = None,
+    true_top_floor_support_cap_by_class: tuple[float, ...] | None = None,
+    true_top_floor_weak_boost_by_class: tuple[float, ...] | None = None,
+    true_top_floor_weak_min_by_class: tuple[float, ...] | None = None,
+    true_top_floor_weak_max_by_class: tuple[float, ...] | None = None,
+    true_top_floor_class_weighted: bool = False,
+    true_top_floor_warmup_epochs: int = 0,
+    true_top_floor_weak_positive_boost: WeakPositiveTargetBoostConfig | None = None,
     hard_negative_top_teacher_enabled: bool = False,
     hard_negative_top_teacher_weight: float = 0.0,
     hard_negative_top_teacher_base_required_gap: float = 0.1,
@@ -407,6 +430,7 @@ def _trainer_cfg(
     ) = None,
     hard_negative_top_teacher_moderate_min_by_class: tuple[float, ...] | None = None,
     hard_negative_top_teacher_moderate_max_by_class: tuple[float, ...] | None = None,
+    hard_negative_top_teacher_label_weight_by_class: tuple[float, ...] | None = None,
     hard_negative_top_teacher_detach_true_top: bool = True,
     hard_negative_top_teacher_class_weighted: bool = False,
     hard_negative_top_teacher_warmup_epochs: int = 0,
@@ -669,6 +693,18 @@ def _trainer_cfg(
             ),
         ),
         class_evidence_margin_major_index=class_evidence_margin_major_index,
+        calibrated_teacher_margin=CalibratedTeacherMarginConfig(
+            enabled=calibrated_teacher_margin_enabled,
+            weight=calibrated_teacher_margin_weight,
+            target="class_calibrated_top_teacher_features",
+            mode="softplus_margin_true_vs_hardest_negative",
+            temperature=calibrated_teacher_margin_temperature,
+            margin=calibrated_teacher_margin_value,
+            class_weighted=calibrated_teacher_margin_class_weighted,
+            reduction="mean",
+            warmup_epochs=calibrated_teacher_margin_warmup_epochs,
+        ),
+        calibrated_teacher_margin_by_class=calibrated_teacher_margin_by_class,
         class_evidence_gap_cap_regularization=(
             ClassEvidenceGapCapRegularizationConfig(
                 enabled=class_evidence_gap_cap_enabled,
@@ -838,6 +874,28 @@ def _trainer_cfg(
         top_teacher_gap_min_target_boost_max_by_class=(
             top_teacher_gap_min_target_boost_max_by_class
         ),
+        true_top_floor_constraint=TrueTopFloorConstraintConfig(
+            enabled=true_top_floor_enabled,
+            weight=true_top_floor_weight,
+            target="class_top_branch_margin_features",
+            mode="support_conditioned_true_top_floor",
+            support_source="top_branch_margin",
+            base_floor=true_top_floor_base_floor,
+            support_gain=true_top_floor_support_gain,
+            support_cap=true_top_floor_support_cap,
+            weak_positive_boost=(
+                true_top_floor_weak_positive_boost or WeakPositiveTargetBoostConfig()
+            ),
+            class_weighted=true_top_floor_class_weighted,
+            reduction="mean",
+            warmup_epochs=true_top_floor_warmup_epochs,
+        ),
+        true_top_floor_base_by_class=true_top_floor_base_by_class,
+        true_top_floor_support_gain_by_class=true_top_floor_support_gain_by_class,
+        true_top_floor_support_cap_by_class=true_top_floor_support_cap_by_class,
+        true_top_floor_weak_boost_by_class=true_top_floor_weak_boost_by_class,
+        true_top_floor_weak_min_by_class=true_top_floor_weak_min_by_class,
+        true_top_floor_weak_max_by_class=true_top_floor_weak_max_by_class,
         hard_negative_top_teacher_suppression=(
             HardNegativeTopTeacherSuppressionConfig(
                 enabled=hard_negative_top_teacher_enabled,
@@ -880,6 +938,9 @@ def _trainer_cfg(
         ),
         hard_negative_top_teacher_moderate_max_by_class=(
             hard_negative_top_teacher_moderate_max_by_class
+        ),
+        hard_negative_top_teacher_label_weight_by_class=(
+            hard_negative_top_teacher_label_weight_by_class
         ),
         branch_support_score_margin=BranchSupportScoreMarginConfig(
             enabled=branch_support_score_margin_enabled,
@@ -2430,6 +2491,64 @@ def test_trainer_class_evidence_margin_softplus_true_vs_hardest_negative() -> No
     assert torch.isclose(weighted_margin, 0.05 * expected_raw)
 
 
+def test_trainer_calibrated_teacher_margin_softplus_margin() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.5, 2.0, 0.5),
+            calibrated_teacher_margin_enabled=True,
+            calibrated_teacher_margin_weight=0.1,
+            calibrated_teacher_margin_temperature=1.0,
+            calibrated_teacher_margin_value=0.3,
+            calibrated_teacher_margin_by_class=(0.3, 0.4, 0.6),
+            calibrated_teacher_margin_class_weighted=True,
+            calibrated_teacher_margin_warmup_epochs=10,
+        )
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        class_calibrated_top_teacher_features=torch.tensor(
+            [[1.0, 0.4, 1.3], [0.2, 0.9, 0.6]],
+            dtype=torch.float32,
+        ),
+    )
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    (
+        raw_warmup,
+        weighted_warmup,
+        gap_warmup,
+        margin_warmup,
+    ) = trainer._compute_calibrated_teacher_margin_loss(
+        output,
+        labels,
+        epoch=10,
+    )
+    raw_margin, weighted_margin, gap_mean, margin_mean = (
+        trainer._compute_calibrated_teacher_margin_loss(
+            output,
+            labels,
+            epoch=11,
+        )
+    )
+
+    gaps = torch.tensor([-0.3, 0.3], dtype=torch.float32)
+    margins = torch.tensor([0.3, 0.4], dtype=torch.float32)
+    penalties = F.softplus(margins - gaps)
+    expected_raw = torch.mean(penalties * torch.tensor([1.5, 2.0]))
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(gap_warmup, torch.tensor(0.0))
+    assert torch.isclose(margin_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_margin, expected_raw)
+    assert torch.isclose(weighted_margin, 0.1 * expected_raw)
+    assert torch.isclose(gap_mean, gaps.mean())
+    assert torch.isclose(margin_mean, margins.mean())
+
+
 def test_trainer_branch_support_score_margin_softplus_true_vs_hardest_negative() -> (
     None
 ):
@@ -3038,6 +3157,110 @@ def test_trainer_top_teacher_gap_min_constraint_is_support_conditioned() -> None
     assert torch.isclose(support_gain_mean, torch.tensor(0.75))
 
 
+def test_trainer_true_top_floor_constraint_raises_true_top() -> None:
+    trainer = Trainer(
+        _trainer_cfg(
+            num_classes=3,
+            run_dir=Path("unused"),
+            loss_type="cross_entropy",
+            class_weights=(1.5, 2.0, 0.5),
+            true_top_floor_enabled=True,
+            true_top_floor_weight=0.05,
+            true_top_floor_base_floor=0.0,
+            true_top_floor_base_by_class=(0.0, 0.0, 0.4),
+            true_top_floor_support_gain=0.25,
+            true_top_floor_support_gain_by_class=(0.25, 0.25, 1.0),
+            true_top_floor_support_cap=2.0,
+            true_top_floor_class_weighted=True,
+            true_top_floor_warmup_epochs=10,
+            true_top_floor_weak_positive_boost=WeakPositiveTargetBoostConfig(
+                enabled=True,
+                min_support=0.2,
+                max_support=1.0,
+                boost=0.0,
+            ),
+            true_top_floor_weak_boost_by_class=(0.0, 0.0, 0.8),
+            true_top_floor_weak_max_by_class=(1.0, 1.0, 1.2),
+        )
+    )
+    teacher_logits = torch.tensor(
+        [[0.4, 0.7, 0.5], [0.3, 0.2, 0.1]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    branch_logits = torch.tensor(
+        [
+            [[0.0, 0.2, 1.0]],
+            [[1.2, 0.0, 0.1]],
+        ],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    output = AstModelOutput(
+        logits=torch.zeros(2, 3, dtype=torch.float32),
+        pooled_embedding=torch.zeros(2, 32),
+        branch_logits=branch_logits,
+        class_top_branch_margin_features=teacher_logits,
+    )
+    labels = torch.tensor([2, 0], dtype=torch.long)
+
+    (
+        raw_warmup,
+        weighted_warmup,
+        target_warmup,
+        support_warmup,
+        base_warmup,
+        gain_warmup,
+        boost_warmup,
+        weak_eligible_warmup,
+        penalty_eligible_warmup,
+    ) = trainer._compute_true_top_floor_constraint_loss(output, labels, epoch=10)
+    (
+        raw_loss,
+        weighted_loss,
+        target_mean,
+        support_mean,
+        base_mean,
+        gain_mean,
+        boost_mean,
+        weak_eligible_mean,
+        penalty_eligible_mean,
+    ) = trainer._compute_true_top_floor_constraint_loss(output, labels, epoch=11)
+
+    targets = torch.tensor([2.0, 0.275], dtype=torch.float32)
+    true_top = torch.tensor([0.5, 0.3], dtype=torch.float32)
+    penalties = torch.relu(targets - true_top)
+    class_weights = torch.tensor([0.5, 1.5], dtype=torch.float32)
+    expected_raw = torch.mean(penalties * class_weights)
+
+    assert torch.isclose(raw_warmup, torch.tensor(0.0))
+    assert torch.isclose(weighted_warmup, torch.tensor(0.0))
+    assert torch.isclose(target_warmup, torch.tensor(0.0))
+    assert torch.isclose(support_warmup, torch.tensor(0.0))
+    assert torch.isclose(base_warmup, torch.tensor(0.0))
+    assert torch.isclose(gain_warmup, torch.tensor(0.0))
+    assert torch.isclose(boost_warmup, torch.tensor(0.0))
+    assert torch.isclose(weak_eligible_warmup, torch.tensor(0.0))
+    assert torch.isclose(penalty_eligible_warmup, torch.tensor(0.0))
+    assert torch.isclose(raw_loss, expected_raw)
+    assert torch.isclose(weighted_loss, 0.05 * expected_raw)
+    assert torch.isclose(target_mean, targets.mean())
+    assert torch.isclose(support_mean, torch.tensor(0.95))
+    assert torch.isclose(base_mean, torch.tensor(0.2))
+    assert torch.isclose(gain_mean, torch.tensor(0.625))
+    assert torch.isclose(boost_mean, torch.tensor(0.4))
+    assert torch.isclose(weak_eligible_mean, torch.tensor(0.5))
+    assert torch.isclose(penalty_eligible_mean, torch.tensor(0.5))
+
+    weighted_loss.backward()
+    assert teacher_logits.grad is not None
+    assert teacher_logits.grad[0, 2] < 0
+    assert teacher_logits.grad[0, 0] == pytest.approx(0.0)
+    assert teacher_logits.grad[0, 1] == pytest.approx(0.0)
+    assert teacher_logits.grad[1].abs().sum().item() == pytest.approx(0.0)
+    assert branch_logits.grad is None
+
+
 def test_trainer_hard_negative_top_teacher_suppression_uses_band_boosts() -> None:
     trainer = Trainer(
         _trainer_cfg(
@@ -3068,6 +3291,7 @@ def test_trainer_hard_negative_top_teacher_suppression_uses_band_boosts() -> Non
                 )
             ),
             hard_negative_top_teacher_moderate_boost_by_class=(0.0, 0.0, 0.2),
+            hard_negative_top_teacher_label_weight_by_class=(0.25, 0.25, 1.0),
             hard_negative_top_teacher_class_weighted=True,
             hard_negative_top_teacher_warmup_epochs=10,
         )
@@ -3100,6 +3324,7 @@ def test_trainer_hard_negative_top_teacher_suppression_uses_band_boosts() -> Non
         required_warmup,
         weak_boost_warmup,
         moderate_boost_warmup,
+        label_multiplier_warmup,
         weak_eligible_warmup,
         moderate_eligible_warmup,
         penalty_eligible_warmup,
@@ -3114,6 +3339,7 @@ def test_trainer_hard_negative_top_teacher_suppression_uses_band_boosts() -> Non
         required_gap_mean,
         weak_boost_mean,
         moderate_boost_mean,
+        label_multiplier_mean,
         weak_eligible_mean,
         moderate_eligible_mean,
         penalty_eligible_mean,
@@ -3125,13 +3351,15 @@ def test_trainer_hard_negative_top_teacher_suppression_uses_band_boosts() -> Non
 
     required_gaps = torch.tensor([0.2, 0.5, 0.3], dtype=torch.float32)
     penalties = torch.tensor([0.6, 1.0, 0.0], dtype=torch.float32)
+    label_multipliers = torch.tensor([0.25, 1.0, 1.0], dtype=torch.float32)
     class_weights = torch.tensor([1.5, 0.5, 0.5], dtype=torch.float32)
-    expected_raw = torch.mean(penalties * class_weights)
+    expected_raw = torch.mean(penalties * label_multipliers * class_weights)
     assert torch.isclose(raw_warmup, torch.tensor(0.0))
     assert torch.isclose(weighted_warmup, torch.tensor(0.0))
     assert torch.isclose(required_warmup, torch.tensor(0.0))
     assert torch.isclose(weak_boost_warmup, torch.tensor(0.0))
     assert torch.isclose(moderate_boost_warmup, torch.tensor(0.0))
+    assert torch.isclose(label_multiplier_warmup, torch.tensor(0.0))
     assert torch.isclose(weak_eligible_warmup, torch.tensor(0.0))
     assert torch.isclose(moderate_eligible_warmup, torch.tensor(0.0))
     assert torch.isclose(penalty_eligible_warmup, torch.tensor(0.0))
@@ -3140,6 +3368,7 @@ def test_trainer_hard_negative_top_teacher_suppression_uses_band_boosts() -> Non
     assert torch.isclose(required_gap_mean, required_gaps.mean())
     assert torch.isclose(weak_boost_mean, torch.tensor(0.1 / 3.0))
     assert torch.isclose(moderate_boost_mean, torch.tensor(0.2 / 3.0))
+    assert torch.isclose(label_multiplier_mean, label_multipliers.mean())
     assert torch.isclose(weak_eligible_mean, torch.tensor(1.0 / 3.0))
     assert torch.isclose(moderate_eligible_mean, torch.tensor(1.0 / 3.0))
     assert torch.isclose(penalty_eligible_mean, torch.tensor(2.0 / 3.0))

@@ -27,6 +27,7 @@ from src.models.model import (
     ClassGateReliabilityMixtureConfig,
     ClassGateResidualConfidenceAwareGateConfig,
     ClassGateScoreDecompositionConfig,
+    ClassGateTeacherCalibrationConfig,
     ClassGateTopRelativeCorrectionConfig,
     ClassGateTopSupportDirectPathConfig,
     ClassGateTopSupportNegativeRelativeCapConfig,
@@ -1094,6 +1095,15 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
                                 temperature=2.0,
                             )
                         ),
+                        teacher_calibration=ClassGateTeacherCalibrationConfig(
+                            enabled=True,
+                            hidden_size=16,
+                            num_attention_heads=4,
+                            num_attention_layers=1,
+                            dropout=0.0,
+                            use_class_embedding=True,
+                            logit_centering=True,
+                        ),
                     ),
                     global_residual=ClassGateGlobalResidualConfig(
                         enabled=True,
@@ -1129,6 +1139,38 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
     output = model(torch.randn(2, 32, 32))
 
     assert output.class_evidence_logits is not None
+    assert output.class_calibrated_top_teacher_features is not None
+    assert output.class_calibrated_top_teacher_features.shape == (2, 3)
+    assert output.class_calibrated_top_teacher_relative_features is not None
+    assert output.class_calibrated_top_teacher_relative_features.shape == (2, 3)
+    assert output.class_teacher_calibration_summary_features is not None
+    assert output.class_teacher_calibration_summary_features.shape == (2, 3, 6)
+    assert output.class_teacher_calibration_feature_names == (
+        "top_margin",
+        "mean_margin",
+        "gated_margin",
+        "spread",
+        "hard_negative_margin",
+        "raw_relative_gap",
+    )
+    expected_calibrated_relative = []
+    calibrated_teacher = output.class_calibrated_top_teacher_features
+    for class_index in range(calibrated_teacher.shape[1]):
+        negative_mask = torch.ones(
+            calibrated_teacher.shape[1],
+            dtype=torch.bool,
+            device=calibrated_teacher.device,
+        )
+        negative_mask[class_index] = False
+        expected_calibrated_relative.append(
+            calibrated_teacher[:, class_index]
+            - calibrated_teacher[:, negative_mask].max(dim=1).values
+        )
+    assert torch.allclose(
+        output.class_calibrated_top_teacher_relative_features,
+        torch.stack(expected_calibrated_relative, dim=1),
+        atol=1e-5,
+    )
     assert output.class_evidence_embedding_scores is not None
     assert output.class_evidence_direct_top_scores is not None
     assert output.class_evidence_top_support_residual_scores is not None
@@ -1286,6 +1328,14 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
     assert output.class_evidence_scorer_branch_features is not None
     assert output.class_evidence_scorer_branch_raw_features.shape == (2, 3, 4)
     assert output.class_evidence_scorer_branch_features.shape == (2, 3, 4)
+    assert torch.allclose(
+        output.class_evidence_scorer_branch_raw_features[..., 2],
+        output.class_calibrated_top_teacher_features,
+    )
+    assert torch.allclose(
+        output.class_evidence_scorer_branch_raw_features[..., 3],
+        output.class_calibrated_top_teacher_relative_features,
+    )
     assert output.class_gated_branch_logit_features is not None
     assert output.class_top_branch_margin_features is not None
     assert output.class_gated_branch_logit_relative_features is not None
@@ -1300,8 +1350,8 @@ def test_class_aware_model_scores_evidence_with_class_axis_attention_and_gated_r
         [
             output.class_gated_branch_logit_features,
             expected_gated_relative,
-            output.class_top_branch_margin_features,
-            expected_top_relative,
+            output.class_calibrated_top_teacher_features,
+            output.class_calibrated_top_teacher_relative_features,
         ],
         dim=-1,
     )

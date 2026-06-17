@@ -298,6 +298,11 @@ def main() -> None:
                 key=lambda item: item[1],
             )
         )
+        calibrated_teacher_margin_by_class = resolve_label_float_overrides(
+            default=cfg.train.loss.calibrated_teacher_margin.margin,
+            overrides=cfg.train.loss.calibrated_teacher_margin.margin_by_label,
+            label_to_index=cfg.data.label_to_index,
+        )
         top_branch_margin_by_class = resolve_label_float_overrides(
             default=cfg.train.loss.top_branch_margin.margin,
             overrides=cfg.train.loss.top_branch_margin.margin_by_label,
@@ -439,12 +444,61 @@ def main() -> None:
             },
             label_to_index=cfg.data.label_to_index,
         )
+        true_top_floor_base_by_class = resolve_label_float_overrides(
+            default=cfg.train.loss.true_top_floor_constraint.base_floor,
+            overrides=cfg.train.loss.true_top_floor_constraint.base_floor_by_label,
+            label_to_index=cfg.data.label_to_index,
+        )
+        true_top_floor_support_gain_by_class = resolve_label_float_overrides(
+            default=cfg.train.loss.true_top_floor_constraint.support_gain,
+            overrides=cfg.train.loss.true_top_floor_constraint.support_gain_by_label,
+            label_to_index=cfg.data.label_to_index,
+        )
+        true_top_floor_support_cap_by_class = resolve_label_float_overrides(
+            default=cfg.train.loss.true_top_floor_constraint.support_cap,
+            overrides=cfg.train.loss.true_top_floor_constraint.support_cap_by_label,
+            label_to_index=cfg.data.label_to_index,
+        )
+        true_top_floor_weak_boost_by_class = resolve_label_float_overrides(
+            default=cfg.train.loss.true_top_floor_constraint.weak_positive_boost.boost,
+            overrides=(
+                cfg.train.loss.true_top_floor_constraint.weak_positive_boost.boost_by_label
+            ),
+            label_to_index=cfg.data.label_to_index,
+        )
+        true_top_floor_weak_min_by_class = resolve_label_float_overrides(
+            default=(
+                cfg.train.loss.true_top_floor_constraint.weak_positive_boost.min_support
+            ),
+            overrides={
+                label: item.min_support
+                for label, item in cfg.train.loss.true_top_floor_constraint.weak_positive_boost.support_band_by_label.items()
+            },
+            label_to_index=cfg.data.label_to_index,
+        )
+        true_top_floor_weak_max_by_class = resolve_label_float_overrides(
+            default=(
+                cfg.train.loss.true_top_floor_constraint.weak_positive_boost.max_support
+            ),
+            overrides={
+                label: item.max_support
+                for label, item in cfg.train.loss.true_top_floor_constraint.weak_positive_boost.support_band_by_label.items()
+            },
+            label_to_index=cfg.data.label_to_index,
+        )
         hard_negative_top_teacher_base_required_gap_by_class = resolve_label_float_overrides(
             default=(
                 cfg.train.loss.hard_negative_top_teacher_suppression.base_required_gap
             ),
             overrides=(
                 cfg.train.loss.hard_negative_top_teacher_suppression.base_required_gap_by_label
+            ),
+            label_to_index=cfg.data.label_to_index,
+        )
+        hard_negative_top_teacher_label_weight_by_class = resolve_label_float_overrides(
+            default=1.0,
+            overrides=(
+                cfg.train.loss.hard_negative_top_teacher_suppression.label_weight_by_label
             ),
             label_to_index=cfg.data.label_to_index,
         )
@@ -614,6 +668,8 @@ def main() -> None:
                 ),
                 class_evidence_margin=cfg.train.loss.class_evidence_margin,
                 class_evidence_margin_major_index=class_evidence_margin_major_index,
+                calibrated_teacher_margin=cfg.train.loss.calibrated_teacher_margin,
+                calibrated_teacher_margin_by_class=(calibrated_teacher_margin_by_class),
                 class_evidence_gap_cap_regularization=(
                     cfg.train.loss.class_evidence_gap_cap_regularization
                 ),
@@ -689,6 +745,17 @@ def main() -> None:
                 top_teacher_gap_min_target_boost_max_by_class=(
                     top_teacher_gap_min_target_boost_max_by_class
                 ),
+                true_top_floor_constraint=cfg.train.loss.true_top_floor_constraint,
+                true_top_floor_base_by_class=true_top_floor_base_by_class,
+                true_top_floor_support_gain_by_class=(
+                    true_top_floor_support_gain_by_class
+                ),
+                true_top_floor_support_cap_by_class=(
+                    true_top_floor_support_cap_by_class
+                ),
+                true_top_floor_weak_boost_by_class=true_top_floor_weak_boost_by_class,
+                true_top_floor_weak_min_by_class=true_top_floor_weak_min_by_class,
+                true_top_floor_weak_max_by_class=true_top_floor_weak_max_by_class,
                 hard_negative_top_teacher_suppression=(
                     cfg.train.loss.hard_negative_top_teacher_suppression
                 ),
@@ -712,6 +779,9 @@ def main() -> None:
                 ),
                 hard_negative_top_teacher_moderate_max_by_class=(
                     hard_negative_top_teacher_moderate_max_by_class
+                ),
+                hard_negative_top_teacher_label_weight_by_class=(
+                    hard_negative_top_teacher_label_weight_by_class
                 ),
                 branch_direct_score_margin=cfg.train.loss.branch_direct_score_margin,
                 branch_support_score_margin=(

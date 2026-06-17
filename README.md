@@ -283,6 +283,33 @@ branch_support_score = branch_direct_score + residual_scale * branch_residual_sc
 class_evidence_logits = embedding_score + branch_scale * branch_support_score + interaction_effective_scale * interaction_score
 ```
 
+`teacher_calibration.enabled=true` replaces the raw `max_r` top-branch teacher
+as the primary teacher input. The module builds `branch_margin_matrix [B, R, C]`
+from branch logits, summarizes each class with six label-free features, and runs
+a small class-axis attention calibrator:
+
+```text
+teacher_summary_features[c] =
+  [top_margin, mean_margin, gated_margin, spread,
+   hard_negative_margin, raw_relative_gap]
+
+LayerNorm(6)
+-> Linear(6, hidden_size)
+-> GELU
+-> Dropout
+-> + optional class embedding
+-> TransformerEncoder over class axis
+-> LayerNorm
+-> Linear(hidden_size, 1)
+```
+
+The resulting `class_calibrated_top_teacher_features` and
+`class_calibrated_top_teacher_relative_features` become the source for the
+top-support direct path and residual-gate branch features. Raw
+`class_top_branch_margin_features` remain available for legacy diagnostics and
+older configs, but current `CNUH_DISEASE_VER23` style configs treat calibrated
+teacher features as the source of truth.
+
 When `use_class_embedding=true`, a learned class embedding is added to each
 class token. When `logit_centering=true`, the row mean is subtracted from
 `class_evidence_logits` so the evidence scorer expresses class competition
@@ -361,8 +388,8 @@ The class-axis scorer receives four label-free branch features:
 
 - `class_gated_branch_logit_features`: the class-wise branch-logit feature used by the residual path.
 - `class_gated_branch_logit_relative_features`: the same feature minus the strongest non-self class value.
-- `class_top_branch_margin_features`: class-wise `max_r(branch_logit[c] - max_{j != c} branch_logit[j])`.
-- `class_top_branch_margin_relative_features`: top-branch support minus the strongest non-self top-branch support.
+- `class_calibrated_top_teacher_features`: learnable calibrated teacher score from branch-margin summaries.
+- `class_calibrated_top_teacher_relative_features`: calibrated teacher score minus the strongest non-self calibrated teacher.
 
 This path is inference-safe because it does not use true labels. It does not
 class-wise normalize branch features; `branch_feature_transform.mode="tanh"`
@@ -414,6 +441,21 @@ smooth ranking penalty instead of only hard violations.
 
 `class_gated_branch_logit_margin` applies margin ranking to
 `class_gated_branch_logits`.
+
+`calibrated_teacher_margin` is the primary VER23 teacher supervision. It applies
+a softplus margin ranking loss to `class_calibrated_top_teacher_features`:
+
+```text
+teacher_gap =
+  class_calibrated_top_teacher_features[true]
+  - max(class_calibrated_top_teacher_features[negative])
+
+loss = temperature * softplus((margin[label] - teacher_gap) / temperature)
+```
+
+The disease config uses `margin_by_label` so Airway can require a larger
+calibrated teacher gap. This loss replaces the older raw teacher-front stack in
+new calibrated-teacher experiments.
 
 `branch_to_evidence_ranking_consistency` is the main branch-to-evidence
 transfer objective. The current class-axis configs use
@@ -516,6 +558,23 @@ The disease configs can make this target label-aware with
 `support_cap_by_label`. The scalar values remain fallbacks for labels that are
 not listed.
 
+`true_top_floor_constraint` is the paired teacher-front objective for raising
+the true-class top teacher directly. It uses the same top-branch support source
+as `top_teacher_gap_min_constraint`, but applies the hinge to the absolute
+true-class top value:
+
+```text
+target_floor =
+  base_floor_by_label[true]
+  + support_gain_by_label[true] * clamp(relu(top_branch_margin_value), max=support_cap)
+  + weak_positive_boost_by_label[true] * I(label-specific weak-positive band)
+loss = relu(target_floor - true_top)
+```
+
+Unlike hard-negative teacher suppression, `true_top` is not detached in this
+loss. Use it when `hard_negative_top_teacher_suppression` detects hard negatives
+but diagnostics show the true teacher itself is still too low.
+
 `hard_negative_top_teacher_suppression` separates the other half of the teacher
 problem: lowering the hardest negative top teacher. It uses the same
 `class_top_branch_margin_features` source as the teacher-relative losses, but
@@ -534,6 +593,17 @@ support bands can add label-specific boosts to the required negative-vs-true
 gap. This loss does not replace `top_teacher_gap_min_constraint`: the min-gap
 loss keeps pressure on the true-vs-negative teacher gap, while hard-negative
 suppression focuses gradient on the hardest negative class.
+Recent disease configs can also apply `label_weight_by_label` so the loss is
+concentrated on Airway hard negatives while Normal/Lung are kept as weak
+regularization.
+
+In `CNUH_DISEASE_VER23`, the raw teacher-front losses
+`class_top_branch_relative_margin`, `top_teacher_gap_min_constraint`,
+`true_top_floor_constraint`, and `hard_negative_top_teacher_suppression` are
+disabled. The calibrated teacher module and `calibrated_teacher_margin` now own
+the class-relative teacher competition. Downstream support/evidence diagnostics
+should be read from `class_calibrated_top_teacher_gap` rather than
+`class_top_branch_relative_gap`.
 
 `class_evidence_gap_cap_regularization` limits overconfident wrong evidence
 rankings with a label-agnostic hinge on `class_evidence_logits`: `relu(-gap -
@@ -764,7 +834,8 @@ Important class-aware fields include:
 - `class_evidence_embedding_score_gap`, `class_evidence_branch_support_score_gap`, `class_evidence_interaction_score_gap`: true-vs-hardest-negative component gaps.
 - `class_top_branch_relative_gap`, `class_top_branch_relative_margin_penalty`, `class_top_branch_relative_margin_support_weight`, `class_top_branch_relative_margin_hardness_weight`, `class_top_branch_relative_margin_hardness_gain`, `class_top_branch_relative_margin_hardness_cap`, `class_top_branch_relative_margin_weak_positive_weight`, `class_top_branch_relative_margin_weak_positive_margin_boost`, `class_top_branch_relative_margin_label_margin`, `class_top_branch_relative_margin_effective_target`: teacher-relative top-branch ranking diagnostics.
 - `top_teacher_gap_min_target`, `top_teacher_gap_min_effective_target`, `top_teacher_gap_min_base_min_gap`, `top_teacher_gap_min_support_gain`, `top_teacher_gap_min_support_value`, `top_teacher_gap_min_penalty`, `top_teacher_gap_min_weak_positive_weight`, `top_teacher_gap_min_weak_positive_target_boost`: support-conditioned teacher minimum-gap diagnostics.
-- `hard_negative_top_teacher_true_top`, `hard_negative_top_teacher_negative_top`, `hard_negative_top_teacher_negative_class`, `hard_negative_top_teacher_support_value`, `hard_negative_top_teacher_required_gap`, `hard_negative_top_teacher_weak_band_boost`, `hard_negative_top_teacher_moderate_band_boost`, `hard_negative_top_teacher_penalty`: hard-negative teacher suppression diagnostics.
+- `true_top_floor_true_top`, `true_top_floor_target`, `true_top_floor_support_value`, `true_top_floor_base_floor`, `true_top_floor_support_gain`, `true_top_floor_weak_positive_boost`, `true_top_floor_penalty`: true-top teacher floor diagnostics.
+- `hard_negative_top_teacher_true_top`, `hard_negative_top_teacher_negative_top`, `hard_negative_top_teacher_negative_class`, `hard_negative_top_teacher_support_value`, `hard_negative_top_teacher_required_gap`, `hard_negative_top_teacher_weak_band_boost`, `hard_negative_top_teacher_moderate_band_boost`, `hard_negative_top_teacher_label_multiplier`, `hard_negative_top_teacher_penalty`, `hard_negative_top_teacher_weighted_penalty`: hard-negative teacher suppression diagnostics.
 - `gate_best_branch_alignment_best_branch`, `gate_best_branch_alignment_selected_branch`, `gate_best_branch_alignment_label_multiplier`, `gate_best_branch_alignment_min_best_margin`, `gate_best_branch_alignment_max_best_margin`, `gate_best_branch_alignment_mismatch_margin_drop`, `gate_best_branch_alignment_eligible`, `gate_best_branch_alignment_penalty`: condition-based gate mismatch diagnostics.
 - `direct_top_score_gap`, `top_support_residual_gap`, `top_support_gap_min_target`, `top_support_gap_min_penalty`: top-support teacher path and min-gap constraint diagnostics.
 - `branch_support_disagreement`, `embedding_disagreement_cap_penalty`, `interaction_disagreement_cap_penalty`: disagreement-conditioned cap diagnostics.
