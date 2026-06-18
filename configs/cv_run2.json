@@ -1,7 +1,7 @@
 {
   "experiment": {
-    "name": "Normal_vs_Abnormal",
-    "task": "Normal_vs_Abnormal",
+    "name": "Airway_vs_LungParenchymal",
+    "task": "Airway_vs_LungParenchymal",
     "mode": "clip",
     "seed": 1337,
     "device": "mps",
@@ -12,8 +12,8 @@
     "val_dirs": [],
     "eval_dirs": [],
     "label_to_index": {
-      "Normal": 0,
-      "Abnormal": 1
+      "Airway": 0,
+      "Lung_Parenchymal": 1
     },
     "batch_size": 4,
     "num_workers": 0,

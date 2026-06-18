@@ -1,22 +1,22 @@
 {
   "experiment": {
     "name": "respiratory_ast_clip_eval",
-    "task": "normal_vs_wheeze",
+    "task": "evaluation",
     "mode": "clip",
-    "seed": 42,
-    "device": "cpu",
-    "output_dir": "checkpoints"
+    "seed": 1337,
+    "device": "mps",
+    "output_dir": "Disease_Group_Results"
   },
   "checkpoint_path": "checkpoints/respiratory_ast_clip/last.pt",
   "data": {
     "train_dirs": [],
     "val_dirs": [],
     "eval_dirs": [
-      "datasets/wheeze/test"
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/test/"
     ],
     "label_to_index": {
-      "normal": 0,
-      "wheeze": 1
+      "Airway": 0,
+      "Lung_Parenchymal": 1
     },
     "batch_size": 4,
     "num_workers": 0,

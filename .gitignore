@@ -20,3 +20,6 @@ AGENTS.md
 scripts/
 reports/
 mel_plots/
+configs/today/
+temp.py
+comparison_reports/

@@ -72,6 +72,126 @@ python -m src.cli.cv --config configs/cv_run.json
 Each fold is trained independently under
 `experiment.output_dir/experiment.name/fold_x/`.
 
+## Disease-Group Cascade Test Comparison
+
+Compare the direct 3-class disease-group classifier against a two-stage cascade
+on the held-out disease-group test split:
+
+```bash
+PYTHONPATH=. python -m src.cli.disease_group_cascade_eval
+```
+
+The script compares:
+
+- direct: `Normal_vs_Airway_vs_LungParenchymal`
+- cascade: `Normal_vs_Abnormal` followed by `Airway_vs_LungParenchymal`
+
+For each `fold_0` through `fold_4`, it selects the checkpoint with the highest
+saved `optimized_metrics.f1_score` among `eval_metrics__best_f1_*.json` files,
+then evaluates the same `Normal`, `Airway`, and `Lung_Parenchymal` test clips.
+The split-local `Abnormal` overlay is validated for consistency but is not
+counted as a fourth final label.
+
+Outputs are written by default under:
+
+```text
+Disease_Group_Results/reports/cascade_test_comparison/
+```
+
+Key artifacts:
+
+- `cascade_test_predictions.csv`
+- `cascade_test_fold_metrics.csv`
+- `cascade_test_summary.json`
+- `cascade_test_summary.md`
+- `direct_confusion_matrix.*`
+- `cascade_confusion_matrix.*`
+- `cascade_stage_flow.*`
+
+Build a richer visual summary bundle from the cascade comparison CSV/JSON files
+and the existing disease-group CV summaries:
+
+```bash
+PYTHONPATH=. python -m src.cli.plot_disease_group_visual_summary
+```
+
+The visual summary is written under:
+
+```text
+Disease_Group_Results/reports/visual_summary/
+```
+
+It includes metric bars and fold-wise plots, row-normalized confusion matrices,
+confusion deltas, per-label outcome charts, cascade flow/error plots,
+probability/confidence distributions, CV context plots, and a
+`visual_summary_index.md` manifest for browsing the generated figures.
+
+Build a one-page SVG schematic that compares the **structure** of direct
+3-class inference and the two-stage cascade without reporting performance
+metrics:
+
+```bash
+PYTHONPATH=. python -m src.cli.build_direct_vs_cascade_structure_svg
+```
+
+The structure figure is written under:
+
+```text
+Disease_Group_Results/reports/structure_comparison/
+```
+
+Key artifacts:
+
+- `direct_vs_cascade_structure_comparison.svg`
+- `direct_vs_cascade_structure_comparison.html`
+- `direct_vs_cascade_structure_comparison_metadata.json`
+- `build_direct_vs_cascade_structure_svg.log`
+
+PNG/PDF exports are also written when a local SVG converter such as
+`rsvg-convert` or `inkscape` is available.
+
+## Disease Dataset Catalog
+
+Build a file-level catalog that joins the disease-group wav inventory, Excel
+annotations, and 5-fold/test membership:
+
+```bash
+PYTHONPATH=. python -m src.cli.build_disease_dataset_catalog
+```
+
+The catalog is written under:
+
+```text
+/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/disease_dataset_catalog/
+```
+
+Key artifacts:
+
+- `disease_dataset_catalog.csv`
+- `disease_dataset_catalog_summary.json`
+- `disease_dataset_catalog_warnings.csv`
+- `disease_dataset_catalog_run.log`
+
+The primary row unit is one wav file under `Normal`, `Airway`, or
+`Lung_Parenchymal`. `Abnormal` is treated as the derived binary group
+`Airway + Lung_Parenchymal` and is validated without adding duplicate rows.
+
+Build a Plotly visual summary bundle from the generated catalog CSV/JSON files:
+
+```bash
+PYTHONPATH=. python -m src.cli.plot_disease_dataset_catalog
+```
+
+The figure bundle is written under:
+
+```text
+/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/disease_dataset_catalog/visual_summary/
+```
+
+It includes label/split/annotation distributions, row-normalized crosstab
+heatmaps, fold-vs-test deltas, Sankey flows, metadata coverage, warning
+summaries, and an index/manifest for browsing all generated figures.
+
 ## Config Shape
 
 The main pipeline now uses an AST-only schema:
@@ -191,3 +311,35 @@ python -m src.cli.pretrained_info --name_or_path MIT/ast-finetuned-audioset-10-1
 `src.cli.plot_mels` remains available as a utility. It still supports both
 `log_mel` and `ast_fbank` feature plotting, but the main train/eval/CV pipeline is
 AST-only.
+
+## Plot AST Attention
+
+Visualize AST patch attention for one `.wav` file and one trained checkpoint:
+
+```bash
+PYTHONPATH=. python -m src.cli.plot_ast_attention \
+  --checkpoint Disease_Group_Results/Normal_vs_Airway_vs_LungParenchymal/fold_0/best_f1_0.844886.pt \
+  --wav /path/to/sample.wav \
+  --out-dir Disease_Group_Results/reports/ast_attention_visualization \
+  --attention-method last_cls_patch_head_mean \
+  --visualization both \
+  --top-k 10 \
+  --formats html,png,pdf
+```
+
+Supported attention methods:
+
+- `last_cls_patch`: final-layer CLS-to-patch attention from one head.
+- `last_cls_patch_head_mean`: final-layer CLS-to-patch attention averaged over heads.
+- `attention_rollout`: residual row-normalized attention rollout across all layers.
+- `class_gradient_attention`: target-class `ReLU(attention * gradient)` patch scores.
+
+Supported visualization modes:
+
+- `rectangle`: top-k patch rectangles over the AST fbank.
+- `heatmap`: upsampled patch attention overlay over the AST fbank.
+- `both`: write both overlays.
+
+The command writes `*_fbank.*`, `*_attention_heatmap_overlay.*`,
+`*_attention_rectangle_overlay.*`, `*_top_patches.csv`, and
+`*_attention_metadata.json` under `--out-dir`.
