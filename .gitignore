@@ -9,6 +9,8 @@ datasets/
 evaluate_data/
 Figures/
 plots/
+!src/plots/
+!src/plots/**
 results/
 Disease_Group_Results/
 whisper_origin/
@@ -19,6 +21,9 @@ AGENTS.md
 *.egg-info/
 .codex-local/
 scripts/
+!scripts/
+scripts/*
+!scripts/analyze_cv_results.py
 reports/
 mel_plots/
 configs/today/

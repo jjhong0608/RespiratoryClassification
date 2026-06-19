@@ -1,0 +1,157 @@
+{
+  "experiment": {
+    "name": "Normal_vs_Airway_vs_LungParenchymal",
+    "task": "Normal_vs_Airway_vs_LungParenchymal",
+    "mode": "clip",
+    "seed": 1337,
+    "device": "mps",
+    "output_dir": "Disease_Group_Results"
+  },
+  "data": {
+    "train_dirs": [],
+    "val_dirs": [],
+    "eval_dirs": [],
+    "label_to_index": {
+      "Normal": 0,
+      "Airway": 1,
+      "Lung_Parenchymal": 2
+    },
+    "batch_size": 4,
+    "num_workers": 0,
+    "audio": {
+      "sample_rate": 16000,
+      "clip_duration_sec": 30.0
+    },
+    "preprocessing": {
+      "source_type": "original",
+      "bandpass": {
+        "enabled": false,
+        "low_hz": 250.0,
+        "high_hz": 1000.0,
+        "q": 0.707
+      },
+      "ast_fbank": {
+        "num_mel_bins": 128,
+        "max_length": 1024,
+        "do_normalize": true,
+        "mean": -4.2677393,
+        "std": 4.5689974
+      }
+    }
+  },
+  "model": {
+    "encoder": {
+      "type": "ast",
+      "pretrained_name_or_path": "MIT/ast-finetuned-audioset-10-10-0.4593",
+      "cache_dir": null,
+      "adaptation": {
+        "mode": "partial",
+        "num_layers": 1
+      }
+    },
+    "classifier": {
+      "type": "mlp",
+      "hidden_dim": 256,
+      "dropout": 0.1,
+      "pooling": "cls"
+    }
+  },
+  "train": {
+    "epochs": 100,
+    "top_k": 3,
+    "max_grad_norm": 1.0,
+    "optimizer": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.0001,
+      "weight_decay": 0.01
+    },
+    "scheduler": {
+      "warmup_ratio": 0.15
+    },
+    "loss": {
+      "type": "cross_entropy",
+      "auto_pos_weight": false,
+      "pos_weight": null,
+      "gamma": 2.0
+    },
+    "sampler": {
+      "weighted_random": true
+    },
+    "early_stopping": {
+      "enabled": true,
+      "monitor": "val_loss",
+      "patience": 15,
+      "min_delta": 0.0001
+    }
+  },
+  "analysis": {
+    "outputs": {
+      "save_logits": true,
+      "save_probabilities": true,
+      "save_embeddings": false,
+      "save_clip_metadata": true
+    }
+  },
+  "folds": [
+    {
+      "name": "fold_0",
+      "train_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_1/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_2/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_3/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_4/"
+      ],
+      "val_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_0/"
+      ]
+    },
+    {
+      "name": "fold_1",
+      "train_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_0/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_2/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_3/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_4/"
+      ],
+      "val_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_1/"
+      ]
+    },
+    {
+      "name": "fold_2",
+      "train_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_0/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_1/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_3/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_4/"
+      ],
+      "val_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_2/"
+      ]
+    },
+    {
+      "name": "fold_3",
+      "train_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_0/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_1/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_2/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_4/"
+      ],
+      "val_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_3/"
+      ]
+    },
+    {
+      "name": "fold_4",
+      "train_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_0/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_1/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_2/",
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_3/"
+      ],
+      "val_dirs": [
+        "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/fold_4/"
+      ]
+    }
+  ]
+}

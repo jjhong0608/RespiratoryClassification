@@ -1,98 +1,185 @@
-# AST Respiratory Classification
+# Respiratory Disease-Group Classification
 
-This branch trains and evaluates **clip-level respiratory sound classifiers** with an
-**Audio Spectrogram Transformer (AST)** backbone.
+This repository supports experiments and manuscript preparation for respiratory
+disease-group prediction from auscultation audio.
 
-- One `.wav` file is one training example.
-- The active training/evaluation pipeline uses local AST-style `fbank` extraction.
-- The encoder is Hugging Face `ASTModel`.
-- The classification head stays in-repo so classifier type, optimizer grouping, and
-  logging follow the existing project style.
-- This is a **clean break** from the old Whisper + MIL path. Old MIL configs and
-  checkpoints are not supported.
+The final disease groups are:
+
+- `Normal`
+- `Airway`
+- `Lung_Parenchymal`
+
+Two prediction strategies are the current focus:
+
+- **Direct 3-class classification**: one model predicts the final label directly.
+- **Cascade classification**: stage 1 predicts `Normal` vs `Abnormal`; stage 2
+  predicts `Airway` vs `Lung_Parenchymal` for clips routed as `Abnormal`.
+
+The runnable implementation in this checkout is AST-based. Whisper-based and
+ResNet50-based disease-group pipelines are planned extensions and are not yet
+implemented.
 
 ## Setup
+
+Use the respiratory mamba environment:
 
 ```bash
 mamba activate respiratory
 pip install -r requirements.txt
 ```
 
-## Train
+The project instructions expect Python commands to run through:
 
-Binary example:
-
-```bash
-python -m src.cli.training --config configs/training.json
+```text
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python
 ```
 
-Multi-class example:
+Most commands can also be run as `python -m ...` after activating the same
+environment.
 
-```bash
-python -m src.cli.training --config configs/training_multiclass.json
+## Repository Layout
+
+- `src/`: core package code.
+- `src/cli/`: training, evaluation, cross-validation, catalog, and plotting CLIs.
+- `configs/`: JSON configs for training, evaluation, and cross-validation.
+- `scripts/analyze_cv_results.py`: lightweight CV metrics summary helper.
+- `docs/memory.md`: durable project notes that should be checked before work.
+- `docs/paper/main.tex`: initial manuscript scaffold.
+- `tests/`: pytest tests.
+- `checkpoints/` and `Disease_Group_Results/`: ignored runtime outputs.
+
+## Current Model Scope
+
+The active pipeline is clip-level Audio Spectrogram Transformer (AST)
+classification:
+
+- One `.wav` file is one training example.
+- Audio is loaded as mono, resampled to 16 kHz when needed, and converted to
+  AST-style Kaldi fbank features.
+- The encoder is Hugging Face `ASTModel`.
+- The classifier head is implemented in this repository and supports `linear`
+  and `mlp` heads.
+- Encoder adaptation is controlled by `model.encoder.adaptation` with
+  `frozen`, `partial`, or `full` modes.
+
+Whisper and ResNet50 are not active training backbones in this checkout. Add
+them later under the same dataset, metric, and reporting contract after the AST
+workflow is stable.
+
+## Dataset Contract
+
+The disease-group data is expected under:
+
+```text
+/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/
 ```
 
-Artifacts are written under `experiment.output_dir/experiment.name/`.
+Cross-validation configs use:
 
-Training keeps:
+```text
+/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/
+```
+
+The final labels are `Normal`, `Airway`, and `Lung_Parenchymal`. The split-local
+`Abnormal` directory is an overlay for `Airway + Lung_Parenchymal` and is used
+for the cascade stage 1 binary task. It is not a fourth final class.
+
+Dataset loading supports multiple root directories through `ConcatDataset`.
+Within each root, wav files are discovered recursively and mapped by parent
+directory name through the config `data.label_to_index`.
+
+## Cross-Validation Experiments
+
+Run the direct 3-class disease-group AST experiment:
+
+```bash
+PYTHONPATH=. python -m src.cli.cv --config configs/cv_run_direct_3class.json
+```
+
+Run cascade stage 1:
+
+```bash
+PYTHONPATH=. python -m src.cli.cv --config configs/cv_run.json
+```
+
+Run cascade stage 2:
+
+```bash
+PYTHONPATH=. python -m src.cli.cv --config configs/cv_run2.json
+```
+
+Each fold is trained independently under:
+
+```text
+Disease_Group_Results/<experiment.name>/fold_<n>/
+```
+
+Training writes:
 
 - `last.pt`
 - `best_loss_*.pt`
 - `best_f1_*.pt`
+- `run.log`
+- `diagnostics/val_epoch_*.jsonl` when diagnostics are enabled
 
-## Evaluate
+## Checkpoint Evaluation
+
+Evaluate one checkpoint with:
 
 ```bash
-python -m src.cli.evaluate --config configs/eval.json
+PYTHONPATH=. python -m src.cli.evaluate --config configs/eval.json
 ```
 
-Evaluation writes:
+`configs/eval.json` is a shared example. Before evaluating a specific task,
+update:
+
+- `checkpoint_path`
+- `data.eval_dirs`
+- `data.label_to_index`
+
+Evaluation writes files next to the checkpoint:
 
 - `eval_metrics.json`
 - `eval_predictions.csv`
 - `eval_diagnostics.jsonl` when diagnostics are enabled
 
-Binary evaluation keeps fixed-threshold (`0.5`) metrics at the top level and also
-stores:
-
-- `decision_threshold`
-- `threshold_optimization`
-- `optimized_metrics`
-
-Threshold optimization is checkpoint-driven and only applies to **binary**
-classification. For multi-class evaluation it is reported as disabled with an
-explicit reason.
-
-## Cross-Validation
+Evaluate many checkpoints under one result root with:
 
 ```bash
-python -m src.cli.cv --config configs/cv_run.json
+PYTHONPATH=. python -m src.cli.evaluate_all \
+  --config configs/eval.json \
+  --root Disease_Group_Results/Normal_vs_Airway_vs_LungParenchymal
 ```
 
-Each fold is trained independently under
-`experiment.output_dir/experiment.name/fold_x/`.
+The cascade comparison expects `eval_metrics__best_f1_*.json` files next to the
+matching `best_f1_*.pt` checkpoints for each direct, stage 1, and stage 2 fold.
 
-## Disease-Group Cascade Test Comparison
+For a lightweight Markdown summary of evaluated fold metrics, use
+`scripts/analyze_cv_results.py` as the current report helper API.
 
-Compare the direct 3-class disease-group classifier against a two-stage cascade
-on the held-out disease-group test split:
+## Direct vs Cascade Test Comparison
+
+After evaluating fold checkpoints for all three disease-group tasks, compare
+direct 3-class inference against the two-stage cascade:
 
 ```bash
 PYTHONPATH=. python -m src.cli.disease_group_cascade_eval
 ```
 
-The script compares:
+The comparison uses:
 
 - direct: `Normal_vs_Airway_vs_LungParenchymal`
-- cascade: `Normal_vs_Abnormal` followed by `Airway_vs_LungParenchymal`
+- stage 1: `Normal_vs_Abnormal`
+- stage 2: `Airway_vs_LungParenchymal`
 
-For each `fold_0` through `fold_4`, it selects the checkpoint with the highest
-saved `optimized_metrics.f1_score` among `eval_metrics__best_f1_*.json` files,
-then evaluates the same `Normal`, `Airway`, and `Lung_Parenchymal` test clips.
-The split-local `Abnormal` overlay is validated for consistency but is not
-counted as a fourth final label.
+For each `fold_0` through `fold_4`, the script selects the evaluated checkpoint
+with the highest saved `optimized_metrics.f1_score` among
+`eval_metrics__best_f1_*.json` files. It evaluates the same held-out
+`Normal`, `Airway`, and `Lung_Parenchymal` clips for the direct and cascade
+paths, and validates that the `Abnormal` overlay matches
+`Airway + Lung_Parenchymal` by filename.
 
-Outputs are written by default under:
+Default outputs are written under:
 
 ```text
 Disease_Group_Results/reports/cascade_test_comparison/
@@ -108,58 +195,60 @@ Key artifacts:
 - `cascade_confusion_matrix.*`
 - `cascade_stage_flow.*`
 
-Build a richer visual summary bundle from the cascade comparison CSV/JSON files
-and the existing disease-group CV summaries:
+## Visual Summaries and Figures
+
+Build a richer Plotly summary bundle from cascade comparison outputs and CV
+summary context:
 
 ```bash
 PYTHONPATH=. python -m src.cli.plot_disease_group_visual_summary
 ```
 
-The visual summary is written under:
+Default output:
 
 ```text
 Disease_Group_Results/reports/visual_summary/
 ```
 
-It includes metric bars and fold-wise plots, row-normalized confusion matrices,
-confusion deltas, per-label outcome charts, cascade flow/error plots,
-probability/confidence distributions, CV context plots, and a
-`visual_summary_index.md` manifest for browsing the generated figures.
-
-Build a one-page SVG schematic that compares the **structure** of direct
-3-class inference and the two-stage cascade without reporting performance
-metrics:
+Build a one-page structure schematic for direct 3-class versus cascade routing:
 
 ```bash
 PYTHONPATH=. python -m src.cli.build_direct_vs_cascade_structure_svg
 ```
 
-The structure figure is written under:
+Default output:
 
 ```text
 Disease_Group_Results/reports/structure_comparison/
 ```
 
-Key artifacts:
+The structure figure is about decision routing, not performance. It should
+remain suitable for manuscript figures that explain direct 3-class inference,
+cascade stage 1, cascade stage 2, and the shared final label space.
 
-- `direct_vs_cascade_structure_comparison.svg`
-- `direct_vs_cascade_structure_comparison.html`
-- `direct_vs_cascade_structure_comparison_metadata.json`
-- `build_direct_vs_cascade_structure_svg.log`
+Visualize AST attention for a single wav and checkpoint:
 
-PNG/PDF exports are also written when a local SVG converter such as
-`rsvg-convert` or `inkscape` is available.
+```bash
+PYTHONPATH=. python -m src.cli.plot_ast_attention \
+  --checkpoint Disease_Group_Results/Normal_vs_Airway_vs_LungParenchymal/fold_0/best_f1_0.844886.pt \
+  --wav /path/to/sample.wav \
+  --out-dir Disease_Group_Results/reports/ast_attention_visualization \
+  --attention-method last_cls_patch_head_mean \
+  --visualization both \
+  --top-k 10 \
+  --formats html,png,pdf
+```
 
 ## Disease Dataset Catalog
 
-Build a file-level catalog that joins the disease-group wav inventory, Excel
+Build a file-level catalog joining disease-group wav inventory, Excel
 annotations, and 5-fold/test membership:
 
 ```bash
 PYTHONPATH=. python -m src.cli.build_disease_dataset_catalog
 ```
 
-The catalog is written under:
+Default output:
 
 ```text
 /Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/disease_dataset_catalog/
@@ -172,35 +261,20 @@ Key artifacts:
 - `disease_dataset_catalog_warnings.csv`
 - `disease_dataset_catalog_run.log`
 
-The primary row unit is one wav file under `Normal`, `Airway`, or
-`Lung_Parenchymal`. `Abnormal` is treated as the derived binary group
-`Airway + Lung_Parenchymal` and is validated without adding duplicate rows.
-
-Build a Plotly visual summary bundle from the generated catalog CSV/JSON files:
+Build Plotly figures from the generated catalog:
 
 ```bash
 PYTHONPATH=. python -m src.cli.plot_disease_dataset_catalog
 ```
 
-The figure bundle is written under:
+## Config Rules
 
-```text
-/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/disease_dataset_catalog/visual_summary/
-```
+The AST config schema is JSON and loaded through dataclasses.
 
-It includes label/split/annotation distributions, row-normalized crosstab
-heatmaps, fold-vs-test deltas, Sankey flows, metadata coverage, warning
-summaries, and an index/manifest for browsing all generated figures.
-
-## Config Shape
-
-The main pipeline now uses an AST-only schema:
+Core audio and feature settings:
 
 ```json
 {
-  "experiment": {
-    "mode": "clip"
-  },
   "data": {
     "audio": {
       "sample_rate": 16000,
@@ -219,127 +293,95 @@ The main pipeline now uses an AST-only schema:
         "std": 4.5689974
       }
     }
-  },
-  "model": {
-    "encoder": {
-      "type": "ast",
-      "pretrained_name_or_path": "MIT/ast-finetuned-audioset-10-10-0.4593",
-      "adaptation": {
-        "mode": "partial",
-        "num_layers": 1
-      }
-    },
-    "classifier": {
-      "type": "linear",
-      "hidden_dim": 256,
-      "dropout": 0.1,
-      "pooling": "cls"
+  }
+}
+```
+
+Loss behavior depends on class count:
+
+- Binary tasks (`len(label_to_index) == 2`): `bce` or `focal`.
+- Multi-class tasks (`len(label_to_index) > 2`): `cross_entropy`.
+
+Training uses AdamW with separate parameter groups:
+
+- encoder trainable parameters: `train.optimizer.encoder_lr`
+- classifier trainable parameters: `train.optimizer.head_lr`
+
+The scheduler is cosine annealing with linear warmup, controlled by
+`train.scheduler.warmup_ratio`.
+
+## Metrics and Diagnostics
+
+Evaluation computes:
+
+- accuracy
+- precision
+- recall
+- specificity
+- balanced accuracy
+- F1 score
+- ROC AUC
+- PR AUC
+- brier score
+- confusion matrix
+
+Diagnostics are controlled by `analysis.outputs`:
+
+```json
+{
+  "analysis": {
+    "outputs": {
+      "save_logits": true,
+      "save_probabilities": true,
+      "save_embeddings": false,
+      "save_clip_metadata": true
     }
   }
 }
 ```
 
-## Encoder Adaptation
-
-Encoder adaptation is configured under `model.encoder.adaptation`:
-
-- `mode: "frozen" | "partial" | "full"`
-- `num_layers`
-
-Partial unfreezing keeps embeddings and early blocks frozen, and unfreezes:
-
-- the last `num_layers` transformer blocks
-- the final encoder layer norm
-
-## Loss Rules
-
-Loss behavior depends on the number of classes:
-
-- Binary (`len(label_to_index) == 2`)
-  - supported losses: `bce`, `focal`
-  - optional `auto_pos_weight` / `pos_weight`
-- Multi-class (`len(label_to_index) > 2`)
-  - required loss: `cross_entropy`
-  - binary-only weighting options are rejected
-
-## Optimizer Layout
-
-Training uses two AdamW parameter groups:
-
-- encoder trainable parameters -> `train.optimizer.encoder_lr`
-- classifier trainable parameters -> `train.optimizer.head_lr`
-
-## Diagnostics
-
-Diagnostics are controlled by `analysis.outputs`:
-
-```json
-"analysis": {
-  "outputs": {
-    "save_logits": true,
-    "save_probabilities": true,
-    "save_embeddings": false,
-    "save_clip_metadata": true
-  }
-}
-```
-
-Training saves validation diagnostics under:
+Training diagnostics are saved under:
 
 ```text
 <run_dir>/diagnostics/val_epoch_XXX.jsonl
 ```
 
-Evaluation writes:
+Evaluation diagnostics are saved under:
 
 ```text
 <checkpoint_dir>/eval_diagnostics.jsonl
 ```
 
-These files are intended for false positive / false negative clip inspection.
+## Development Checks
 
-## AST Info
-
-Inspect a pretrained AST config:
+Run the project checks with the respiratory Python:
 
 ```bash
-python -m src.cli.pretrained_info --name_or_path MIT/ast-finetuned-audioset-10-10-0.4593
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m pytest -q
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m ruff check src
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m ruff format src
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m mypy src
 ```
 
-## Plot Features
-
-`src.cli.plot_mels` remains available as a utility. It still supports both
-`log_mel` and `ast_fbank` feature plotting, but the main train/eval/CV pipeline is
-AST-only.
-
-## Plot AST Attention
-
-Visualize AST patch attention for one `.wav` file and one trained checkpoint:
+For plotting and cascade import smoke tests:
 
 ```bash
-PYTHONPATH=. python -m src.cli.plot_ast_attention \
-  --checkpoint Disease_Group_Results/Normal_vs_Airway_vs_LungParenchymal/fold_0/best_f1_0.844886.pt \
-  --wav /path/to/sample.wav \
-  --out-dir Disease_Group_Results/reports/ast_attention_visualization \
-  --attention-method last_cls_patch_head_mean \
-  --visualization both \
-  --top-k 10 \
-  --formats html,png,pdf
+/Users/jjhong0608/.local/share/mamba/envs/respiratory/bin/python -m pytest \
+  tests/test_plot_mels.py \
+  tests/test_plot_ast_attention.py \
+  tests/test_plot_disease_group_visual_summary.py \
+  tests/test_plot_disease_dataset_catalog.py \
+  tests/test_disease_group_cascade_eval.py \
+  -q
 ```
 
-Supported attention methods:
+## Known Issues
 
-- `last_cls_patch`: final-layer CLS-to-patch attention from one head.
-- `last_cls_patch_head_mean`: final-layer CLS-to-patch attention averaged over heads.
-- `attention_rollout`: residual row-normalized attention rollout across all layers.
-- `class_gradient_attention`: target-class `ReLU(attention * gradient)` patch scores.
-
-Supported visualization modes:
-
-- `rectangle`: top-k patch rectangles over the AST fbank.
-- `heatmap`: upsampled patch attention overlay over the AST fbank.
-- `both`: write both overlays.
-
-The command writes `*_fbank.*`, `*_attention_heatmap_overlay.*`,
-`*_attention_rectangle_overlay.*`, `*_top_patches.csv`, and
-`*_attention_metadata.json` under `--out-dir`.
+- `AGENTS.md` is currently ignored by `.gitignore`, so it is local guidance in
+  this checkout rather than a tracked project artifact.
+- Whisper and ResNet50 disease-group experiments are documented as planned work
+  but are not implemented.
+- Runtime output directories such as `Disease_Group_Results/`, `checkpoints/`,
+  `reports/`, and root-level `plots/` are ignored by git.
+- `configs/eval.json` is a reusable example rather than a task-specific eval
+  config. Adjust it before each checkpoint evaluation.

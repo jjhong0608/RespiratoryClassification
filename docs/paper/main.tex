@@ -1,0 +1,118 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{amsmath}
+
+\title{Respiratory Disease-Group Classification from Auscultation Audio}
+\author{Draft}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This manuscript studies respiratory disease-group prediction from auscultation
+audio. The target labels are Normal, Airway disease, and Lung Parenchymal
+disease. The initial experimental focus is an Audio Spectrogram Transformer
+(AST) pipeline, comparing a direct three-class classifier against a two-stage
+cascade that first separates Normal from Abnormal and then separates Airway from
+Lung Parenchymal disease. Whisper-based and ResNet50-based models are planned
+extensions and are not yet included in the runnable experimental pipeline.
+\end{abstract}
+
+\section{Introduction}
+
+Respiratory auscultation provides clinically meaningful acoustic evidence for
+screening and grouping pulmonary conditions. This study targets three disease
+groups: Normal, Airway disease, and Lung Parenchymal disease. The primary
+research question is whether a direct three-class model or a two-stage cascade
+offers a better operational structure for disease-group prediction.
+
+\section{Dataset}
+
+The current disease-group experiments use wav files organized by label
+directory. The primary final labels are \texttt{Normal}, \texttt{Airway}, and
+\texttt{Lung\_Parenchymal}. The split-local \texttt{Abnormal} directory is used
+as a binary overlay for cascade stage 1 and represents the union of
+\texttt{Airway} and \texttt{Lung\_Parenchymal}; it is not a fourth final label.
+
+Future revisions should report patient-level and clip-level counts, fold
+membership, test-set counts, annotation coverage, and any exclusion criteria
+after the dataset catalog has been regenerated and reviewed.
+
+\section{Methods}
+
+\subsection{Direct Three-Class Classification}
+
+The direct approach trains one AST-based classifier with a softmax output over
+\texttt{Normal}, \texttt{Airway}, and \texttt{Lung\_Parenchymal}. Every input
+clip passes through the same model and receives one final label.
+
+\subsection{Cascade Classification}
+
+The cascade approach trains two binary AST-based classifiers. Stage 1 predicts
+\texttt{Normal} versus \texttt{Abnormal}. Clips predicted as
+\texttt{Abnormal} are routed to stage 2, which predicts \texttt{Airway} versus
+\texttt{Lung\_Parenchymal}. Clips predicted as \texttt{Normal} by stage 1 do
+not reach stage 2.
+
+\subsection{AST Pipeline}
+
+The current runnable implementation uses clip-level AST classification. Audio
+is resampled to 16 kHz, converted to AST-style fbank features, and fed to a
+Hugging Face \texttt{ASTModel} encoder. The classifier head is implemented in
+the repository and supports linear or MLP heads. Binary tasks use BCE or focal
+loss, while multi-class tasks use cross entropy.
+
+\section{Experimental Design}
+
+The initial AST experiment set contains three cross-validation tasks:
+
+\begin{itemize}
+  \item Direct: \texttt{Normal\_vs\_Airway\_vs\_Lung\_Parenchymal}
+  \item Cascade stage 1: \texttt{Normal\_vs\_Abnormal}
+  \item Cascade stage 2: \texttt{Airway\_vs\_LungParenchymal}
+\end{itemize}
+
+For the final held-out comparison, the same test clips should be evaluated by
+the direct model and the cascade. The cascade comparison should report both
+final-label performance and stage-specific routing outcomes.
+
+\section{Evaluation Metrics}
+
+Evaluation should report accuracy, precision, recall, specificity, balanced
+accuracy, F1 score, ROC AUC, PR AUC, brier score, and confusion matrix. For the
+three-class final disease-group task, macro-averaged metrics and per-class
+support should be emphasized. For cascade analysis, routing error categories
+should be reported alongside final-label confusion matrices.
+
+\section{Planned Model Extensions}
+
+Whisper-based and ResNet50-based models are part of the broader research plan.
+They should be added only after the AST direct and cascade workflow is stable,
+and they should reuse the same dataset contract, label mapping, metrics, and
+reporting outputs where possible.
+
+\section{Discussion}
+
+The direct model offers a single decision boundary over the final label space,
+while the cascade model encodes a clinically interpretable Normal-versus-
+Abnormal gate. The cascade can reduce the burden on the fine-grained disease
+classifier, but routing errors at stage 1 can block disease clips from stage 2
+or force true Normal clips into a disease subtype. These structural tradeoffs
+should guide both quantitative evaluation and qualitative error analysis.
+
+\section{Reproducibility Notes}
+
+The repository currently stores configs for AST direct three-class CV, cascade
+stage 1 CV, and cascade stage 2 CV. Result directories are intentionally ignored
+by git, so final paper numbers should be regenerated from documented commands
+and archived separately when the experiments are finalized. Lightweight CV
+summary scripts may be used to audit evaluated folds before transferring final
+numbers into the manuscript.
+
+\end{document}
