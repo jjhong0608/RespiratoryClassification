@@ -10,6 +10,7 @@ evaluate_data/
 Figures/
 plots/
 results/
+Disease_Group_Results/
 whisper_origin/
 AGENTS.md
 *.zip
