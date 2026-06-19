@@ -46,9 +46,12 @@ The disease-group AST tasks use these names:
 - Cascade stage 1: `Normal_vs_Abnormal`
 - Cascade stage 2: `Airway_vs_LungParenchymal`
 
-The direct 3-class config is `configs/cv_run_direct_3class.json`. The existing
-stage configs are `configs/cv_run.json` for stage 1 and `configs/cv_run2.json`
-for stage 2. All three use the same disease 5-fold root under:
+The direct 3-class config is `configs/cv_run_direct_3class.json`. The preferred
+cascade configs are `configs/cv_run_cascade_stage1_normal_vs_abnormal.json` for
+stage 1 and `configs/cv_run_cascade_stage2_airway_vs_lung_parenchymal.json` for
+stage 2. The older `configs/cv_run.json` and `configs/cv_run2.json` files are
+retained as legacy aliases. All disease-group CV configs use the same disease
+5-fold root under:
 
 ```text
 /Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/

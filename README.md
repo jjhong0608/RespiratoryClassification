@@ -99,13 +99,13 @@ PYTHONPATH=. python -m src.cli.cv --config configs/cv_run_direct_3class.json
 Run cascade stage 1:
 
 ```bash
-PYTHONPATH=. python -m src.cli.cv --config configs/cv_run.json
+PYTHONPATH=. python -m src.cli.cv --config configs/cv_run_cascade_stage1_normal_vs_abnormal.json
 ```
 
 Run cascade stage 2:
 
 ```bash
-PYTHONPATH=. python -m src.cli.cv --config configs/cv_run2.json
+PYTHONPATH=. python -m src.cli.cv --config configs/cv_run_cascade_stage2_airway_vs_lung_parenchymal.json
 ```
 
 Each fold is trained independently under:
@@ -153,6 +153,9 @@ PYTHONPATH=. python -m src.cli.evaluate_all \
 
 The cascade comparison expects `eval_metrics__best_f1_*.json` files next to the
 matching `best_f1_*.pt` checkpoints for each direct, stage 1, and stage 2 fold.
+The older `configs/cv_run.json` and `configs/cv_run2.json` files are retained
+as legacy aliases for the two cascade stages, but the explicit cascade config
+filenames above are the preferred entrypoints.
 
 For a lightweight Markdown summary of evaluated fold metrics, use
 `scripts/analyze_cv_results.py` as the current report helper API.

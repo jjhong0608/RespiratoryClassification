@@ -73,7 +73,7 @@ loss, while multi-class tasks use cross entropy.
 The initial AST experiment set contains three cross-validation tasks:
 
 \begin{itemize}
-  \item Direct: \texttt{Normal\_vs\_Airway\_vs\_Lung\_Parenchymal}
+  \item Direct: \texttt{Normal\_vs\_Airway\_vs\_LungParenchymal}
   \item Cascade stage 1: \texttt{Normal\_vs\_Abnormal}
   \item Cascade stage 2: \texttt{Airway\_vs\_LungParenchymal}
 \end{itemize}
@@ -113,6 +113,8 @@ stage 1 CV, and cascade stage 2 CV. Result directories are intentionally ignored
 by git, so final paper numbers should be regenerated from documented commands
 and archived separately when the experiments are finalized. Lightweight CV
 summary scripts may be used to audit evaluated folds before transferring final
-numbers into the manuscript.
+numbers into the manuscript. The preferred cascade config files are named by
+stage and task so the Normal-versus-Abnormal gate and Airway-versus-Lung
+Parenchymal subtype classifier are not confused during experiment execution.
 
 \end{document}
