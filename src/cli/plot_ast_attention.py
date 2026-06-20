@@ -22,7 +22,7 @@ from src.data.audio import (
     WaveformPreprocessor,
 )
 from src.data.io import WaveformLoader
-from src.models.model import RespiratoryAstModel
+from src.models.model import AstModelConfig, RespiratoryAstModel
 from src.plots.export import PlotlyExportMixin
 from src.utils.checkpoint import load_checkpoint, parse_model_cfg
 from src.utils.config import DataConfig, JsonConfigLoader
@@ -203,7 +203,12 @@ class AstAttentionModelRunner(LoggingMixin):
             raise RuntimeError(
                 f"Checkpoint missing model_cfg: {loaded.checkpoint_path}"
             )
-        self.model_cfg = parse_model_cfg(model_cfg_raw)
+        model_cfg = parse_model_cfg(model_cfg_raw)
+        if not isinstance(model_cfg, AstModelConfig):
+            raise ValueError(
+                "AST attention visualization supports only AST checkpoints"
+            )
+        self.model_cfg = model_cfg
         self.model = RespiratoryAstModel(self.model_cfg)
         self.model.load_state_dict(loaded.checkpoint["model_state_dict"])
         self.model.to(loaded.device)
@@ -974,6 +979,8 @@ def load_attention_checkpoint(
     if model_cfg_raw is None:
         raise RuntimeError(f"Checkpoint missing model_cfg: {checkpoint_path}")
     model_cfg = parse_model_cfg(model_cfg_raw)
+    if not isinstance(model_cfg, AstModelConfig):
+        raise ValueError("AST attention visualization supports only AST checkpoints")
     if len(label_to_index) != model_cfg.num_classes:
         raise ValueError(
             "checkpoint label_to_index size does not match model_cfg.num_classes. "

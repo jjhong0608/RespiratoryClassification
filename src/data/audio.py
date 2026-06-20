@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+import numpy as np
 import torch
 import torchaudio
 from torch import Tensor
@@ -58,6 +59,43 @@ class AstFbankFeatureConfig:
     @property
     def n_audio_ctx(self) -> int:
         return (self.max_length + 1) // 2
+
+
+@dataclass(frozen=True)
+class ResNetSpectrogramFeatureConfig:
+    sample_rate: int = 16000
+    clip_seconds: float = 15.0
+    n_fft: int = 400
+    hop_length: int = 160
+    win_length: int = 400
+    n_mels: int = 128
+    f_min: float = 0.0
+    f_max: float | None = None
+    use_hpss: bool = True
+    hpss_margin: float = 1.0
+    bandpass_enabled: bool = False
+    bandpass_low_hz: float | None = None
+    bandpass_high_hz: float | None = None
+    bandpass_q: float = 0.707
+    image_size: int = 224
+    image_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
+    image_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
+
+    @property
+    def n_samples(self) -> int:
+        return int(round(self.sample_rate * self.clip_seconds))
+
+    @property
+    def n_frames(self) -> int:
+        return self.n_samples // self.hop_length
+
+    @property
+    def n_audio_ctx(self) -> int:
+        return (self.n_frames + 1) // 2
+
+    @property
+    def resolved_f_max(self) -> float:
+        return self.f_max if self.f_max is not None else self.sample_rate / 2.0
 
 
 class SegmentFeatureExtractor(Protocol):
@@ -285,6 +323,141 @@ class WhisperLikeLogMel:
         return self.cfg.n_audio_ctx
 
 
+class ResNetSpectrogramImage:
+    def __init__(self, cfg: ResNetSpectrogramFeatureConfig):
+        self.cfg = cfg
+        self.preprocessor = WaveformPreprocessor(
+            AudioPreprocessConfig(
+                sample_rate=cfg.sample_rate,
+                n_fft=cfg.n_fft,
+                hop_length=cfg.hop_length,
+                win_length=cfg.win_length,
+                n_mels=cfg.n_mels,
+                clip_seconds=cfg.clip_seconds,
+                source_type="original",
+                bandpass_enabled=cfg.bandpass_enabled,
+                bandpass_low_hz=cfg.bandpass_low_hz,
+                bandpass_high_hz=cfg.bandpass_high_hz,
+                bandpass_q=cfg.bandpass_q,
+            )
+        )
+        self.mel = torchaudio.transforms.MelSpectrogram(
+            sample_rate=cfg.sample_rate,
+            n_fft=cfg.n_fft,
+            win_length=cfg.win_length,
+            hop_length=cfg.hop_length,
+            f_min=cfg.f_min,
+            f_max=cfg.resolved_f_max,
+            n_mels=cfg.n_mels,
+            power=2.0,
+            mel_scale="slaney",
+            norm="slaney",
+        )
+        self._librosa_hpss = None
+        if cfg.use_hpss:
+            try:
+                import librosa
+            except ImportError as exc:
+                raise RuntimeError(
+                    "ResNet50 HPSS frontend requires librosa. Install librosa or "
+                    "set data.preprocessing.resnet_spectrogram.use_hpss=false."
+                ) from exc
+            self._librosa_hpss = librosa.decompose.hpss
+
+    def __call__(self, audio: Tensor) -> Tensor:
+        fixed_audio = self.preprocessor.prepare_fixed_length(audio)
+        mel = self._match_expected_frames(self.mel(fixed_audio))
+        channels = self._build_channels(mel)
+        image = F.interpolate(
+            channels.unsqueeze(0),
+            size=(self.cfg.image_size, self.cfg.image_size),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+        return self._normalize_image(image)
+
+    def _match_expected_frames(self, mel: Tensor) -> Tensor:
+        expected_frames = self.cfg.n_frames
+        if mel.shape[-1] > expected_frames:
+            return mel[..., :expected_frames]
+        if mel.shape[-1] < expected_frames:
+            return F.pad(mel, (0, expected_frames - mel.shape[-1]))
+        return mel
+
+    @staticmethod
+    def _to_log_scale(mel: Tensor) -> Tensor:
+        log_spec = torch.clamp(mel, min=1e-10).log10()
+        log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+        return (log_spec + 4.0) / 4.0
+
+    def _build_channels(self, mel: Tensor) -> Tensor:
+        full = self._to_log_scale(mel)
+        if not self.cfg.use_hpss:
+            return torch.stack([full, full, full], dim=0)
+        if self._librosa_hpss is None:
+            raise RuntimeError("librosa HPSS function is not initialized")
+        mel_np = mel.detach().cpu().numpy().astype(np.float32)
+        harmonic_np, percussive_np = self._librosa_hpss(
+            mel_np,
+            margin=self.cfg.hpss_margin,
+        )
+        harmonic = torch.from_numpy(np.asarray(harmonic_np)).to(
+            device=mel.device,
+            dtype=mel.dtype,
+        )
+        percussive = torch.from_numpy(np.asarray(percussive_np)).to(
+            device=mel.device,
+            dtype=mel.dtype,
+        )
+        return torch.stack(
+            [
+                full,
+                self._to_log_scale(harmonic),
+                self._to_log_scale(percussive),
+            ],
+            dim=0,
+        )
+
+    def _normalize_image(self, image: Tensor) -> Tensor:
+        if image.shape != (3, self.cfg.image_size, self.cfg.image_size):
+            raise ValueError(
+                "ResNet50 frontend must produce shape "
+                f"(3, {self.cfg.image_size}, {self.cfg.image_size}), "
+                f"got {tuple(image.shape)}"
+            )
+        mean = torch.tensor(
+            self.cfg.image_mean,
+            dtype=image.dtype,
+            device=image.device,
+        ).view(3, 1, 1)
+        std = torch.tensor(
+            self.cfg.image_std,
+            dtype=image.dtype,
+            device=image.device,
+        ).view(3, 1, 1)
+        return (image - mean) / std
+
+    @property
+    def n_mels(self) -> int:
+        return self.cfg.n_mels
+
+    @property
+    def n_frames(self) -> int:
+        return self.cfg.n_frames
+
+    @property
+    def n_audio_ctx(self) -> int:
+        return self.cfg.n_audio_ctx
+
+    @property
+    def input_channels(self) -> int:
+        return 3
+
+    @property
+    def image_size(self) -> int:
+        return self.cfg.image_size
+
+
 class AstLikeFbank:
     def __init__(self, cfg: AstFbankFeatureConfig):
         self.cfg = cfg
@@ -323,12 +496,19 @@ class AstLikeFbank:
 
 def build_segment_feature_extractor(
     *,
-    feature_type: Literal["log_mel", "ast_fbank"],
+    feature_type: Literal["log_mel", "ast_fbank", "resnet_spectrogram"],
     log_mel_cfg: AudioPreprocessConfig,
     ast_fbank_cfg: AstFbankFeatureConfig,
+    resnet_spectrogram_cfg: ResNetSpectrogramFeatureConfig | None = None,
 ) -> SegmentFeatureExtractor:
     if feature_type == "log_mel":
         return WhisperLikeLogMel(log_mel_cfg)
     if feature_type == "ast_fbank":
         return AstLikeFbank(ast_fbank_cfg)
+    if feature_type == "resnet_spectrogram":
+        if resnet_spectrogram_cfg is None:
+            raise ValueError(
+                "resnet_spectrogram_cfg is required for feature_type='resnet_spectrogram'"
+            )
+        return ResNetSpectrogramImage(resnet_spectrogram_cfg)
     raise ValueError(f"Unsupported feature_type: {feature_type}")

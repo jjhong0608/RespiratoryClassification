@@ -1,11 +1,11 @@
 {
   "experiment": {
-    "name": "Normal_vs_Abnormal",
-    "task": "Normal_vs_Abnormal",
+    "name": "Normal_vs_Airway_vs_LungParenchymal",
+    "task": "Normal_vs_Airway_vs_LungParenchymal",
     "mode": "clip",
     "seed": 1337,
     "device": "mps",
-    "output_dir": "Disease_Group_Results/AST"
+    "output_dir": "Disease_Group_Results/ResNet50_Partial_L1"
   },
   "data": {
     "train_dirs": [],
@@ -13,15 +13,17 @@
     "eval_dirs": [],
     "label_to_index": {
       "Normal": 0,
-      "Abnormal": 1
+      "Airway": 1,
+      "Lung_Parenchymal": 2
     },
     "batch_size": 4,
     "num_workers": 0,
     "audio": {
       "sample_rate": 16000,
-      "clip_duration_sec": 30.0
+      "clip_duration_sec": 15.0
     },
     "preprocessing": {
+      "feature_type": "resnet_spectrogram",
       "source_type": "original",
       "bandpass": {
         "enabled": false,
@@ -29,30 +31,57 @@
         "high_hz": 1000.0,
         "q": 0.707
       },
-      "ast_fbank": {
-        "num_mel_bins": 128,
-        "max_length": 1024,
-        "do_normalize": true,
-        "mean": -4.2677393,
-        "std": 4.5689974
+      "resnet_spectrogram": {
+        "n_fft": 400,
+        "hop_length": 160,
+        "win_length": 400,
+        "n_mels": 128,
+        "f_min": 0.0,
+        "f_max": null,
+        "use_hpss": true,
+        "hpss_margin": 1.0,
+        "image_size": 224,
+        "image_mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "image_std": [
+          0.229,
+          0.224,
+          0.225
+        ]
       }
     }
   },
   "model": {
     "encoder": {
-      "type": "ast",
-      "pretrained_name_or_path": "MIT/ast-finetuned-audioset-10-10-0.4593",
-      "cache_dir": null,
+      "type": "resnet50",
+      "weights": "imagenet",
       "adaptation": {
         "mode": "partial",
         "num_layers": 1
-      }
+      },
+      "input_channels": 3,
+      "image_size": 224,
+      "image_mean": [
+        0.485,
+        0.456,
+        0.406
+      ],
+      "image_std": [
+        0.229,
+        0.224,
+        0.225
+      ]
     },
     "classifier": {
       "type": "mlp",
       "hidden_dim": 256,
       "dropout": 0.1,
-      "pooling": "cls"
+      "pooling": "mean",
+      "use_weighted_layer_sum": false,
+      "classifier_proj_size": 256
     }
   },
   "train": {
@@ -68,7 +97,7 @@
       "warmup_ratio": 0.15
     },
     "loss": {
-      "type": "focal",
+      "type": "cross_entropy",
       "auto_pos_weight": false,
       "pos_weight": null,
       "gamma": 2.0

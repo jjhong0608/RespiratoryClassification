@@ -22,16 +22,24 @@ from src.data.audio import (
     AstFbankFeatureConfig,
     AstLikeFbank,
     AudioPreprocessConfig,
+    ResNetSpectrogramFeatureConfig,
+    ResNetSpectrogramImage,
+    SegmentFeatureExtractor,
     WaveformPreprocessor,
+    WhisperLikeLogMel,
 )
 from src.data.io import WaveformLoader
 from src.evaluation.metrics import MetricsComputer
+from src.evaluation.prediction import class_probabilities_and_predictions
 from src.evaluation.thresholds import (
     ThresholdOptimizationResult,
     load_checkpoint_threshold_optimization,
 )
-from src.models.model import RespiratoryAstModel
+from src.models.model import AstModelConfig
+from src.models.resnet50_model import ResNet50ModelConfig
+from src.models.whisper_model import WhisperModelConfig
 from src.plots.export import PlotlyExportMixin
+from src.training.model_setup import build_model_from_runtime_config
 from src.utils.checkpoint import load_checkpoint, parse_model_cfg
 from src.utils.config import CvRunConfig, DataConfig, JsonConfigLoader
 from src.utils.logging import LoggingMixin, enable_file_logging, logger
@@ -224,7 +232,7 @@ class CheckpointSelector(LoggingMixin):
             return None
 
 
-class AstInferenceRunner(LoggingMixin):
+class InferenceRunner(LoggingMixin):
     def __init__(self, spec: InferenceSpec):
         self.spec = spec
         self.device = torch.device(spec.device)
@@ -238,8 +246,11 @@ class AstInferenceRunner(LoggingMixin):
                 f"Checkpoint missing model_cfg: {spec.checkpoint.checkpoint_path}"
             )
         self.model_cfg = parse_model_cfg(model_cfg_raw)
+        self.num_classes = int(
+            self.checkpoint.get("num_classes", self.model_cfg.num_classes)
+        )
         self._validate_labels()
-        self.model = RespiratoryAstModel(self.model_cfg)
+        self.model = build_model_from_runtime_config(self.model_cfg)
         self.model.load_state_dict(self.checkpoint["model_state_dict"])
         self.model.to(self.device)
         self.model.eval()
@@ -249,17 +260,7 @@ class AstInferenceRunner(LoggingMixin):
         self.preprocessor = WaveformPreprocessor(
             self._build_audio_preprocess_config(spec.config.data)
         )
-        self.feature_extractor = AstLikeFbank(
-            AstFbankFeatureConfig(
-                sample_rate=spec.config.data.audio.sample_rate,
-                clip_seconds=spec.config.data.audio.clip_duration_sec,
-                num_mel_bins=spec.config.data.preprocessing.ast_fbank.num_mel_bins,
-                max_length=spec.config.data.preprocessing.ast_fbank.max_length,
-                do_normalize=spec.config.data.preprocessing.ast_fbank.do_normalize,
-                mean=spec.config.data.preprocessing.ast_fbank.mean,
-                std=spec.config.data.preprocessing.ast_fbank.std,
-            )
-        )
+        self.feature_extractor = self._build_feature_extractor(spec.config.data)
 
     def predict(self, files: Sequence[Path]) -> dict[str, ModelPrediction]:
         predictions: dict[str, ModelPrediction] = {}
@@ -288,12 +289,12 @@ class AstInferenceRunner(LoggingMixin):
                         probabilities=probs,
                         threshold=(
                             self.threshold_optimization.selected_threshold
-                            if self.model_cfg.num_classes == 2
+                            if self.num_classes == 2
                             else None
                         ),
                         threshold_source=(
                             self.threshold_optimization.threshold_source
-                            if self.model_cfg.num_classes == 2
+                            if self.num_classes == 2
                             else None
                         ),
                     )
@@ -311,26 +312,81 @@ class AstInferenceRunner(LoggingMixin):
             bandpass_q=cfg.preprocessing.bandpass.q,
         )
 
+    @staticmethod
+    def _build_feature_extractor(cfg: DataConfig) -> SegmentFeatureExtractor:
+        if cfg.preprocessing.feature_type == "ast_fbank":
+            return AstLikeFbank(
+                AstFbankFeatureConfig(
+                    sample_rate=cfg.audio.sample_rate,
+                    clip_seconds=cfg.audio.clip_duration_sec,
+                    num_mel_bins=cfg.preprocessing.ast_fbank.num_mel_bins,
+                    max_length=cfg.preprocessing.ast_fbank.max_length,
+                    do_normalize=cfg.preprocessing.ast_fbank.do_normalize,
+                    mean=cfg.preprocessing.ast_fbank.mean,
+                    std=cfg.preprocessing.ast_fbank.std,
+                )
+            )
+        if cfg.preprocessing.feature_type == "log_mel":
+            return WhisperLikeLogMel(
+                AudioPreprocessConfig(
+                    sample_rate=cfg.audio.sample_rate,
+                    n_fft=cfg.preprocessing.log_mel.n_fft,
+                    hop_length=cfg.preprocessing.log_mel.hop_length,
+                    win_length=cfg.preprocessing.log_mel.win_length,
+                    n_mels=cfg.preprocessing.log_mel.n_mels,
+                    clip_seconds=cfg.audio.clip_duration_sec,
+                    source_type=cfg.preprocessing.source_type,
+                    bandpass_enabled=cfg.preprocessing.bandpass.enabled,
+                    bandpass_low_hz=cfg.preprocessing.bandpass.low_hz,
+                    bandpass_high_hz=cfg.preprocessing.bandpass.high_hz,
+                    bandpass_q=cfg.preprocessing.bandpass.q,
+                )
+            )
+        if cfg.preprocessing.feature_type == "resnet_spectrogram":
+            return ResNetSpectrogramImage(
+                ResNetSpectrogramFeatureConfig(
+                    sample_rate=cfg.audio.sample_rate,
+                    clip_seconds=cfg.audio.clip_duration_sec,
+                    n_fft=cfg.preprocessing.resnet_spectrogram.n_fft,
+                    hop_length=cfg.preprocessing.resnet_spectrogram.hop_length,
+                    win_length=cfg.preprocessing.resnet_spectrogram.win_length,
+                    n_mels=cfg.preprocessing.resnet_spectrogram.n_mels,
+                    f_min=cfg.preprocessing.resnet_spectrogram.f_min,
+                    f_max=cfg.preprocessing.resnet_spectrogram.f_max,
+                    use_hpss=cfg.preprocessing.resnet_spectrogram.use_hpss,
+                    hpss_margin=cfg.preprocessing.resnet_spectrogram.hpss_margin,
+                    bandpass_enabled=cfg.preprocessing.bandpass.enabled,
+                    bandpass_low_hz=cfg.preprocessing.bandpass.low_hz,
+                    bandpass_high_hz=cfg.preprocessing.bandpass.high_hz,
+                    bandpass_q=cfg.preprocessing.bandpass.q,
+                    image_size=cfg.preprocessing.resnet_spectrogram.image_size,
+                    image_mean=cfg.preprocessing.resnet_spectrogram.image_mean,
+                    image_std=cfg.preprocessing.resnet_spectrogram.image_std,
+                )
+            )
+        raise ValueError(f"Unsupported feature_type: {cfg.preprocessing.feature_type}")
+
     def _load_features(self, path: Path) -> torch.Tensor:
         waveform = self.waveform_loader.load(path)
-        clip_waveform = self.preprocessor.prepare(waveform)
-        return self.feature_extractor(clip_waveform).transpose(0, 1).contiguous()
+        if self.spec.config.data.preprocessing.feature_type == "ast_fbank":
+            clip_waveform = self.preprocessor.prepare(waveform)
+            feature_map = self.feature_extractor(clip_waveform).transpose(0, 1)
+        else:
+            feature_map = self.feature_extractor(waveform)
+        return feature_map.contiguous()
 
     def _probabilities_and_indices(
         self,
         logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.model_cfg.num_classes == 2:
-            positive = torch.sigmoid(logits)
-            probs = torch.stack([1.0 - positive, positive], dim=1)
-            threshold = float(self.threshold_optimization.selected_threshold)
-            preds = (positive >= threshold).to(torch.long)
-            return probs, preds
-        probs = torch.softmax(logits, dim=-1)
-        return probs, probs.argmax(dim=-1)
+        return class_probabilities_and_predictions(
+            logits,
+            num_classes=self.num_classes,
+            threshold=float(self.threshold_optimization.selected_threshold),
+        )
 
     def _load_threshold(self) -> ThresholdOptimizationResult:
-        if self.model_cfg.num_classes != 2:
+        if self.num_classes != 2:
             return ThresholdOptimizationResult.disabled(
                 "f1",
                 reason="threshold optimization is only supported for binary classification",
@@ -341,24 +397,90 @@ class AstInferenceRunner(LoggingMixin):
         )
 
     def _validate_frontend_dims(self, data_cfg: DataConfig) -> None:
-        checkpoint_bins = self.model_cfg.encoder.feature_dims.num_mel_bins
-        checkpoint_length = self.model_cfg.encoder.feature_dims.max_length
-        data_bins = data_cfg.preprocessing.ast_fbank.num_mel_bins
-        data_length = data_cfg.preprocessing.ast_fbank.max_length
-        if checkpoint_bins == data_bins and checkpoint_length == data_length:
+        if isinstance(self.model_cfg, AstModelConfig):
+            checkpoint_bins = self.model_cfg.encoder.feature_dims.num_mel_bins
+            checkpoint_length = self.model_cfg.encoder.feature_dims.max_length
+            data_bins = data_cfg.preprocessing.ast_fbank.num_mel_bins
+            data_length = data_cfg.preprocessing.ast_fbank.max_length
+            if checkpoint_bins == data_bins and checkpoint_length == data_length:
+                return
+            raise ValueError(
+                "Evaluation frontend dims do not match checkpoint encoder dims. "
+                f"checkpoint=({checkpoint_bins}, {checkpoint_length}), "
+                f"data=({data_bins}, {data_length}), "
+                f"checkpoint_path={self.spec.checkpoint.checkpoint_path}"
+            )
+        if isinstance(self.model_cfg, WhisperModelConfig):
+            if data_cfg.preprocessing.feature_type != "log_mel":
+                raise ValueError(
+                    "Whisper checkpoint evaluation requires log_mel frontend"
+                )
+            log_mel = data_cfg.preprocessing.log_mel
+            n_samples = int(
+                round(data_cfg.audio.sample_rate * data_cfg.audio.clip_duration_sec)
+            )
+            expected_ctx = ((n_samples // log_mel.hop_length) + 1) // 2
+            if (
+                self.model_cfg.encoder.n_mels == log_mel.n_mels
+                and self.model_cfg.encoder.n_audio_ctx == expected_ctx
+            ):
+                return
+            raise ValueError(
+                "Evaluation frontend dims do not match checkpoint encoder dims. "
+                f"checkpoint=(n_mels={self.model_cfg.encoder.n_mels}, "
+                f"n_audio_ctx={self.model_cfg.encoder.n_audio_ctx}), "
+                f"data=(n_mels={log_mel.n_mels}, n_audio_ctx={expected_ctx}), "
+                f"checkpoint_path={self.spec.checkpoint.checkpoint_path}"
+            )
+        if isinstance(self.model_cfg, ResNet50ModelConfig):
+            if data_cfg.preprocessing.feature_type != "resnet_spectrogram":
+                raise ValueError(
+                    "ResNet50 checkpoint evaluation requires resnet_spectrogram frontend"
+                )
+            resnet_spec = data_cfg.preprocessing.resnet_spectrogram
+            if self.model_cfg.encoder.image_size != resnet_spec.image_size:
+                raise ValueError(
+                    "Evaluation frontend image_size does not match checkpoint encoder. "
+                    f"checkpoint={self.model_cfg.encoder.image_size}, "
+                    f"data={resnet_spec.image_size}, "
+                    f"checkpoint_path={self.spec.checkpoint.checkpoint_path}"
+                )
+            if self.model_cfg.encoder.input_channels != 3:
+                raise ValueError("ResNet50 checkpoint must use input_channels=3")
+            feature_cfg = self.checkpoint.get("feature_cfg")
+            if isinstance(feature_cfg, Mapping):
+                expected = {
+                    "feature_type": "resnet_spectrogram",
+                    "num_mel_bins": resnet_spec.n_mels,
+                    "max_length": int(
+                        round(
+                            data_cfg.audio.sample_rate
+                            * data_cfg.audio.clip_duration_sec
+                        )
+                    )
+                    // resnet_spec.hop_length,
+                    "input_channels": self.model_cfg.encoder.input_channels,
+                    "image_size": self.model_cfg.encoder.image_size,
+                }
+                mismatches = {
+                    key: (feature_cfg.get(key), value)
+                    for key, value in expected.items()
+                    if feature_cfg.get(key) != value
+                }
+                if mismatches:
+                    raise ValueError(
+                        "Evaluation frontend metadata does not match checkpoint "
+                        f"feature_cfg. mismatches={mismatches}, "
+                        f"checkpoint_path={self.spec.checkpoint.checkpoint_path}"
+                    )
             return
-        raise ValueError(
-            "Evaluation frontend dims do not match checkpoint encoder dims. "
-            f"checkpoint=({checkpoint_bins}, {checkpoint_length}), "
-            f"data=({data_bins}, {data_length}), "
-            f"checkpoint_path={self.spec.checkpoint.checkpoint_path}"
-        )
+        raise ValueError(f"Unsupported model config type: {type(self.model_cfg)!r}")
 
     def _validate_labels(self) -> None:
-        if len(self.spec.label_order) != self.model_cfg.num_classes:
+        if len(self.spec.label_order) != self.num_classes:
             raise ValueError(
                 "Label order length does not match checkpoint class count: "
-                f"{self.spec.label_order} vs {self.model_cfg.num_classes}"
+                f"{self.spec.label_order} vs {self.num_classes}"
             )
 
 
@@ -515,7 +637,7 @@ class CascadeComparisonEvaluator(LoggingMixin):
         files: Sequence[Path],
     ) -> dict[str, ModelPrediction]:
         device = self.device_override or config.experiment.device
-        runner = AstInferenceRunner(
+        runner = InferenceRunner(
             InferenceSpec(
                 checkpoint=checkpoint,
                 config=config,
@@ -1057,6 +1179,14 @@ def parse_formats(raw: str) -> set[str]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-root", default="Disease_Group_Results")
+    parser.add_argument(
+        "--model-family",
+        default=None,
+        help=(
+            "Optional model family subdirectory under results-root, "
+            "for example AST or Whisper."
+        ),
+    )
     parser.add_argument("--test-root", default=DEFAULT_TEST_ROOT)
     parser.add_argument(
         "--reports-dir",
@@ -1074,10 +1204,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    results_root = Path(args.results_root)
+    if args.model_family:
+        results_root = results_root / str(args.model_family)
     reports_dir = Path(args.reports_dir)
     enable_file_logging(reports_dir / "cascade_test_eval.log", mode="w")
     evaluator = CascadeComparisonEvaluator(
-        results_root=args.results_root,
+        results_root=results_root,
         test_root=args.test_root,
         reports_dir=reports_dir,
         device=args.device,

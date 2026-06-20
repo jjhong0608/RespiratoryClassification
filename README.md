@@ -15,9 +15,8 @@ Two prediction strategies are the current focus:
 - **Cascade classification**: stage 1 predicts `Normal` vs `Abnormal`; stage 2
   predicts `Airway` vs `Lung_Parenchymal` for clips routed as `Abnormal`.
 
-The runnable implementation in this checkout is AST-based. Whisper-based and
-ResNet50-based disease-group pipelines are planned extensions and are not yet
-implemented.
+The runnable implementation supports AST, Whisper, and ResNet50 backbones under
+the same dataset, checkpoint, metric, and cascade comparison contract.
 
 ## Setup
 
@@ -50,21 +49,39 @@ environment.
 
 ## Current Model Scope
 
-The active pipeline is clip-level Audio Spectrogram Transformer (AST)
-classification:
+The active pipeline is clip-level classification. One `.wav` file is one
+training example, and every backbone returns a common
+`RespiratoryModelOutput(logits, pooled_embedding)` contract.
 
-- One `.wav` file is one training example.
-- Audio is loaded as mono, resampled to 16 kHz when needed, and converted to
-  AST-style Kaldi fbank features.
-- The encoder is Hugging Face `ASTModel`.
-- The classifier head is implemented in this repository and supports `linear`
-  and `mlp` heads.
-- Encoder adaptation is controlled by `model.encoder.adaptation` with
-  `frozen`, `partial`, or `full` modes.
+- AST uses Hugging Face `ASTModel` with AST-style Kaldi fbank features.
+- Whisper uses a local Whisper-like audio encoder with OpenAI Whisper encoder
+  checkpoint loading and log-mel features.
+- ResNet50 uses torchvision ResNet50 with HPSS three-channel log-mel
+  spectrogram images and ImageNet normalization.
+- Binary tasks use one positive-class logit for BCE/focal loss, threshold
+  optimization, evaluation, and cascade routing.
+- Multi-class tasks use class logits with cross entropy and softmax metrics.
 
-Whisper and ResNet50 are not active training backbones in this checkout. Add
-them later under the same dataset, metric, and reporting contract after the AST
-workflow is stable.
+## Transfer-Learning Frontend Policy
+
+Backbone frontends are intentionally not forced into a shared spectrogram
+format. This project compares transfer-learning pipelines, so each pretrained
+backbone should keep the acoustic frontend assumed by its pretraining recipe.
+
+- AST uses its native 128-bin Kaldi-style fbank frontend with AST normalization
+  and pretrained-compatible `max_length`.
+- Whisper uses its native 80-bin log-mel frontend with Whisper-style log
+  scaling and a 30 s frame context.
+- ResNet50 uses 15.0 s clips, 128-bin log-mel power maps, HPSS
+  `full/harmonic/percussive` channels, bilinear resize to `224x224`, and
+  ImageNet mean/std normalization.
+
+Comparability is enforced through the disease-group experiment contract:
+identical label definitions, fold splits, train/evaluation roots, checkpoint
+selection rules, metric outputs, and direct-versus-cascade comparison logic.
+The reported comparison should therefore be interpreted as a comparison of
+pretrained backbone pipelines with native acoustic frontends, not as a pure
+encoder architecture ablation using one shared spectrogram representation.
 
 ## Dataset Contract
 
@@ -96,22 +113,62 @@ Run the direct 3-class disease-group AST experiment:
 PYTHONPATH=. python -m src.cli.cv --config configs/cv_run_direct_3class.json
 ```
 
-Run cascade stage 1:
+This direct AST config keeps the canonical disease-group task identifier
+`Normal_vs_Airway_vs_LungParenchymal` and writes results under the AST family
+root:
+
+```text
+Disease_Group_Results/AST/Normal_vs_Airway_vs_LungParenchymal/fold_<n>/
+```
+
+Run AST cascade stage 1:
 
 ```bash
 PYTHONPATH=. python -m src.cli.cv --config configs/cv_run_cascade_stage1_normal_vs_abnormal.json
 ```
 
-Run cascade stage 2:
+Run AST cascade stage 2:
 
 ```bash
 PYTHONPATH=. python -m src.cli.cv --config configs/cv_run_cascade_stage2_airway_vs_lung_parenchymal.json
 ```
 
+Run the matching Whisper experiments:
+
+```bash
+PYTHONPATH=. python -m src.cli.cv --config configs/whisper/cv_run_direct_3class.json
+PYTHONPATH=. python -m src.cli.cv --config configs/whisper/cv_run_cascade_stage1_normal_vs_abnormal.json
+PYTHONPATH=. python -m src.cli.cv --config configs/whisper/cv_run_cascade_stage2_airway_vs_lung_parenchymal.json
+```
+
+Run the matching ResNet50 experiments:
+
+```bash
+PYTHONPATH=. python -m src.cli.cv --config configs/resnet50/cv_run_direct_3class.json
+PYTHONPATH=. python -m src.cli.cv --config configs/resnet50/cv_run_cascade_stage1_normal_vs_abnormal.json
+PYTHONPATH=. python -m src.cli.cv --config configs/resnet50/cv_run_cascade_stage2_airway_vs_lung_parenchymal.json
+```
+
+The Whisper and ResNet50 configs above are the frozen baseline runs. For
+partial fine-tuning with `num_layers=1`, use the separate partial L1 configs:
+
+```bash
+PYTHONPATH=. python -m src.cli.cv --config configs/whisper_partial_l1/cv_run_direct_3class.json
+PYTHONPATH=. python -m src.cli.cv --config configs/whisper_partial_l1/cv_run_cascade_stage1_normal_vs_abnormal.json
+PYTHONPATH=. python -m src.cli.cv --config configs/whisper_partial_l1/cv_run_cascade_stage2_airway_vs_lung_parenchymal.json
+PYTHONPATH=. python -m src.cli.cv --config configs/resnet50_partial_l1/cv_run_direct_3class.json
+PYTHONPATH=. python -m src.cli.cv --config configs/resnet50_partial_l1/cv_run_cascade_stage1_normal_vs_abnormal.json
+PYTHONPATH=. python -m src.cli.cv --config configs/resnet50_partial_l1/cv_run_cascade_stage2_airway_vs_lung_parenchymal.json
+```
+
 Each fold is trained independently under:
 
 ```text
-Disease_Group_Results/<experiment.name>/fold_<n>/
+Disease_Group_Results/AST/<experiment.name>/fold_<n>/      # AST configs
+Disease_Group_Results/Whisper/<experiment.name>/fold_<n>/  # Whisper configs
+Disease_Group_Results/ResNet50/<experiment.name>/fold_<n>/ # ResNet50 configs
+Disease_Group_Results/Whisper_Partial_L1/<experiment.name>/fold_<n>/
+Disease_Group_Results/ResNet50_Partial_L1/<experiment.name>/fold_<n>/
 ```
 
 Training writes:
@@ -121,6 +178,14 @@ Training writes:
 - `best_f1_*.pt`
 - `run.log`
 - `diagnostics/val_epoch_*.jsonl` when diagnostics are enabled
+
+For long 5-fold CV jobs, monitor the active fold log rather than launching a
+second job into the same output root. The direct AST 3-class run writes fold
+logs such as:
+
+```text
+Disease_Group_Results/AST/Normal_vs_Airway_vs_LungParenchymal/fold_0/run.log
+```
 
 ## Checkpoint Evaluation
 
@@ -148,7 +213,7 @@ Evaluate many checkpoints under one result root with:
 ```bash
 PYTHONPATH=. python -m src.cli.evaluate_all \
   --config configs/eval.json \
-  --root Disease_Group_Results/Normal_vs_Airway_vs_LungParenchymal
+  --root Disease_Group_Results/AST/Normal_vs_Airway_vs_LungParenchymal
 ```
 
 The cascade comparison expects `eval_metrics__best_f1_*.json` files next to the
@@ -167,6 +232,18 @@ direct 3-class inference against the two-stage cascade:
 
 ```bash
 PYTHONPATH=. python -m src.cli.disease_group_cascade_eval
+```
+
+For Whisper results, use the family subdirectory:
+
+```bash
+PYTHONPATH=. python -m src.cli.disease_group_cascade_eval --model-family Whisper
+```
+
+For ResNet50 results, use:
+
+```bash
+PYTHONPATH=. python -m src.cli.disease_group_cascade_eval --model-family ResNet50
 ```
 
 The comparison uses:
@@ -272,7 +349,17 @@ PYTHONPATH=. python -m src.cli.plot_disease_dataset_catalog
 
 ## Config Rules
 
-The AST config schema is JSON and loaded through dataclasses.
+The config schema is JSON and loaded through dataclasses. `model.encoder.type`
+selects the backbone:
+
+- `ast`: AST fbank frontend and Hugging Face `ASTModel`.
+- `whisper`: log-mel frontend and local Whisper encoder.
+- `resnet50`: HPSS spectrogram-image frontend and torchvision ResNet50.
+
+Do not change `data.preprocessing.feature_type` merely to make backbones share
+one frontend. In transfer-learning experiments, the frontend is part of the
+pretrained backbone pipeline and should remain backbone-specific unless the
+experiment is explicitly designed as an input-representation ablation.
 
 Core audio and feature settings:
 
@@ -284,6 +371,7 @@ Core audio and feature settings:
       "clip_duration_sec": 30.0
     },
     "preprocessing": {
+      "feature_type": "ast_fbank",
       "source_type": "original",
       "bandpass": {
         "enabled": false
@@ -299,6 +387,23 @@ Core audio and feature settings:
   }
 }
 ```
+
+Whisper uses `feature_type: "log_mel"` with 80 mel bins by default. For 30 s
+clips at 16 kHz and hop length 160, the Whisper encoder config must use
+`n_audio_ctx: 1500`. Whisper encoder adaptation is config-driven. The frozen
+baseline keeps the encoder frozen, while partial L1 fine-tuning uses
+`model.encoder.adaptation.mode: "partial"` and `num_layers: 1`, which unfreezes
+only the final Whisper encoder block.
+
+ResNet50 uses `feature_type: "resnet_spectrogram"` with `clip_duration_sec:
+15.0`, `n_mels: 128`, `n_fft: 400`, `win_length: 400`, `hop_length: 160`,
+`use_hpss: true`, and `image_size: 224` by default. Its three input channels
+are full, harmonic, and percussive log-mel maps. ImageNet normalization is
+applied after resizing. The default ResNet50 config uses torchvision ImageNet
+weights with `model.encoder.adaptation.mode: "frozen"`. Partial fine-tuning maps
+`num_layers=1..4` to `layer4`, `layer3+layer4`,
+`layer2+layer3+layer4`, and `layer1+layer2+layer3+layer4`; `conv1` and `bn1`
+are trainable only when `mode: "full"`.
 
 Loss behavior depends on class count:
 
@@ -382,8 +487,18 @@ For plotting and cascade import smoke tests:
 
 - `AGENTS.md` is currently ignored by `.gitignore`, so it is local guidance in
   this checkout rather than a tracked project artifact.
-- Whisper and ResNet50 disease-group experiments are documented as planned work
-  but are not implemented.
+- Whisper configs write under `Disease_Group_Results/Whisper/`; the direct AST
+  and cascade AST configs write under `Disease_Group_Results/AST/`.
+- ResNet50 configs write under `Disease_Group_Results/ResNet50/`.
+- Whisper and ResNet50 partial L1 configs intentionally write under
+  `Disease_Group_Results/Whisper_Partial_L1/` and
+  `Disease_Group_Results/ResNet50_Partial_L1/` so they do not overwrite frozen
+  baseline outputs.
+- ResNet50 HPSS preprocessing is online. If it becomes the training bottleneck,
+  add a feature cache as a separate optimization.
+- A ResNet50 direct-to-cascade 5-fold CV queue was started on 2026-06-20 under
+  `Disease_Group_Results/ResNet50/`; check the background log before starting
+  another ResNet50 queue against the same result root.
 - Runtime output directories such as `Disease_Group_Results/`, `checkpoints/`,
   `reports/`, and root-level `plots/` are ignored by git.
 - `configs/eval.json` is a reusable example rather than a task-specific eval

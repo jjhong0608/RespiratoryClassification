@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, cast
 
 from torch.optim import AdamW
 from transformers import ASTConfig
@@ -14,6 +15,7 @@ from src.models.model import (
     EncoderAdaptationConfig,
     RespiratoryAstModel,
 )
+from src.utils.config import AstEncoderConfig as RunAstEncoderConfig
 from src.utils.config import ModelConfig as RunModelConfig
 
 
@@ -45,6 +47,12 @@ class AstPretrainedInfo:
     num_attention_heads: int
 
 
+def _require_ast_encoder(cfg: RunModelConfig) -> RunAstEncoderConfig:
+    if not isinstance(cfg.encoder, RunAstEncoderConfig):
+        raise ValueError("AST setup requires model.encoder.type='ast'")
+    return cfg.encoder
+
+
 def build_ast_model(
     cfg: RunModelConfig,
     *,
@@ -52,38 +60,42 @@ def build_ast_model(
     max_length: int,
     num_classes: int,
 ) -> RespiratoryAstModel:
+    encoder = _require_ast_encoder(cfg)
+    if cfg.classifier.type not in {"linear", "mlp"}:
+        raise ValueError("AST setup supports only linear or mlp classifier heads")
+    classifier_type = cast(Literal["linear", "mlp"], cfg.classifier.type)
     model_cfg = AstModelConfig(
         encoder=AstEncoderConfig(
-            type=cfg.encoder.type,
-            pretrained_name_or_path=cfg.encoder.pretrained_name_or_path,
-            cache_dir=cfg.encoder.cache_dir,
+            type=encoder.type,
+            pretrained_name_or_path=encoder.pretrained_name_or_path,
+            cache_dir=encoder.cache_dir,
             feature_dims=AstFeatureDims(
                 num_mel_bins=num_mel_bins,
                 max_length=max_length,
             ),
             adaptation=EncoderAdaptationConfig(
-                mode=cfg.encoder.adaptation.mode,
-                num_layers=cfg.encoder.adaptation.num_layers,
+                mode=encoder.adaptation.mode,
+                num_layers=encoder.adaptation.num_layers,
             ),
             architecture=AstArchitectureConfig(
-                hidden_size=cfg.encoder.architecture.hidden_size,
-                num_hidden_layers=cfg.encoder.architecture.num_hidden_layers,
-                num_attention_heads=cfg.encoder.architecture.num_attention_heads,
-                intermediate_size=cfg.encoder.architecture.intermediate_size,
-                hidden_dropout_prob=cfg.encoder.architecture.hidden_dropout_prob,
+                hidden_size=encoder.architecture.hidden_size,
+                num_hidden_layers=encoder.architecture.num_hidden_layers,
+                num_attention_heads=encoder.architecture.num_attention_heads,
+                intermediate_size=encoder.architecture.intermediate_size,
+                hidden_dropout_prob=encoder.architecture.hidden_dropout_prob,
                 attention_probs_dropout_prob=(
-                    cfg.encoder.architecture.attention_probs_dropout_prob
+                    encoder.architecture.attention_probs_dropout_prob
                 ),
-                frequency_stride=cfg.encoder.architecture.frequency_stride,
-                time_stride=cfg.encoder.architecture.time_stride,
-                patch_size=cfg.encoder.architecture.patch_size,
-                qkv_bias=cfg.encoder.architecture.qkv_bias,
-                layer_norm_eps=cfg.encoder.architecture.layer_norm_eps,
-                initializer_range=cfg.encoder.architecture.initializer_range,
+                frequency_stride=encoder.architecture.frequency_stride,
+                time_stride=encoder.architecture.time_stride,
+                patch_size=encoder.architecture.patch_size,
+                qkv_bias=encoder.architecture.qkv_bias,
+                layer_norm_eps=encoder.architecture.layer_norm_eps,
+                initializer_range=encoder.architecture.initializer_range,
             ),
         ),
         classifier=ClassifierConfig(
-            type=cfg.classifier.type,
+            type=classifier_type,
             hidden_dim=cfg.classifier.hidden_dim,
             dropout=cfg.classifier.dropout,
             pooling=cfg.classifier.pooling,
@@ -94,12 +106,13 @@ def build_ast_model(
 
 
 def inspect_pretrained_encoder(cfg: RunModelConfig) -> AstPretrainedInfo | None:
-    pretrained_name_or_path = cfg.encoder.pretrained_name_or_path
+    encoder = _require_ast_encoder(cfg)
+    pretrained_name_or_path = encoder.pretrained_name_or_path
     if pretrained_name_or_path is None:
         return None
     pretrained_cfg = ASTConfig.from_pretrained(
         pretrained_name_or_path,
-        cache_dir=cfg.encoder.cache_dir,
+        cache_dir=encoder.cache_dir,
     )
     return AstPretrainedInfo(
         source="huggingface_pretrained",

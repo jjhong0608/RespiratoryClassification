@@ -14,11 +14,12 @@ from tqdm import tqdm
 from src.data.loaders import ClipBatch
 from src.evaluation.diagnostics import build_diagnostic_rows, write_diagnostics_jsonl
 from src.evaluation.metrics import EvalMetrics, MetricsComputer
+from src.evaluation.prediction import probabilities_and_predictions
 from src.evaluation.thresholds import (
     ThresholdOptimizationResult,
     compute_threshold_optimized_metrics,
 )
-from src.models.model import AstModelOutput
+from src.models.outputs import RespiratoryModelOutput
 from src.training.losses import FocalLoss
 from src.training.scheduler import WarmupCosineScheduler
 from src.utils.config import AnalysisConfig, EarlyStoppingConfig
@@ -150,13 +151,7 @@ class Trainer(LoggingMixin):
         return criterion(logits, labels.to(device=logits.device, dtype=torch.long))
 
     def _predict(self, logits: Tensor) -> tuple[Tensor, Tensor]:
-        if self.cfg.num_classes == 2:
-            probabilities = torch.sigmoid(logits.detach())
-            predictions = (probabilities >= 0.5).to(torch.long)
-            return probabilities, predictions
-        probabilities = torch.softmax(logits.detach(), dim=-1)
-        predictions = probabilities.argmax(dim=-1)
-        return probabilities, predictions
+        return probabilities_and_predictions(logits, num_classes=self.cfg.num_classes)
 
     def _epoch(
         self,
@@ -178,8 +173,8 @@ class Trainer(LoggingMixin):
         for batch in tqdm(loader, leave=False):
             batch = batch.to(device)
             output = model(batch.input_values)
-            if not isinstance(output, AstModelOutput):
-                raise TypeError("AST model must return AstModelOutput")
+            if not isinstance(output, RespiratoryModelOutput):
+                raise TypeError("Model must return RespiratoryModelOutput")
 
             logits = output.logits
             loss = self._compute_loss(criterion, logits, batch.labels)

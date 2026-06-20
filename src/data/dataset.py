@@ -12,7 +12,11 @@ from src.data.audio import (
     AstFbankFeatureConfig,
     AstLikeFbank,
     AudioPreprocessConfig,
+    ResNetSpectrogramFeatureConfig,
+    ResNetSpectrogramImage,
+    SegmentFeatureExtractor,
     WaveformPreprocessor,
+    WhisperLikeLogMel,
 )
 from src.data.io import WaveformLoader
 from src.utils.config import DataConfig
@@ -53,17 +57,7 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
         self._preprocessor = WaveformPreprocessor(
             self._build_audio_preprocess_config(cfg)
         )
-        self._feature_extractor = AstLikeFbank(
-            AstFbankFeatureConfig(
-                sample_rate=cfg.audio.sample_rate,
-                clip_seconds=cfg.audio.clip_duration_sec,
-                num_mel_bins=cfg.preprocessing.ast_fbank.num_mel_bins,
-                max_length=cfg.preprocessing.ast_fbank.max_length,
-                do_normalize=cfg.preprocessing.ast_fbank.do_normalize,
-                mean=cfg.preprocessing.ast_fbank.mean,
-                std=cfg.preprocessing.ast_fbank.std,
-            )
-        )
+        self._feature_extractor = self._build_feature_extractor(cfg)
 
     @staticmethod
     def _build_audio_preprocess_config(
@@ -78,6 +72,60 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
             bandpass_high_hz=cfg.preprocessing.bandpass.high_hz,
             bandpass_q=cfg.preprocessing.bandpass.q,
         )
+
+    @staticmethod
+    def _build_feature_extractor(cfg: DataConfig) -> SegmentFeatureExtractor:
+        if cfg.preprocessing.feature_type == "ast_fbank":
+            return AstLikeFbank(
+                AstFbankFeatureConfig(
+                    sample_rate=cfg.audio.sample_rate,
+                    clip_seconds=cfg.audio.clip_duration_sec,
+                    num_mel_bins=cfg.preprocessing.ast_fbank.num_mel_bins,
+                    max_length=cfg.preprocessing.ast_fbank.max_length,
+                    do_normalize=cfg.preprocessing.ast_fbank.do_normalize,
+                    mean=cfg.preprocessing.ast_fbank.mean,
+                    std=cfg.preprocessing.ast_fbank.std,
+                )
+            )
+        if cfg.preprocessing.feature_type == "log_mel":
+            return WhisperLikeLogMel(
+                AudioPreprocessConfig(
+                    sample_rate=cfg.audio.sample_rate,
+                    n_fft=cfg.preprocessing.log_mel.n_fft,
+                    hop_length=cfg.preprocessing.log_mel.hop_length,
+                    win_length=cfg.preprocessing.log_mel.win_length,
+                    n_mels=cfg.preprocessing.log_mel.n_mels,
+                    clip_seconds=cfg.audio.clip_duration_sec,
+                    source_type=cfg.preprocessing.source_type,
+                    bandpass_enabled=cfg.preprocessing.bandpass.enabled,
+                    bandpass_low_hz=cfg.preprocessing.bandpass.low_hz,
+                    bandpass_high_hz=cfg.preprocessing.bandpass.high_hz,
+                    bandpass_q=cfg.preprocessing.bandpass.q,
+                )
+            )
+        if cfg.preprocessing.feature_type == "resnet_spectrogram":
+            return ResNetSpectrogramImage(
+                ResNetSpectrogramFeatureConfig(
+                    sample_rate=cfg.audio.sample_rate,
+                    clip_seconds=cfg.audio.clip_duration_sec,
+                    n_fft=cfg.preprocessing.resnet_spectrogram.n_fft,
+                    hop_length=cfg.preprocessing.resnet_spectrogram.hop_length,
+                    win_length=cfg.preprocessing.resnet_spectrogram.win_length,
+                    n_mels=cfg.preprocessing.resnet_spectrogram.n_mels,
+                    f_min=cfg.preprocessing.resnet_spectrogram.f_min,
+                    f_max=cfg.preprocessing.resnet_spectrogram.f_max,
+                    use_hpss=cfg.preprocessing.resnet_spectrogram.use_hpss,
+                    hpss_margin=cfg.preprocessing.resnet_spectrogram.hpss_margin,
+                    bandpass_enabled=cfg.preprocessing.bandpass.enabled,
+                    bandpass_low_hz=cfg.preprocessing.bandpass.low_hz,
+                    bandpass_high_hz=cfg.preprocessing.bandpass.high_hz,
+                    bandpass_q=cfg.preprocessing.bandpass.q,
+                    image_size=cfg.preprocessing.resnet_spectrogram.image_size,
+                    image_mean=cfg.preprocessing.resnet_spectrogram.image_mean,
+                    image_std=cfg.preprocessing.resnet_spectrogram.image_std,
+                )
+            )
+        raise ValueError(f"Unsupported feature_type: {cfg.preprocessing.feature_type}")
 
     def _log_unknown_labels(
         self, unknown_by_label: Mapping[str, Sequence[Path]]
@@ -106,16 +154,38 @@ class _RespiratoryClipRootDataset(LoggingMixin, Dataset[ClipSample]):
     def __getitem__(self, idx: int) -> ClipSample:
         path = self._paths[idx]
         waveform = self._waveform_loader.load(path)
-        clip_waveform = self._preprocessor.prepare(waveform)
-        feature_map = (
-            self._feature_extractor(clip_waveform).transpose(0, 1).contiguous()
-        )
+        if self.cfg.preprocessing.feature_type == "ast_fbank":
+            clip_waveform = self._preprocessor.prepare(waveform)
+            feature_map = self._feature_extractor(clip_waveform).transpose(0, 1)
+        else:
+            feature_map = self._feature_extractor(waveform)
         return ClipSample(
-            input_values=feature_map,
+            input_values=feature_map.contiguous(),
             label=self._targets[idx],
             label_name=self._label_names[idx],
             audio_path=str(path),
         )
+
+    @property
+    def num_mel_bins(self) -> int:
+        return self._feature_extractor.n_mels
+
+    @property
+    def max_length(self) -> int:
+        return self._feature_extractor.n_frames
+
+    @property
+    def n_audio_ctx(self) -> int:
+        return self._feature_extractor.n_audio_ctx
+
+    @property
+    def input_channels(self) -> int:
+        return int(getattr(self._feature_extractor, "input_channels", 1))
+
+    @property
+    def image_size(self) -> int | None:
+        value = getattr(self._feature_extractor, "image_size", None)
+        return int(value) if value is not None else None
 
 
 class RespiratoryClipDataset(LoggingMixin, Dataset[ClipSample]):
@@ -156,8 +226,34 @@ class RespiratoryClipDataset(LoggingMixin, Dataset[ClipSample]):
 
     @property
     def num_mel_bins(self) -> int:
-        return self.cfg.preprocessing.ast_fbank.num_mel_bins
+        if not self._datasets:
+            raise ValueError("Dataset is empty")
+        return self._datasets[0].num_mel_bins
 
     @property
     def max_length(self) -> int:
-        return self.cfg.preprocessing.ast_fbank.max_length
+        if not self._datasets:
+            raise ValueError("Dataset is empty")
+        return self._datasets[0].max_length
+
+    @property
+    def n_audio_ctx(self) -> int:
+        if not self._datasets:
+            raise ValueError("Dataset is empty")
+        return self._datasets[0].n_audio_ctx
+
+    @property
+    def input_channels(self) -> int:
+        if not self._datasets:
+            raise ValueError("Dataset is empty")
+        return self._datasets[0].input_channels
+
+    @property
+    def image_size(self) -> int | None:
+        if not self._datasets:
+            raise ValueError("Dataset is empty")
+        return self._datasets[0].image_size
+
+    @property
+    def feature_type(self) -> str:
+        return self.cfg.preprocessing.feature_type

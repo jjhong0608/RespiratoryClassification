@@ -84,7 +84,7 @@ class HuggingFaceClassifier(nn.Module):
         token = self.cls_token + self.cls_positional_embedding
         return token.to(device=device, dtype=dtype).expand(batch_size, -1, -1)
 
-    def forward(
+    def project_sequence(
         self,
         last_hidden_state: Tensor,
         hidden_states: tuple[Tensor, ...] | None = None,
@@ -108,9 +108,18 @@ class HuggingFaceClassifier(nn.Module):
             ).sum(dim=1)
         else:
             features = last_hidden_state
-        features = self.projector(features)
+        return self.projector(features)
+
+    def pool_projected(self, features: Tensor) -> Tensor:
         if self.pooling == "cls":
-            pooled_output = features[:, 0, :]
-        else:
-            pooled_output = features.mean(dim=1)
+            return features[:, 0, :]
+        return features.mean(dim=1)
+
+    def forward(
+        self,
+        last_hidden_state: Tensor,
+        hidden_states: tuple[Tensor, ...] | None = None,
+    ) -> Tensor:
+        features = self.project_sequence(last_hidden_state, hidden_states)
+        pooled_output = self.pool_projected(features)
         return self.classifier(pooled_output)

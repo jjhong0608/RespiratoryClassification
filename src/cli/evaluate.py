@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,12 +13,16 @@ import torch
 from src.data.loaders import build_clip_loader, build_dataset
 from src.evaluation.diagnostics import build_diagnostic_rows, write_diagnostics_jsonl
 from src.evaluation.metrics import MetricsComputer
+from src.evaluation.prediction import probabilities_and_predictions
 from src.evaluation.thresholds import (
     ThresholdOptimizationResult,
     compute_metrics_at_threshold,
     load_checkpoint_threshold_optimization,
 )
-from src.models.model import RespiratoryAstModel
+from src.models.model import AstModelConfig
+from src.models.resnet50_model import ResNet50ModelConfig
+from src.models.whisper_model import WhisperModelConfig
+from src.training.model_setup import build_model_from_runtime_config
 from src.utils.checkpoint import load_checkpoint, parse_model_cfg
 from src.utils.config import EvalConfig, JsonConfigLoader
 from src.utils.fs import Fs
@@ -33,7 +38,7 @@ class PredictionRow:
     class_probabilities: tuple[float, ...] | None = None
 
 
-def _validate_eval_frontend_dims(
+def _validate_ast_eval_frontend_dims(
     *,
     checkpoint_path: str | Path,
     checkpoint_num_mel_bins: int,
@@ -58,14 +63,76 @@ def _validate_eval_frontend_dims(
     )
 
 
-def _predict_from_logits(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    if logits.ndim == 1:
-        probabilities = torch.sigmoid(logits)
-        predictions = (probabilities >= 0.5).to(torch.long)
-        return probabilities, predictions
-    probabilities = torch.softmax(logits, dim=-1)
-    predictions = probabilities.argmax(dim=-1)
-    return probabilities, predictions
+def _validate_eval_frontend(
+    *,
+    checkpoint_path: str | Path,
+    model_cfg: AstModelConfig | WhisperModelConfig | ResNet50ModelConfig,
+    dataset,
+    checkpoint_feature_cfg: Mapping[str, object] | None = None,
+) -> None:
+    if isinstance(model_cfg, AstModelConfig):
+        _validate_ast_eval_frontend_dims(
+            checkpoint_path=checkpoint_path,
+            checkpoint_num_mel_bins=model_cfg.encoder.feature_dims.num_mel_bins,
+            checkpoint_max_length=model_cfg.encoder.feature_dims.max_length,
+            dataset_num_mel_bins=dataset.num_mel_bins,
+            dataset_max_length=dataset.max_length,
+        )
+        return
+    if isinstance(model_cfg, WhisperModelConfig):
+        if dataset.feature_type != "log_mel":
+            raise ValueError("Whisper checkpoint evaluation requires log_mel frontend")
+        if (
+            model_cfg.encoder.n_mels == dataset.num_mel_bins
+            and model_cfg.encoder.n_audio_ctx == dataset.n_audio_ctx
+        ):
+            return
+        raise ValueError(
+            "Evaluation frontend dims do not match the checkpoint encoder dims.\n"
+            f"- checkpoint: n_mels={model_cfg.encoder.n_mels}, "
+            f"n_audio_ctx={model_cfg.encoder.n_audio_ctx}\n"
+            f"- dataset:    n_mels={dataset.num_mel_bins}, "
+            f"n_audio_ctx={dataset.n_audio_ctx}\n"
+            f"- checkpoint_path: {checkpoint_path}"
+        )
+    if isinstance(model_cfg, ResNet50ModelConfig):
+        if dataset.feature_type != "resnet_spectrogram":
+            raise ValueError(
+                "ResNet50 checkpoint evaluation requires resnet_spectrogram frontend"
+            )
+        if dataset.input_channels != model_cfg.encoder.input_channels:
+            raise ValueError(
+                "Evaluation frontend channels do not match checkpoint encoder. "
+                f"checkpoint={model_cfg.encoder.input_channels}, "
+                f"dataset={dataset.input_channels}, checkpoint_path={checkpoint_path}"
+            )
+        if dataset.image_size != model_cfg.encoder.image_size:
+            raise ValueError(
+                "Evaluation frontend image_size does not match checkpoint encoder. "
+                f"checkpoint={model_cfg.encoder.image_size}, "
+                f"dataset={dataset.image_size}, checkpoint_path={checkpoint_path}"
+            )
+        if checkpoint_feature_cfg is None:
+            return
+        expected = {
+            "feature_type": "resnet_spectrogram",
+            "num_mel_bins": dataset.num_mel_bins,
+            "max_length": dataset.max_length,
+            "input_channels": dataset.input_channels,
+            "image_size": dataset.image_size,
+        }
+        mismatches = {
+            key: (checkpoint_feature_cfg.get(key), value)
+            for key, value in expected.items()
+            if checkpoint_feature_cfg.get(key) != value
+        }
+        if not mismatches:
+            return
+        raise ValueError(
+            "Evaluation frontend metadata does not match checkpoint feature_cfg. "
+            f"mismatches={mismatches}, checkpoint_path={checkpoint_path}"
+        )
+    raise TypeError(f"Unsupported model config type: {type(model_cfg)!r}")
 
 
 def evaluate_checkpoint(
@@ -85,18 +152,21 @@ def evaluate_checkpoint(
     if model_cfg_raw is None:
         raise RuntimeError("Checkpoint missing model_cfg")
     model_cfg = parse_model_cfg(model_cfg_raw)
-    model = RespiratoryAstModel(model_cfg)
+    model = build_model_from_runtime_config(model_cfg)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
     model.eval()
 
     dataset = build_dataset(cfg.data, split="eval")
-    _validate_eval_frontend_dims(
+    feature_cfg_raw = checkpoint.get("feature_cfg")
+    checkpoint_feature_cfg = (
+        feature_cfg_raw if isinstance(feature_cfg_raw, Mapping) else None
+    )
+    _validate_eval_frontend(
         checkpoint_path=checkpoint_path,
-        checkpoint_num_mel_bins=model_cfg.encoder.feature_dims.num_mel_bins,
-        checkpoint_max_length=model_cfg.encoder.feature_dims.max_length,
-        dataset_num_mel_bins=dataset.num_mel_bins,
-        dataset_max_length=dataset.max_length,
+        model_cfg=model_cfg,
+        dataset=dataset,
+        checkpoint_feature_cfg=checkpoint_feature_cfg,
     )
     loader = build_clip_loader(
         dataset,
@@ -115,7 +185,12 @@ def evaluate_checkpoint(
         for batch in loader:
             batch = batch.to(device)
             output = model(batch.input_values)
-            batch_probs, batch_preds = _predict_from_logits(output.logits)
+            batch_probs, batch_preds = probabilities_and_predictions(
+                output.logits,
+                num_classes=int(
+                    checkpoint.get("num_classes", len(cfg.data.label_to_index))
+                ),
+            )
             probabilities.extend(batch_probs.cpu().tolist())
             predictions.extend(batch_preds.cpu().tolist())
             targets.extend(batch.labels.cpu().to(torch.long).tolist())

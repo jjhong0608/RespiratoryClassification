@@ -7,6 +7,7 @@ from torch import Tensor, nn
 from transformers import ASTConfig, ASTModel
 
 from src.models.classifier import ClassifierDims, LinearClassifier, MlpClassifier
+from src.models.outputs import RespiratoryModelOutput
 
 
 @dataclass(frozen=True)
@@ -62,10 +63,7 @@ class AstModelConfig:
     num_classes: int
 
 
-@dataclass(frozen=True)
-class AstModelOutput:
-    logits: Tensor
-    pooled_embedding: Tensor
+AstModelOutput = RespiratoryModelOutput
 
 
 class RespiratoryAstModel(nn.Module):
@@ -155,7 +153,7 @@ class RespiratoryAstModel(nn.Module):
             return hidden_states[:, 0, :]
         return hidden_states.mean(dim=1)
 
-    def forward(self, input_values: Tensor) -> AstModelOutput:
+    def forward(self, input_values: Tensor) -> RespiratoryModelOutput:
         if input_values.ndim != 3:
             raise ValueError(
                 "input_values must have shape (B, max_length, num_mel_bins), "
@@ -166,4 +164,4 @@ class RespiratoryAstModel(nn.Module):
         logits = self.classifier(pooled_embedding)
         if logits.ndim == 2 and logits.shape[1] == 1:
             logits = logits.squeeze(1)
-        return AstModelOutput(logits=logits, pooled_embedding=pooled_embedding)
+        return RespiratoryModelOutput(logits=logits, pooled_embedding=pooled_embedding)

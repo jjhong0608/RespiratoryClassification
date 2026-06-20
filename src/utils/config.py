@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from src.evaluation.thresholds import ThresholdOptimizationConfig
+from src.pretrained.whisper import WhisperPretrainedConfig
 
 DEFAULT_AST_PRETRAINED_NAME = "MIT/ast-finetuned-audioset-10-10-0.4593"
 
@@ -49,10 +50,38 @@ class AstFbankConfig:
 
 
 @dataclass(frozen=True)
+class LogMelConfig:
+    n_fft: int = 400
+    hop_length: int = 160
+    win_length: int = 400
+    n_mels: int = 80
+
+
+@dataclass(frozen=True)
+class ResNetSpectrogramConfig:
+    n_fft: int = 400
+    hop_length: int = 160
+    win_length: int = 400
+    n_mels: int = 128
+    f_min: float = 0.0
+    f_max: float | None = None
+    use_hpss: bool = True
+    hpss_margin: float = 1.0
+    image_size: int = 224
+    image_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
+    image_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
+
+
+@dataclass(frozen=True)
 class PreprocessingConfig:
+    feature_type: Literal["ast_fbank", "log_mel", "resnet_spectrogram"] = "ast_fbank"
     source_type: Literal["original", "harmonic", "percussive"] = "original"
     bandpass: BandPassConfig = field(default_factory=BandPassConfig)
     ast_fbank: AstFbankConfig = field(default_factory=AstFbankConfig)
+    log_mel: LogMelConfig = field(default_factory=LogMelConfig)
+    resnet_spectrogram: ResNetSpectrogramConfig = field(
+        default_factory=ResNetSpectrogramConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -99,16 +128,50 @@ class AstEncoderConfig:
 
 
 @dataclass(frozen=True)
+class WhisperEncoderConfig:
+    type: Literal["whisper"] = "whisper"
+    n_mels: int = 80
+    n_audio_ctx: int = 1500
+    n_audio_state: int = 384
+    n_audio_head: int = 6
+    n_audio_layer: int = 4
+    adaptation: EncoderAdaptationConfig = field(
+        default_factory=lambda: EncoderAdaptationConfig(mode="frozen", num_layers=1)
+    )
+    pretrained: WhisperPretrainedConfig | None = field(
+        default_factory=WhisperPretrainedConfig
+    )
+
+
+@dataclass(frozen=True)
+class ResNet50EncoderConfig:
+    type: Literal["resnet50"] = "resnet50"
+    weights: Literal["imagenet", "none"] = "imagenet"
+    adaptation: EncoderAdaptationConfig = field(
+        default_factory=lambda: EncoderAdaptationConfig(mode="frozen", num_layers=1)
+    )
+    input_channels: int = 3
+    image_size: int = 224
+    image_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
+    image_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
+
+
+type EncoderConfig = AstEncoderConfig | WhisperEncoderConfig | ResNet50EncoderConfig
+
+
+@dataclass(frozen=True)
 class ClassifierConfig:
-    type: Literal["linear", "mlp"] = "linear"
+    type: Literal["linear", "mlp", "hf"] = "linear"
     hidden_dim: int = 256
     dropout: float = 0.0
     pooling: Literal["cls", "mean"] = "cls"
+    use_weighted_layer_sum: bool = False
+    classifier_proj_size: int = 256
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    encoder: AstEncoderConfig
+    encoder: EncoderConfig
     classifier: ClassifierConfig
 
 
@@ -264,6 +327,15 @@ class JsonConfigLoader:
 
     @staticmethod
     def _validate_preprocessing(cfg: PreprocessingConfig, sample_rate: int) -> None:
+        if cfg.feature_type not in {"ast_fbank", "log_mel", "resnet_spectrogram"}:
+            raise ValueError(
+                "data.preprocessing.feature_type must be one of "
+                "['ast_fbank', 'log_mel', 'resnet_spectrogram']"
+            )
+        if sample_rate != 16000:
+            raise ValueError(
+                "data.audio.sample_rate must be 16000 for clip classification"
+            )
         if cfg.ast_fbank.num_mel_bins <= 0:
             raise ValueError(
                 "data.preprocessing.ast_fbank.num_mel_bins must be greater than zero"
@@ -276,9 +348,69 @@ class JsonConfigLoader:
             raise ValueError(
                 "data.preprocessing.ast_fbank.std must be greater than zero when normalization is enabled"
             )
-        if sample_rate != 16000:
+        if cfg.log_mel.n_fft <= 0:
             raise ValueError(
-                "data.audio.sample_rate must be 16000 for AST clip classification"
+                "data.preprocessing.log_mel.n_fft must be greater than zero"
+            )
+        if cfg.log_mel.hop_length <= 0:
+            raise ValueError(
+                "data.preprocessing.log_mel.hop_length must be greater than zero"
+            )
+        if cfg.log_mel.win_length <= 0:
+            raise ValueError(
+                "data.preprocessing.log_mel.win_length must be greater than zero"
+            )
+        if cfg.log_mel.n_mels <= 0:
+            raise ValueError(
+                "data.preprocessing.log_mel.n_mels must be greater than zero"
+            )
+        if cfg.resnet_spectrogram.n_fft <= 0:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.n_fft must be greater than zero"
+            )
+        if cfg.resnet_spectrogram.hop_length <= 0:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.hop_length must be greater than zero"
+            )
+        if cfg.resnet_spectrogram.win_length <= 0:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.win_length must be greater than zero"
+            )
+        if cfg.resnet_spectrogram.n_mels <= 0:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.n_mels must be greater than zero"
+            )
+        if cfg.resnet_spectrogram.hpss_margin <= 0:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.hpss_margin must be greater than zero"
+            )
+        if cfg.resnet_spectrogram.image_size <= 0:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.image_size must be greater than zero"
+            )
+        if len(cfg.resnet_spectrogram.image_mean) != 3:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.image_mean must contain three values"
+            )
+        if len(cfg.resnet_spectrogram.image_std) != 3:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.image_std must contain three values"
+            )
+        if any(value <= 0 for value in cfg.resnet_spectrogram.image_std):
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.image_std values must be greater than zero"
+            )
+        nyquist = float(sample_rate) / 2.0
+        if cfg.resnet_spectrogram.f_min < 0:
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram.f_min must be non-negative"
+            )
+        if cfg.resnet_spectrogram.f_max is not None and not (
+            cfg.resnet_spectrogram.f_min < cfg.resnet_spectrogram.f_max <= nyquist
+        ):
+            raise ValueError(
+                "data.preprocessing.resnet_spectrogram must satisfy "
+                "f_min < f_max <= sample_rate / 2"
             )
         JsonConfigLoader._validate_bandpass(cfg.bandpass, sample_rate)
 
@@ -295,9 +427,7 @@ class JsonConfigLoader:
             raise ValueError("data.num_workers must be non-negative")
 
     @staticmethod
-    def _validate_encoder(cfg: AstEncoderConfig) -> None:
-        if cfg.type != "ast":
-            raise ValueError("Only model.encoder.type='ast' is supported")
+    def _validate_ast_encoder(cfg: AstEncoderConfig) -> None:
         if cfg.adaptation.mode not in {"frozen", "partial", "full"}:
             raise ValueError(
                 "model.encoder.adaptation.mode must be one of ['frozen', 'full', 'partial']"
@@ -350,10 +480,133 @@ class JsonConfigLoader:
                 )
 
     @staticmethod
+    def _validate_whisper_encoder(cfg: WhisperEncoderConfig) -> None:
+        if cfg.adaptation.mode not in {"frozen", "partial", "full"}:
+            raise ValueError(
+                "model.encoder.adaptation.mode must be one of ['frozen', 'partial', 'full']"
+            )
+        if cfg.n_mels <= 0:
+            raise ValueError("model.encoder.n_mels must be greater than zero")
+        if cfg.n_audio_ctx <= 0:
+            raise ValueError("model.encoder.n_audio_ctx must be greater than zero")
+        if cfg.n_audio_state <= 0:
+            raise ValueError("model.encoder.n_audio_state must be greater than zero")
+        if cfg.n_audio_head <= 0:
+            raise ValueError("model.encoder.n_audio_head must be greater than zero")
+        if cfg.n_audio_layer <= 0:
+            raise ValueError("model.encoder.n_audio_layer must be greater than zero")
+        if cfg.n_audio_state % cfg.n_audio_head != 0:
+            raise ValueError(
+                "model.encoder.n_audio_state must be divisible by n_audio_head"
+            )
+        if cfg.adaptation.mode == "partial" and not (
+            1 <= cfg.adaptation.num_layers <= cfg.n_audio_layer
+        ):
+            raise ValueError(
+                "model.encoder.adaptation.num_layers must be between 1 and "
+                "model.encoder.n_audio_layer for Whisper partial adaptation"
+            )
+        if cfg.pretrained is not None and not cfg.pretrained.load_encoder_only:
+            raise ValueError("Whisper supports only pretrained.load_encoder_only=true")
+
+    @staticmethod
+    def _validate_resnet50_encoder(cfg: ResNet50EncoderConfig) -> None:
+        if cfg.weights not in {"imagenet", "none"}:
+            raise ValueError(
+                "model.encoder.weights must be one of ['imagenet', 'none']"
+            )
+        if cfg.adaptation.mode not in {"frozen", "partial", "full"}:
+            raise ValueError(
+                "model.encoder.adaptation.mode must be one of ['frozen', 'partial', 'full']"
+            )
+        if cfg.adaptation.mode == "partial" and not (
+            1 <= cfg.adaptation.num_layers <= 4
+        ):
+            raise ValueError(
+                "model.encoder.adaptation.num_layers must be between 1 and 4 for ResNet50 partial adaptation"
+            )
+        if cfg.input_channels != 3:
+            raise ValueError("ResNet50 disease frontend requires input_channels=3")
+        if cfg.image_size <= 0:
+            raise ValueError("model.encoder.image_size must be greater than zero")
+        if len(cfg.image_mean) != 3:
+            raise ValueError("model.encoder.image_mean must contain three values")
+        if len(cfg.image_std) != 3:
+            raise ValueError("model.encoder.image_std must contain three values")
+        if any(value <= 0 for value in cfg.image_std):
+            raise ValueError("model.encoder.image_std values must be greater than zero")
+
+    @staticmethod
+    def _validate_encoder(cfg: EncoderConfig) -> None:
+        if cfg.type == "ast":
+            JsonConfigLoader._validate_ast_encoder(cfg)
+            return
+        if cfg.type == "whisper":
+            JsonConfigLoader._validate_whisper_encoder(cfg)
+            return
+        if cfg.type == "resnet50":
+            JsonConfigLoader._validate_resnet50_encoder(cfg)
+            return
+        raise ValueError(f"Unsupported model.encoder.type: {cfg.type}")
+
+    @staticmethod
     def _validate_encoder_against_data(
         data_cfg: DataConfig,
-        encoder_cfg: AstEncoderConfig,
+        encoder_cfg: EncoderConfig,
     ) -> None:
+        if encoder_cfg.type == "whisper":
+            if data_cfg.preprocessing.feature_type != "log_mel":
+                raise ValueError(
+                    "Whisper encoder requires data.preprocessing.feature_type='log_mel'"
+                )
+            log_mel = data_cfg.preprocessing.log_mel
+            n_samples = int(
+                round(data_cfg.audio.sample_rate * data_cfg.audio.clip_duration_sec)
+            )
+            n_frames = n_samples // log_mel.hop_length
+            expected_ctx = (n_frames + 1) // 2
+            if encoder_cfg.n_mels != log_mel.n_mels:
+                raise ValueError(
+                    "Whisper encoder n_mels must match data.preprocessing.log_mel.n_mels"
+                )
+            if encoder_cfg.n_audio_ctx != expected_ctx:
+                raise ValueError(
+                    "Whisper encoder n_audio_ctx must match log-mel frame count "
+                    f"after stride-2 conv; expected {expected_ctx}, got "
+                    f"{encoder_cfg.n_audio_ctx}"
+                )
+            return
+        if encoder_cfg.type == "resnet50":
+            if data_cfg.preprocessing.feature_type != "resnet_spectrogram":
+                raise ValueError(
+                    "ResNet50 encoder requires "
+                    "data.preprocessing.feature_type='resnet_spectrogram'"
+                )
+            if data_cfg.preprocessing.source_type != "original":
+                raise ValueError(
+                    "ResNet50 spectrogram frontend requires "
+                    "data.preprocessing.source_type='original'; HPSS channels are "
+                    "computed inside the frontend"
+                )
+            if encoder_cfg.input_channels != 3:
+                raise ValueError("ResNet50 encoder input_channels must be 3")
+            resnet_spec = data_cfg.preprocessing.resnet_spectrogram
+            if encoder_cfg.image_size != resnet_spec.image_size:
+                raise ValueError(
+                    "ResNet50 encoder image_size must match "
+                    "data.preprocessing.resnet_spectrogram.image_size"
+                )
+            if tuple(encoder_cfg.image_mean) != tuple(resnet_spec.image_mean):
+                raise ValueError(
+                    "ResNet50 encoder image_mean must match "
+                    "data.preprocessing.resnet_spectrogram.image_mean"
+                )
+            if tuple(encoder_cfg.image_std) != tuple(resnet_spec.image_std):
+                raise ValueError(
+                    "ResNet50 encoder image_std must match "
+                    "data.preprocessing.resnet_spectrogram.image_std"
+                )
+            return
         if encoder_cfg.pretrained_name_or_path is None:
             return
         from transformers import ASTConfig
@@ -377,17 +630,39 @@ class JsonConfigLoader:
 
     @staticmethod
     def _validate_classifier(cfg: ClassifierConfig) -> None:
+        if cfg.type not in {"linear", "mlp", "hf"}:
+            raise ValueError(
+                "model.classifier.type must be one of ['hf', 'linear', 'mlp']"
+            )
         if cfg.hidden_dim <= 0:
             raise ValueError("model.classifier.hidden_dim must be greater than zero")
         if not (0.0 <= cfg.dropout < 1.0):
             raise ValueError("model.classifier.dropout must be within [0, 1)")
         if cfg.pooling not in {"cls", "mean"}:
             raise ValueError("model.classifier.pooling must be one of ['cls', 'mean']")
+        if cfg.classifier_proj_size <= 0:
+            raise ValueError(
+                "model.classifier.classifier_proj_size must be greater than zero"
+            )
 
     @staticmethod
     def _validate_model(cfg: ModelConfig) -> None:
         JsonConfigLoader._validate_encoder(cfg.encoder)
         JsonConfigLoader._validate_classifier(cfg.classifier)
+        if cfg.encoder.type == "ast" and cfg.classifier.type == "hf":
+            raise ValueError("AST encoder supports only linear or mlp classifier heads")
+        if (
+            cfg.encoder.type == "whisper"
+            and cfg.classifier.type != "hf"
+            and cfg.classifier.pooling != "mean"
+        ):
+            raise ValueError(
+                "Whisper linear/mlp classifier heads require pooling='mean'"
+            )
+        if cfg.encoder.type == "resnet50" and cfg.classifier.type == "hf":
+            raise ValueError(
+                "ResNet50 encoder supports only linear or mlp classifier heads"
+            )
 
     @staticmethod
     def _validate_train(cfg: TrainConfig, *, num_classes: int) -> None:
@@ -453,26 +728,77 @@ class JsonConfigLoader:
         kwargs.setdefault("eval_dirs", [])
         kwargs["audio"] = AudioConfig(**dict(raw["audio"]))
         preprocessing = dict(raw["preprocessing"])
-        if "ast_fbank" not in preprocessing:
-            raise ValueError("data.preprocessing.ast_fbank is required")
+        preprocessing.setdefault("feature_type", "ast_fbank")
         preprocessing["bandpass"] = BandPassConfig(**preprocessing.get("bandpass", {}))
-        preprocessing["ast_fbank"] = AstFbankConfig(**dict(preprocessing["ast_fbank"]))
+        preprocessing["ast_fbank"] = AstFbankConfig(
+            **dict(preprocessing.get("ast_fbank", {}))
+        )
+        preprocessing["log_mel"] = LogMelConfig(
+            **dict(preprocessing.get("log_mel", {}))
+        )
+        preprocessing["resnet_spectrogram"] = ResNetSpectrogramConfig(
+            **JsonConfigLoader._parse_resnet_spectrogram_dict(
+                preprocessing.get("resnet_spectrogram", {})
+            )
+        )
         kwargs["preprocessing"] = PreprocessingConfig(**preprocessing)
         cfg = DataConfig(**kwargs)
         JsonConfigLoader._validate_data(cfg)
         return cfg
 
     @staticmethod
+    def _parse_resnet_spectrogram_dict(raw: object) -> dict[str, Any]:
+        if raw is None:
+            return {}
+        if not isinstance(raw, Mapping):
+            raise TypeError("data.preprocessing.resnet_spectrogram must be an object")
+        parsed = dict(raw)
+        if "image_mean" in parsed:
+            parsed["image_mean"] = tuple(parsed["image_mean"])
+        if "image_std" in parsed:
+            parsed["image_std"] = tuple(parsed["image_std"])
+        return parsed
+
+    @staticmethod
     def _parse_model(raw: Mapping[str, Any]) -> ModelConfig:
         kwargs = dict(raw)
         encoder = dict(raw["encoder"])
-        encoder["adaptation"] = EncoderAdaptationConfig(
-            **dict(encoder.get("adaptation", {}))
-        )
-        encoder["architecture"] = AstArchitectureConfig(
-            **dict(encoder.get("architecture", {}))
-        )
-        kwargs["encoder"] = AstEncoderConfig(**encoder)
+        encoder_type = encoder.get("type", "ast")
+        if encoder_type == "ast":
+            encoder["adaptation"] = EncoderAdaptationConfig(
+                **dict(encoder.get("adaptation", {}))
+            )
+            encoder["architecture"] = AstArchitectureConfig(
+                **dict(encoder.get("architecture", {}))
+            )
+            kwargs["encoder"] = AstEncoderConfig(**encoder)
+        elif encoder_type == "whisper":
+            encoder["adaptation"] = EncoderAdaptationConfig(
+                **dict(
+                    encoder.get(
+                        "adaptation",
+                        {
+                            "mode": "frozen",
+                            "num_layers": 1,
+                        },
+                    )
+                )
+            )
+            pretrained_raw = encoder.get("pretrained")
+            if pretrained_raw is not None:
+                encoder["pretrained"] = WhisperPretrainedConfig(**dict(pretrained_raw))
+            kwargs["encoder"] = WhisperEncoderConfig(**encoder)
+        elif encoder_type == "resnet50":
+            encoder["adaptation"] = EncoderAdaptationConfig(
+                **dict(encoder.get("adaptation", {}))
+            )
+            if "image_mean" in encoder:
+                encoder["image_mean"] = tuple(encoder["image_mean"])
+            if "image_std" in encoder:
+                encoder["image_std"] = tuple(encoder["image_std"])
+            kwargs["encoder"] = ResNet50EncoderConfig(**encoder)
+        else:
+            raise ValueError(f"Unsupported model.encoder.type: {encoder_type}")
         kwargs["classifier"] = ClassifierConfig(**dict(raw["classifier"]))
         cfg = ModelConfig(**kwargs)
         JsonConfigLoader._validate_model(cfg)

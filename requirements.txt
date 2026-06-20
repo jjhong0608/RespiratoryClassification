@@ -1,5 +1,6 @@
 torch>=2.6
 torchaudio>=2.6
+torchvision>=0.21
 numpy>=2.0
 scikit-learn>=1.5
 rich>=13.7

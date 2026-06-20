@@ -1,19 +1,19 @@
 {
   "experiment": {
-    "name": "Normal_vs_Abnormal",
-    "task": "Normal_vs_Abnormal",
+    "name": "Airway_vs_LungParenchymal",
+    "task": "Airway_vs_LungParenchymal",
     "mode": "clip",
     "seed": 1337,
     "device": "mps",
-    "output_dir": "Disease_Group_Results/AST"
+    "output_dir": "Disease_Group_Results/Whisper"
   },
   "data": {
     "train_dirs": [],
     "val_dirs": [],
     "eval_dirs": [],
     "label_to_index": {
-      "Normal": 0,
-      "Abnormal": 1
+      "Airway": 0,
+      "Lung_Parenchymal": 1
     },
     "batch_size": 4,
     "num_workers": 0,
@@ -22,6 +22,7 @@
       "clip_duration_sec": 30.0
     },
     "preprocessing": {
+      "feature_type": "log_mel",
       "source_type": "original",
       "bandpass": {
         "enabled": false,
@@ -29,30 +30,37 @@
         "high_hz": 1000.0,
         "q": 0.707
       },
-      "ast_fbank": {
-        "num_mel_bins": 128,
-        "max_length": 1024,
-        "do_normalize": true,
-        "mean": -4.2677393,
-        "std": 4.5689974
+      "log_mel": {
+        "n_fft": 400,
+        "hop_length": 160,
+        "win_length": 400,
+        "n_mels": 80
       }
     }
   },
   "model": {
     "encoder": {
-      "type": "ast",
-      "pretrained_name_or_path": "MIT/ast-finetuned-audioset-10-10-0.4593",
-      "cache_dir": null,
-      "adaptation": {
-        "mode": "partial",
-        "num_layers": 1
+      "type": "whisper",
+      "n_mels": 80,
+      "n_audio_ctx": 1500,
+      "n_audio_state": 384,
+      "n_audio_head": 6,
+      "n_audio_layer": 4,
+      "pretrained": {
+        "name_or_path": "tiny",
+        "load_encoder_only": true,
+        "strict": true,
+        "freeze_encoder": true,
+        "download_root": null
       }
     },
     "classifier": {
-      "type": "mlp",
+      "type": "hf",
       "hidden_dim": 256,
       "dropout": 0.1,
-      "pooling": "cls"
+      "pooling": "mean",
+      "use_weighted_layer_sum": true,
+      "classifier_proj_size": 256
     }
   },
   "train": {

@@ -7,13 +7,13 @@ from typing import Any
 import torch
 
 from src.data.loaders import ClipBatch
-from src.models.model import AstModelOutput
+from src.models.outputs import RespiratoryModelOutput
 from src.utils.config import AnalysisOutputConfig
 
 
 def build_diagnostic_rows(
     batch: ClipBatch,
-    output: AstModelOutput,
+    output: RespiratoryModelOutput,
     *,
     probabilities: torch.Tensor,
     predicted_labels: torch.Tensor,
@@ -21,7 +21,11 @@ def build_diagnostic_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     logits = output.logits.detach().cpu()
-    embeddings = output.pooled_embedding.detach().cpu()
+    embeddings = (
+        output.pooled_embedding.detach().cpu()
+        if output.pooled_embedding is not None
+        else None
+    )
     probs = probabilities.detach().cpu()
 
     for index, audio_path in enumerate(batch.audio_paths):
@@ -47,6 +51,8 @@ def build_diagnostic_rows(
         if analysis.save_probabilities:
             row["probabilities"] = probability_payload
         if analysis.save_embeddings:
+            if embeddings is None:
+                raise ValueError("Model output does not include pooled embeddings")
             row["pooled_embedding"] = embeddings[index].tolist()
         if analysis.save_clip_metadata:
             row["label_name"] = batch.label_names[index]
