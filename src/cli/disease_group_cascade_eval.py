@@ -1168,7 +1168,7 @@ def build_stage_flow_figure(stage_flow: object) -> go.Figure:
 
 def parse_formats(raw: str) -> set[str]:
     formats = {item.strip() for item in raw.split(",") if item.strip()}
-    unsupported = formats - {"html", "png", "pdf"}
+    unsupported = formats - {"html", "png", "pdf", "json"}
     if unsupported:
         raise ValueError(f"Unsupported output formats: {sorted(unsupported)}")
     if not formats:
@@ -1200,7 +1200,7 @@ def main() -> None:
     parser.add_argument(
         "--formats",
         default="html,png,pdf",
-        help="Comma-separated output formats for Plotly figures: html,png,pdf",
+        help="Comma-separated output formats for Plotly figures: html,png,pdf,json",
     )
     args = parser.parse_args()
 

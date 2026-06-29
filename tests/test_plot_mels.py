@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import plotly.graph_objects as go
 import pytest
 import soundfile as sf
 import torch
+from src.plots.export import PlotlyExportMixin
 from src.cli.plot_mels import (
     FeatureMapPlotter,
     _parse_formats,
     _validate_cli_args,
 )
 from src.data.audio import AstFbankFeatureConfig, AudioPreprocessConfig
+
+
+class _PlotlyJsonWriter(PlotlyExportMixin):
+    pass
 
 
 def _sine_wave(
@@ -77,6 +83,19 @@ def _base_args(**overrides: object) -> argparse.Namespace:
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_plotly_export_mixin_writes_json(tmp_path: Path) -> None:
+    fig = go.Figure(data=go.Bar(x=["a"], y=[1]))
+    written = _PlotlyJsonWriter().write_outputs(
+        fig,
+        tmp_path / "figure",
+        formats={"json"},
+    )
+
+    assert written == [tmp_path / "figure.json"]
+    payload = json.loads((tmp_path / "figure.json").read_text(encoding="utf-8"))
+    assert payload["data"][0]["type"] == "bar"
 
 
 def test_plotter_collects_directory_inputs_recursively(tmp_path: Path) -> None:

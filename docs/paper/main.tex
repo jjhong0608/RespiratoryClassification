@@ -40,9 +40,11 @@ directory. The primary final labels are \texttt{Normal}, \texttt{Airway}, and
 as a binary overlay for cascade stage 1 and represents the union of
 \texttt{Airway} and \texttt{Lung\_Parenchymal}; it is not a fourth final label.
 
-Future revisions should report patient-level and clip-level counts, fold
-membership, test-set counts, annotation coverage, and any exclusion criteria
-after the dataset catalog has been regenerated and reviewed.
+The current held-out test set used for the partial L1 comparison contains 332
+clips: 205 \texttt{Normal}, 49 \texttt{Airway}, and 78
+\texttt{Lung\_Parenchymal}. Future revisions should report patient-level
+counts, fold membership, annotation coverage, and any exclusion criteria after
+the dataset catalog has been regenerated and reviewed.
 
 \section{Methods}
 
@@ -100,6 +102,83 @@ the partial L1 setting, only the final Whisper encoder block is trainable after
 pretrained checkpoint loading. Multi-class tasks use class logits with cross
 entropy.
 
+\subsection{Whisper Time-Token Attention Visualization}
+
+For model inspection, the repository includes a Whisper-specific attention
+visualization utility. Unlike AST attention visualization, the Whisper utility
+does not produce a two-dimensional time-frequency patch explanation. Whisper
+self-attention operates over encoder time tokens after the stride-2 audio
+convolution, so the visualization is interpreted as time-token attribution over
+the log-mel sequence. The default score,
+\texttt{last\_time\_attention\_head\_mean}, averages final-layer self-attention
+over attention heads and audio query time tokens. The alternative supported
+scores are \texttt{last\_time\_attention}, \texttt{time\_attention\_rollout},
+and \texttt{class\_gradient\_time\_attention}. The resulting token scores are
+mapped back to log-mel frame ranges and exported as a time curve, temporal
+overlay, top-span overlay, CSV file, and metadata JSON.
+
+\subsection{Qualitative Attention Analysis}
+
+For qualitative comparison between AST and Whisper, the repository can select
+held-out Airway clips at the \texttt{(fold, audio\_path)} level because each
+fold uses a different fold-selected direct checkpoint. One group contains
+clips for which the AST direct three-class checkpoint predicts
+\texttt{Airway} correctly while the Whisper direct three-class checkpoint
+predicts \texttt{Normal}. A matched shared-success group contains clips for
+which both direct checkpoints predict \texttt{Airway}. The selected clips are
+processed by the AST patch-attention visualizer and the Whisper time-token
+attention visualizer under separate output roots. This workflow is intended to
+support later case-level figure selection and should be interpreted as a
+qualitative inspection of model-specific decision evidence, not as an
+additional aggregate metric.
+The same inspection workflow has been generalized beyond Airway-only cases to
+three-class high-confidence case selection. For each reference model, AST or
+Whisper, the repository can select correctly classified and incorrectly
+classified direct predictions separately. Within each selection set, five
+unique audio files are chosen per true label
+\texttt{Normal}, \texttt{Airway}, and \texttt{Lung\_Parenchymal}. Ranking is
+based on the reference model's confidence in its own direct prediction, and if
+the same audio appears in multiple folds, the fold with the highest reference
+confidence is used as the representative case. The selected audio is then
+visualized with both AST patch attention and Whisper time-token attention using
+the fold-specific direct checkpoints. This produces balanced correct and
+high-confidence error review sets for qualitative comparison across all three
+disease groups.
+As a complementary descriptive analysis, the repository can project each
+model's top-10 attention regions onto the time axis and compute temporal
+overlap between the AST patch intervals and Whisper time-token intervals.
+Frequency is ignored for this analysis, overlapping intervals within each
+model are merged before computing durations, and Whisper intervals extending
+beyond the AST maximum feature time are treated as non-overlapping Whisper
+coverage. The current post-hoc summary reports low temporal overlap in both
+the AST-correct/Whisper-Normal group and the shared-success group, with mean
+temporal IoU values of 0.016 and 0.017, respectively, and median temporal IoU
+equal to 0.0 in both groups. These preliminary summaries suggest that the
+current top-attention time overlap alone does not explain the Airway success
+versus Normal-error split.
+
+\subsection{Auscultation-by-Diagnosis Accuracy Heatmaps}
+
+As an exploratory subgroup analysis, the repository can join the held-out
+prediction rows with the disease dataset catalog and compute accuracy by
+auscultation finding and diagnosis category. The analysis is performed
+separately for AST, Whisper, and ResNet50, and separately for direct and
+cascade predictions, producing six heatmaps. Rows correspond to
+\texttt{non-specific}, \texttt{crackle}, \texttt{rhonchi}, and
+\texttt{wheeze}. Columns correspond to \texttt{healthy},
+\texttt{lung cancer}, \texttt{lung nodule}, \texttt{pneumonia}, \texttt{IPF},
+\texttt{ILD except IPF}, \texttt{COPD}, and \texttt{asthma}. The figures add
+an annotation band above the diagnosis axis to indicate the corresponding
+disease group: \texttt{Normal}, \texttt{Lung Parenchymal}, or
+\texttt{Airway}. The band is aligned as a compact column-group header
+immediately above the heatmap grid. Each cell is computed from fold-level
+prediction rows and is annotated with both accuracy and the
+\texttt{correct/total} count. Therefore, the denominator reflects repeated
+fold-selected checkpoint predictions rather than unique audio clips. The
+disease-group band is display metadata rather than an aggregated calculation
+level. The resulting heatmaps should be interpreted as exploratory stratified
+performance summaries, not as independently powered clinical subgroup tests.
+
 \subsection{ResNet50 Pipeline}
 
 The ResNet50 implementation uses torchvision ResNet50 pretrained on ImageNet
@@ -126,16 +205,27 @@ backbone:
   \item Cascade stage 2: \texttt{Airway\_vs\_LungParenchymal}
 \end{itemize}
 
-For Whisper and ResNet50, the first comparison arm uses frozen encoders as the
-transfer-learning baseline. A second partial L1 arm uses the same tasks,
-splits, labels, and frontend policy, but unfreezes the final encoder block for
-Whisper or the final residual stage for ResNet50. These runs are stored under
-separate result roots so that frozen and partially fine-tuned checkpoints are
-not mixed during evaluation.
+Frozen Whisper and ResNet50 encoders provide transfer-learning baselines. The
+current held-out test comparison focuses on the partial L1 arm for AST,
+Whisper, and ResNet50. This arm uses the same tasks, splits, labels, and
+front-end policy, while unfreezing one encoder layer group: the final AST
+encoder layer, the final Whisper encoder block, or the final ResNet50 residual
+stage. These runs are stored under separate partial L1 result roots so that
+frozen and partially fine-tuned checkpoints are not mixed during evaluation.
 
 For the final held-out comparison, the same test clips should be evaluated by
 the direct model and the cascade. The cascade comparison should report both
 final-label performance and stage-specific routing outcomes.
+All generated checkpoints in the partial L1 result roots are evaluated on the
+held-out test set before selecting checkpoints for direct-versus-cascade
+comparison.
+The held-out partial L1 evaluation produced checkpoint-level metric files for
+all AST, Whisper, and ResNet50 direct and cascade checkpoints. The
+direct-versus-cascade comparison then selected the evaluated best-F1 checkpoint
+per fold for each direct, stage 1, and stage 2 task. Comparison reports include
+fold-level metrics, prediction-level routing records, confusion matrices, and
+cascade flow figures. The Plotly figures are exported in static, interactive,
+and serialized JSON forms to support manuscript figure review and regeneration.
 
 \section{Evaluation Metrics}
 
@@ -144,6 +234,82 @@ accuracy, F1 score, ROC AUC, PR AUC, brier score, and confusion matrix. For the
 three-class final disease-group task, macro-averaged metrics and per-class
 support should be emphasized. For cascade analysis, routing error categories
 should be reported alongside final-label confusion matrices.
+
+\section{Held-Out Test Results}
+
+Table~\ref{tab:partial-l1-comparison} summarizes the partial L1 held-out
+direct-versus-cascade comparison. The test manifest contains 332 clips. Because
+each of the five fold-selected checkpoint triplets is evaluated on the same
+test manifest, the comparison files contain 1660 prediction rows
+($332 \times 5$). Values are reported as mean $\pm$ standard deviation across
+the five folds. Higher values are better for all metrics except brier score,
+where lower values indicate better probability calibration.
+
+\begin{table}[htbp]
+\centering
+\caption{Partial L1 held-out direct-versus-cascade performance.}
+\label{tab:partial-l1-comparison}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrrr}
+\toprule
+Backbone & Strategy & Accuracy & Macro F1 & Balanced Acc. & ROC AUC & PR AUC & Brier \\
+\midrule
+AST & Direct
+  & 0.883 $\pm$ 0.007
+  & 0.859 $\pm$ 0.007
+  & 0.861 $\pm$ 0.016
+  & 0.965 $\pm$ 0.003
+  & 0.934 $\pm$ 0.005
+  & 0.208 $\pm$ 0.016 \\
+AST & Cascade
+  & 0.873 $\pm$ 0.008
+  & 0.840 $\pm$ 0.009
+  & 0.840 $\pm$ 0.012
+  & 0.960 $\pm$ 0.004
+  & 0.920 $\pm$ 0.008
+  & 0.207 $\pm$ 0.017 \\
+Whisper & Direct
+  & 0.701 $\pm$ 0.024
+  & 0.636 $\pm$ 0.014
+  & 0.651 $\pm$ 0.013
+  & 0.826 $\pm$ 0.006
+  & 0.688 $\pm$ 0.010
+  & 0.429 $\pm$ 0.024 \\
+Whisper & Cascade
+  & 0.706 $\pm$ 0.029
+  & 0.644 $\pm$ 0.024
+  & 0.669 $\pm$ 0.016
+  & 0.828 $\pm$ 0.013
+  & 0.683 $\pm$ 0.021
+  & 0.416 $\pm$ 0.020 \\
+ResNet50 & Direct
+  & 0.719 $\pm$ 0.014
+  & 0.634 $\pm$ 0.018
+  & 0.638 $\pm$ 0.022
+  & 0.776 $\pm$ 0.016
+  & 0.616 $\pm$ 0.025
+  & 0.456 $\pm$ 0.043 \\
+ResNet50 & Cascade
+  & 0.677 $\pm$ 0.034
+  & 0.596 $\pm$ 0.019
+  & 0.616 $\pm$ 0.019
+  & 0.772 $\pm$ 0.017
+  & 0.587 $\pm$ 0.034
+  & 0.460 $\pm$ 0.036 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The strongest partial L1 result is the AST direct three-class model, which
+achieves the highest macro F1, balanced accuracy, ROC AUC, and PR AUC among
+the evaluated strategies. AST and ResNet50 both favor the direct three-class
+formulation over the cascade, suggesting that the stage 1 gate can introduce
+routing errors that are not recovered by the stage 2 subtype classifier. In
+contrast, Whisper shows a small cascade advantage in accuracy, macro F1,
+balanced accuracy, ROC AUC, and brier score, although its PR AUC is slightly
+higher in the direct setting. These results indicate that the benefit of the
+cascade structure is backbone-dependent rather than uniformly superior.
 
 \section{Model Implementation Status}
 
@@ -159,29 +325,62 @@ while the cascade model encodes a clinically interpretable Normal-versus-
 Abnormal gate. The cascade can reduce the burden on the fine-grained disease
 classifier, but routing errors at stage 1 can block disease clips from stage 2
 or force true Normal clips into a disease subtype. These structural tradeoffs
-should guide both quantitative evaluation and qualitative error analysis.
+are visible in the partial L1 held-out comparison. Direct classification is the
+better choice for AST and ResNet50 under the current settings, whereas Whisper
+shows a modest benefit from the cascade. Future error analysis should therefore
+separate encoder capability from routing behavior by inspecting stage 1 false
+normal decisions, stage 1 false abnormal decisions, and stage 2 subtype
+confusions.
 
 \section{Reproducibility Notes}
 
 The repository currently stores configs for AST, Whisper, and ResNet50 direct
-three-class CV, cascade stage 1 CV, and cascade stage 2 CV. The AST direct
-direct and cascade configs write to an AST family result root while preserving
-the canonical task identifiers. Whisper and ResNet50 configs write under
-family-specific frozen-baseline result roots. Additional Whisper and ResNet50
-partial L1 configs write under separate partial L1 roots. Result directories
-are intentionally ignored by git, so final paper numbers should be regenerated
-from documented commands and archived separately when the experiments are
-finalized.
+three-class CV, cascade stage 1 CV, and cascade stage 2 CV. The AST configs
+write to an AST partial L1 result root while preserving the canonical task
+identifiers. Whisper and ResNet50 configs write under family-specific
+frozen-baseline result roots, and separate partial L1 configs write under
+partial L1 roots. Result directories are intentionally ignored by git, so final
+paper numbers should be regenerated from documented commands and archived
+separately when the experiments are finalized.
 Lightweight CV summary scripts may be used to audit evaluated folds before
 transferring final numbers into the manuscript. The preferred cascade config
 files are named by stage and task so the Normal-versus-Abnormal gate and
 Airway-versus-Lung Parenchymal subtype classifier are not confused during
 experiment execution.
-The AST direct three-class five-fold CV run is currently treated as an active
-experiment; numerical results should be inserted only after all folds complete
-and checkpoint evaluation outputs have been audited.
+The AST partial L1 result root was renamed to match the Whisper and ResNet50
+partial L1 naming scheme before held-out test evaluation.
 The ResNet50 direct-to-cascade five-fold CV queue was started on
-June 20, 2026. ResNet50 numerical results should likewise be inserted only
-after all folds complete and checkpoint evaluation outputs have been audited.
+June 20, 2026 for the frozen baseline result root. Frozen-baseline numerical
+results should remain separate from the partial L1 manuscript table.
+The Whisper and ResNet50 partial L1 direct-to-cascade five-fold CV queue was
+started on June 21, 2026 and completed on June 21, 2026.
+The partial L1 held-out test evaluation completed on June 22, 2026 and
+generated metric files for all 315 checkpoints across the three backbones and
+three disease-group tasks. The subsequent partial L1 direct-versus-cascade
+comparison reports are stored under
+\texttt{Disease\_Group\_Results/reports/cascade\_test\_comparison/} with
+separate subdirectories for \texttt{AST\_Partial\_L1},
+\texttt{Whisper\_Partial\_L1}, and \texttt{ResNet50\_Partial\_L1}. The current
+manuscript table uses those report summaries and does not directly include
+ignored result-directory figures.
+The qualitative Airway attention time-overlap report is stored under
+\texttt{Disease\_Group\_Results/reports/ast\_vs\_whisper\_airway\_attention\_overlap/}.
+It summarizes 204 fold-level cases from the AST-correct/Whisper-Normal and
+shared-success Airway comparison groups using top-10 temporal interval overlap
+metrics and Plotly HTML/JSON figures.
+The broader three-class high-confidence qualitative attention case report is
+stored under
+\texttt{Disease\_Group\_Results/reports/ast\_vs\_whisper\_3class\_attention\_cases/}.
+It selects unique audio files per true disease-group label for AST-correct,
+AST-wrong, Whisper-correct, and Whisper-wrong high-confidence direct
+predictions, then renders both AST and Whisper attention outputs for the same
+representative fold-level case.
+The auscultation-by-diagnosis accuracy heatmap report is stored under
+\texttt{Disease\_Group\_Results/reports/model\_accuracy\_by\_auscultation\_diagnosis\_heatmap/}.
+It contains six model/strategy heatmaps, row-level audit CSV output, and a
+summary CSV/JSON. The current run joins 9960 direct-plus-cascade fold-level
+prediction rows and summarizes 192 model-strategy-auscultation-diagnosis
+cells; ignored result-directory figures are not included directly in this
+manuscript draft.
 
 \end{document}

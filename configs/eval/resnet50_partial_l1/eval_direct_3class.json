@@ -1,0 +1,72 @@
+{
+  "experiment": {
+    "name": "resnet50_partial_l1_direct_3class_eval",
+    "task": "Normal_vs_Airway_vs_LungParenchymal",
+    "mode": "clip",
+    "seed": 1337,
+    "device": "mps",
+    "output_dir": "Disease_Group_Results/ResNet50_Partial_L1"
+  },
+  "checkpoint_path": "Disease_Group_Results/ResNet50_Partial_L1/Normal_vs_Airway_vs_LungParenchymal/fold_0/last.pt",
+  "data": {
+    "train_dirs": [],
+    "val_dirs": [],
+    "eval_dirs": [
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/test/"
+    ],
+    "label_to_index": {
+      "Normal": 0,
+      "Airway": 1,
+      "Lung_Parenchymal": 2
+    },
+    "batch_size": 4,
+    "num_workers": 0,
+    "audio": {
+      "sample_rate": 16000,
+      "clip_duration_sec": 15.0
+    },
+    "preprocessing": {
+      "feature_type": "resnet_spectrogram",
+      "source_type": "original",
+      "bandpass": {
+        "enabled": false,
+        "low_hz": 250.0,
+        "high_hz": 1000.0,
+        "q": 0.707
+      },
+      "resnet_spectrogram": {
+        "n_fft": 400,
+        "hop_length": 160,
+        "win_length": 400,
+        "n_mels": 128,
+        "f_min": 0.0,
+        "f_max": null,
+        "use_hpss": true,
+        "hpss_margin": 1.0,
+        "image_size": 224,
+        "image_mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "image_std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    }
+  },
+  "analysis": {
+    "outputs": {
+      "save_logits": true,
+      "save_probabilities": true,
+      "save_embeddings": false,
+      "save_clip_metadata": true
+    }
+  },
+  "threshold_optimization": {
+    "enabled": true,
+    "metric": "f1"
+  }
+}

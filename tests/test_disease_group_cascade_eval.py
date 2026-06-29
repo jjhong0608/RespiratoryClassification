@@ -10,6 +10,7 @@ from src.cli.disease_group_cascade_eval import (
     CascadeComparisonEvaluator,
     CheckpointSelector,
     compute_final_metrics,
+    parse_formats,
     summarize_fold_metrics,
 )
 
@@ -66,6 +67,15 @@ def test_checkpoint_selector_uses_optimized_f1_and_tie_breakers(
     assert selected.checkpoint_path.name == "best_f1_0.900000.pt"
     assert selected.optimized_f1 == 0.90
     assert selected.brier_score == 0.10
+
+
+def test_parse_formats_accepts_plotly_json() -> None:
+    assert parse_formats("html,png,pdf,json") == {"html", "png", "pdf", "json"}
+
+
+def test_parse_formats_rejects_unsupported_values() -> None:
+    with pytest.raises(ValueError, match="Unsupported output formats"):
+        parse_formats("html,jpg")
 
 
 @pytest.mark.parametrize(

@@ -245,6 +245,61 @@ def test_whisper_model_forward_binary_and_multiclass() -> None:
     assert multiclass_output.logits.shape == (2, 3)
 
 
+def test_whisper_encoder_optional_attentions_preserve_default_behavior() -> None:
+    model = RespiratoryWhisperModel(_small_whisper_model_cfg(num_classes=2))
+    x = torch.randn(2, 16, 20)
+
+    default_output = model.encoder(x, output_hidden_states=True)
+    attention_output = model.encoder(
+        x,
+        output_hidden_states=True,
+        output_attentions=True,
+    )
+
+    assert default_output.attentions is None
+    assert default_output.last_hidden_state.shape == (2, 10, 32)
+    assert attention_output.hidden_states is not None
+    assert attention_output.attentions is not None
+    assert len(attention_output.attentions) == 2
+    assert attention_output.attentions[-1].shape == (2, 4, 10, 10)
+
+
+def test_whisper_encoder_attentions_include_prefix_tokens() -> None:
+    model = RespiratoryWhisperModel(
+        WhisperModelConfig(
+            encoder=WhisperEncoderDims(
+                n_mels=16,
+                n_audio_ctx=10,
+                n_audio_state=32,
+                n_audio_head=4,
+                n_audio_layer=2,
+            ),
+            num_classes=2,
+            head_type="hf",
+            pooling="cls",
+            use_weighted_layer_sum=False,
+            classifier_proj_size=16,
+        )
+    )
+    x = torch.randn(2, 16, 20)
+    assert hasattr(model.classifier, "build_prefix_tokens")
+    prefix_tokens = model.classifier.build_prefix_tokens(
+        2,
+        device=x.device,
+        dtype=x.dtype,
+    )
+
+    output = model.encoder(
+        x,
+        output_attentions=True,
+        prefix_tokens=prefix_tokens,
+    )
+
+    assert output.attentions is not None
+    assert output.last_hidden_state.shape == (2, 11, 32)
+    assert output.attentions[-1].shape == (2, 4, 11, 11)
+
+
 def test_whisper_adaptation_scopes() -> None:
     frozen = RespiratoryWhisperModel(_small_whisper_model_cfg(num_classes=2))
     frozen_summary = apply_whisper_encoder_adaptation(

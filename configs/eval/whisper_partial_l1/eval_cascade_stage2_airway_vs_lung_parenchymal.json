@@ -1,0 +1,56 @@
+{
+  "experiment": {
+    "name": "whisper_partial_l1_cascade_stage2_eval",
+    "task": "Airway_vs_LungParenchymal",
+    "mode": "clip",
+    "seed": 1337,
+    "device": "mps",
+    "output_dir": "Disease_Group_Results/Whisper_Partial_L1"
+  },
+  "checkpoint_path": "Disease_Group_Results/Whisper_Partial_L1/Airway_vs_LungParenchymal/fold_0/last.pt",
+  "data": {
+    "train_dirs": [],
+    "val_dirs": [],
+    "eval_dirs": [
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/test/"
+    ],
+    "label_to_index": {
+      "Airway": 0,
+      "Lung_Parenchymal": 1
+    },
+    "batch_size": 4,
+    "num_workers": 0,
+    "audio": {
+      "sample_rate": 16000,
+      "clip_duration_sec": 30.0
+    },
+    "preprocessing": {
+      "feature_type": "log_mel",
+      "source_type": "original",
+      "bandpass": {
+        "enabled": false,
+        "low_hz": 250.0,
+        "high_hz": 1000.0,
+        "q": 0.707
+      },
+      "log_mel": {
+        "n_fft": 400,
+        "hop_length": 160,
+        "win_length": 400,
+        "n_mels": 80
+      }
+    }
+  },
+  "analysis": {
+    "outputs": {
+      "save_logits": true,
+      "save_probabilities": true,
+      "save_embeddings": false,
+      "save_clip_metadata": true
+    }
+  },
+  "threshold_optimization": {
+    "enabled": true,
+    "metric": "f1"
+  }
+}

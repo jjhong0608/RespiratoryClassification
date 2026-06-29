@@ -5,7 +5,7 @@
     "mode": "clip",
     "seed": 1337,
     "device": "mps",
-    "output_dir": "Disease_Group_Results/AST"
+    "output_dir": "Disease_Group_Results/AST_Partial_L1"
   },
   "data": {
     "train_dirs": [],

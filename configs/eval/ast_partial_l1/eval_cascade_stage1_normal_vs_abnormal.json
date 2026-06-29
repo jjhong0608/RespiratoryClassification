@@ -1,0 +1,57 @@
+{
+  "experiment": {
+    "name": "ast_partial_l1_cascade_stage1_eval",
+    "task": "Normal_vs_Abnormal",
+    "mode": "clip",
+    "seed": 1337,
+    "device": "mps",
+    "output_dir": "Disease_Group_Results/AST_Partial_L1"
+  },
+  "checkpoint_path": "Disease_Group_Results/AST_Partial_L1/Normal_vs_Abnormal/fold_0/last.pt",
+  "data": {
+    "train_dirs": [],
+    "val_dirs": [],
+    "eval_dirs": [
+      "/Users/jjhong0608/Documents/AudioData/RespiratoryClassification/DATA/DISEASE_CNUH_DATA/5_Folds/test/"
+    ],
+    "label_to_index": {
+      "Normal": 0,
+      "Abnormal": 1
+    },
+    "batch_size": 4,
+    "num_workers": 0,
+    "audio": {
+      "sample_rate": 16000,
+      "clip_duration_sec": 30.0
+    },
+    "preprocessing": {
+      "feature_type": "ast_fbank",
+      "source_type": "original",
+      "bandpass": {
+        "enabled": false,
+        "low_hz": 250.0,
+        "high_hz": 1000.0,
+        "q": 0.707
+      },
+      "ast_fbank": {
+        "num_mel_bins": 128,
+        "max_length": 1024,
+        "do_normalize": true,
+        "mean": -4.2677393,
+        "std": 4.5689974
+      }
+    }
+  },
+  "analysis": {
+    "outputs": {
+      "save_logits": true,
+      "save_probabilities": true,
+      "save_embeddings": false,
+      "save_clip_metadata": true
+    }
+  },
+  "threshold_optimization": {
+    "enabled": true,
+    "metric": "f1"
+  }
+}

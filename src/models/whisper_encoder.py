@@ -20,6 +20,7 @@ class WhisperEncoderDims:
 class AudioEncoderOutput:
     last_hidden_state: Tensor
     hidden_states: tuple[Tensor, ...] | None = None
+    attentions: tuple[Tensor, ...] | None = None
 
 
 class LayerNorm(nn.LayerNorm):
@@ -69,9 +70,17 @@ class MultiHeadAttention(nn.Module):
         q = self.query(x)
         k = self.key(x)
         v = self.value(x)
-        return self.out(self._qkv_attention(q, k, v))
+        attention_output, _ = self._qkv_attention(q, k, v)
+        return self.out(attention_output)
 
-    def _qkv_attention(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+    def forward_with_attention(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        q = self.query(x)
+        k = self.key(x)
+        v = self.value(x)
+        attention_output, attention = self._qkv_attention(q, k, v)
+        return self.out(attention_output), attention
+
+    def _qkv_attention(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
         n_batch, n_ctx, n_state = q.shape
         head_dim = n_state // self.n_head
         scale = head_dim**-0.5
@@ -83,7 +92,7 @@ class MultiHeadAttention(nn.Module):
         attn = (q * scale) @ (k * scale).transpose(-1, -2)
         attn = F.softmax(attn.float(), dim=-1).to(q.dtype)
         out = (attn @ v).transpose(1, 2).contiguous().view(n_batch, n_ctx, n_state)
-        return out
+        return out, attn
 
 
 class ResidualAttentionBlock(nn.Module):
@@ -101,6 +110,12 @@ class ResidualAttentionBlock(nn.Module):
         x = x + self.attn(self.attn_ln(x))
         x = x + self.mlp(self.mlp_ln(x))
         return x
+
+    def forward_with_attention(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        attention_output, attention = self.attn.forward_with_attention(self.attn_ln(x))
+        x = x + attention_output
+        x = x + self.mlp(self.mlp_ln(x))
+        return x, attention
 
 
 class AudioEncoder(nn.Module):
@@ -134,6 +149,7 @@ class AudioEncoder(nn.Module):
         x: Tensor,
         *,
         output_hidden_states: bool = False,
+        output_attentions: bool = False,
         prefix_tokens: Tensor | None = None,
     ) -> AudioEncoderOutput:
         x = F.gelu(self.conv1(x))
@@ -158,12 +174,23 @@ class AudioEncoder(nn.Module):
         hidden_states: list[Tensor] | None = None
         if output_hidden_states:
             hidden_states = [x]
-        for block in self.blocks:
-            x = block(x)
+        attentions: list[Tensor] | None = [] if output_attentions else None
+        for block_module in self.blocks:
+            if not isinstance(block_module, ResidualAttentionBlock):
+                raise TypeError("Whisper encoder blocks must be ResidualAttentionBlock")
+            block = block_module
+            if output_attentions:
+                x, attention = block.forward_with_attention(x)
+                if attentions is None:
+                    raise RuntimeError("Attention collection was not initialized")
+                attentions.append(attention)
+            else:
+                x = block(x)
             if hidden_states is not None:
                 hidden_states.append(x)
         x = self.ln_post(x)
         return AudioEncoderOutput(
             last_hidden_state=x,
             hidden_states=tuple(hidden_states) if hidden_states is not None else None,
+            attentions=tuple(attentions) if attentions is not None else None,
         )

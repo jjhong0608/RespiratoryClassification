@@ -26,6 +26,8 @@ class PlotlyExportMixin(LoggingMixin):
             out_path = output_base.with_suffix(f".{fmt}")
             if fmt == "html":
                 fig.write_html(out_path)
+            elif fmt == "json":
+                fig.write_json(out_path)
             elif fmt in {"png", "pdf"}:
                 fig.write_image(out_path)
             else:
